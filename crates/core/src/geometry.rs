@@ -32,6 +32,15 @@ impl Model {
         Ok(m)
     }
 
+    /// Hash determinístico → [-1, 1] (splitmix64), para jitter reprodutível.
+pub fn hash_unit(a: u64, b: u64, c: u64, d: u64) -> f64 {
+    let mut z = a.wrapping_mul(0x9E3779B97F4A7C15) ^ b.wrapping_mul(0xBF58476D1CE4E5B9) ^ c.wrapping_mul(0x94D049BB133111EB) ^ d.wrapping_mul(0xD6E8FEB86659FD93);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+}
+
     /// Modelo completo (pré-visualização e comparação).
     pub fn build_full(cfg: &Config) -> Result<Model, String> {
         let dx = cfg.dx;
@@ -71,7 +80,9 @@ impl Model {
                         } else {
                             y.abs() > ny as f64 * dx / 2.0 - 2.0 * dx || z.abs() > nz as f64 * dx / 2.0 - 2.0 * dx
                         };
-                        pos.push([x, y, z]);
+                        let jt = cfg.jitter * dx;
+                        let id = ((li as u64) << 40) | ((i as u64) << 20) | j as u64;
+                        pos.push([x + jt * Self::hash_unit(1, id, k as u64, 1), y + jt * Self::hash_unit(1, id, k as u64, 2), z + jt * Self::hash_unit(1, id, k as u64, 3)]);
                         part.push((n_proj + li) as u8);
                         fixed.push(cfg.clamp_edges && edge);
                     }
@@ -120,7 +131,9 @@ impl Model {
         let maxx = wp.iter().map(|p| p[0]).fold(f64::MIN, f64::max);
         let shift = -0.6 * dx - maxx;
         for (k, p) in wp.into_iter().enumerate() {
-            pos.push([p[0] + shift, p[1], p[2]]);
+            let jt = cfg.jitter * dx;
+            let kk = k as u64;
+            pos.push([p[0] + shift + jt * Self::hash_unit(99, kk, 0, 1), p[1] + jt * Self::hash_unit(99, kk, 0, 2), p[2] + jt * Self::hash_unit(99, kk, 0, 3)]);
             part.push(ploc[k].3);
             fixed.push(false);
         }

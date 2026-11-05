@@ -74,7 +74,25 @@ pub fn background(painter: &egui::Painter, rect: Rect, dark: bool) {
 }
 
 /// Desenha os nós em ordem de profundidade (longe → perto).
-pub fn render(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3]], idx: &[u32], shade: bool, light: Option<&dyn Fn(usize) -> f32>, color: &dyn Fn(usize) -> Color32) {
+/// Textura de um disco suave com leve gradiente esférico (para nós arredondados).
+pub fn disc_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let n = 48usize;
+    let mut px = Vec::with_capacity(n * n);
+    for y in 0..n {
+        for x in 0..n {
+            let (u, w) = ((x as f32 + 0.5) / n as f32 * 2.0 - 1.0, (y as f32 + 0.5) / n as f32 * 2.0 - 1.0);
+            let r = (u * u + w * w).sqrt();
+            let a = ((1.0 - r) / 0.18).clamp(0.0, 1.0); // borda suave
+            let hl = ((u + 0.30).powi(2) + (w + 0.30).powi(2)).sqrt(); // realce no canto superior esquerdo
+            let sh = (1.05 - 0.38 * hl).clamp(0.62, 1.0);
+            let g = (sh * 255.0) as u8;
+            px.push(Color32::from_rgba_unmultiplied(g, g, g, (a * 255.0) as u8));
+        }
+    }
+    ctx.load_texture("disc", egui::ColorImage { size: [n, n], source_size: egui::Vec2::new(n as f32, n as f32), pixels: px }, egui::TextureOptions::LINEAR)
+}
+
+pub fn render(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3]], idx: &[u32], shade: bool, light: Option<&dyn Fn(usize) -> f32>, round: Option<egui::TextureId>, color: &dyn Fn(usize) -> Color32) {
     let mut items: Vec<(f32, u32, Pos2)> = idx
         .iter()
         .map(|&i| {
@@ -84,9 +102,13 @@ pub fn render(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3]
         .collect();
     items.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     let (dmin, dmax) = items.first().map_or((0.0, 1.0), |f| (f.0, items.last().unwrap().0));
-    let half = (node_size * v.scale() * 0.62).max(0.6);
+    let half = (node_size * v.scale() * if round.is_some() { 0.74 } else { 0.62 }).max(0.6);
     let clip = v.rect.expand(half);
-    let mut mesh = egui::Mesh::default();
+    let mut mesh = match round {
+        Some(t) => egui::Mesh::with_texture(t),
+        None => egui::Mesh::default(),
+    };
+    let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
     mesh.reserve_vertices(items.len() * 4);
     for (d, i, p) in items {
         if !clip.contains(p) {
@@ -104,7 +126,11 @@ pub fn render(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3]
             let m = |ch: u8| ((ch as f32 * t).clamp(0.0, 255.0)) as u8;
             c = Color32::from_rgb(m(c.r()), m(c.g()), m(c.b()));
         }
-        mesh.add_colored_rect(Rect::from_center_size(p, Vec2::splat(half * 2.0)), c);
+        if round.is_some() {
+            mesh.add_rect_with_uv(Rect::from_center_size(p, Vec2::splat(half * 2.0)), uv, c);
+        } else {
+            mesh.add_colored_rect(Rect::from_center_size(p, Vec2::splat(half * 2.0)), c);
+        }
     }
     painter.with_clip_rect(v.rect).add(egui::Shape::mesh(mesh));
 }
@@ -145,4 +171,64 @@ pub fn input(ui: &egui::Ui, resp: &Response, cam: &mut Camera) {
         let z = ui.input(|i| i.zoom_delta());
         cam.zoom = (cam.zoom * z * (1.0 + s * 0.002)).clamp(0.2, 30.0);
     }
+}
+
+/// Contorno (silhueta) do projétil: mapa de ocupação em tela + profundidade do alvo, para que o
+/// contorno apareça só onde o projétil está visível e separa o projétil do alvo e do fundo.
+pub fn outline(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3]], idx: &[u32], is_proj: &dyn Fn(usize) -> bool, color: Color32) {
+    const CELL: f32 = 2.0; // pontos de tela por célula
+    let r = v.rect;
+    let (gw, gh) = (((r.width() / CELL).ceil() as usize).max(1), ((r.height() / CELL).ceil() as usize).max(1));
+    let radius = ((node_size * v.scale() * 0.74) / CELL).max(0.8);
+    let rc = radius.ceil() as i32;
+    let mut zt = vec![f32::NEG_INFINITY; gw * gh]; // profundidade do alvo mais próxima (maior = mais perto)
+    let mut proj: Vec<(i32, i32, f32)> = Vec::new();
+    for &i in idx {
+        let (p, d) = v.project(pos[i as usize]);
+        let (cx, cy) = (((p.x - r.left()) / CELL) as i32, ((p.y - r.top()) / CELL) as i32);
+        if is_proj(i as usize) {
+            proj.push((cx, cy, d));
+        } else {
+            for dy in -rc..=rc {
+                for dx in -rc..=rc {
+                    let (x, y) = (cx + dx, cy + dy);
+                    if x >= 0 && y >= 0 && (x as usize) < gw && (y as usize) < gh && (dx * dx + dy * dy) as f32 <= radius * radius + 0.5 {
+                        let z = &mut zt[y as usize * gw + x as usize];
+                        if d > *z {
+                            *z = d;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let eps = node_size * 0.5;
+    let mut occ = vec![false; gw * gh];
+    for (cx, cy, d) in proj {
+        for dy in -rc..=rc {
+            for dx in -rc..=rc {
+                let (x, y) = (cx + dx, cy + dy);
+                if x >= 0 && y >= 0 && (x as usize) < gw && (y as usize) < gh && (dx * dx + dy * dy) as f32 <= radius * radius + 0.5 {
+                    let k = y as usize * gw + x as usize;
+                    if d >= zt[k] - eps {
+                        occ[k] = true;
+                    }
+                }
+            }
+        }
+    }
+    let mut mesh = egui::Mesh::default();
+    for y in 0..gh {
+        for x in 0..gw {
+            if !occ[y * gw + x] {
+                continue;
+            }
+            let edge = x == 0 || y == 0 || x + 1 == gw || y + 1 == gh || !occ[y * gw + x - 1] || !occ[y * gw + x + 1] || !occ[(y - 1) * gw + x] || !occ[(y + 1) * gw + x];
+            if edge {
+                let tl = Pos2::new(r.left() + x as f32 * CELL, r.top() + y as f32 * CELL);
+                mesh.add_colored_rect(Rect::from_min_size(tl, Vec2::splat(CELL)), color);
+            }
+        }
+    }
+    painter.with_clip_rect(r).add(egui::Shape::mesh(mesh));
 }

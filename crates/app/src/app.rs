@@ -121,7 +121,7 @@ struct Preview {
     note: Option<String>,
 }
 
-type Key = (Design, [f64; 5], bool);
+type Key = (Design, [f64; 8], [bool; 2]);
 
 struct Snap {
     frames: Vec<Arc<Frame>>,
@@ -147,6 +147,13 @@ pub struct PenSim {
     ammo_scale: f64,
     show_side: bool,
     show_fps: bool,
+    /// esconde nós quase totalmente desligados (fragmentos soltos)
+    hide_loose: bool,
+    /// contorno escuro na silhueta do projétil
+    outline: bool,
+    /// desenha os nós como esferas suaves em vez de quadrados
+    round_nodes: bool,
+    disc_tex: Option<egui::TextureHandle>,
     /// margens extras (pt) somadas à área segura automática: [esq, topo, dir, base]
     extra_inset: [f32; 4],
     ws: Ws,
@@ -226,6 +233,10 @@ impl PenSim {
             ammo_scale: AMMO[ammo_idx].scale,
             show_side: true,
             show_fps: std::env::var("PENSIM_PROF").is_ok(),
+            hide_loose: false,
+            outline: true,
+            round_nodes: true,
+            disc_tex: Some(view3d::disc_texture(&cc.egui_ctx)),
             extra_inset: [0.0, 0.0, 0.0, 0.0],
             ws: Ws::Design,
             sel: Sel::Projectile,
@@ -296,7 +307,7 @@ impl PenSim {
 
     fn key(&self) -> Key {
         let c = &self.cfg;
-        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, c.time_factor], c.clamp_edges)
+        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, c.time_factor, c.noise, c.jitter, c.sleep_ratio], [c.clamp_edges, c.symmetry])
     }
 
     fn estimate_nodes(&self) -> f64 {
@@ -625,9 +636,9 @@ impl PenSim {
                         let (mut g, mut t, mut h, mut w) = (l.gap_before * 1e3, l.thickness * 1e3, l.height * 1e3, l.width * 1e3);
                         ui.label(format!("#{}", sel + 1));
                         ui.add_enabled(sel > 0, egui::DragValue::new(&mut g).prefix("folga ").suffix(" mm").speed(0.1).range(0.0..=80.0).fixed_decimals(1));
-                        ui.add(egui::DragValue::new(&mut t).prefix("esp. ").suffix(" mm").speed(0.1).range(1.0..=100.0).fixed_decimals(1));
-                        ui.add(egui::DragValue::new(&mut h).prefix("alt. ").suffix(" mm").speed(0.2).range(20.0..=200.0).fixed_decimals(0));
-                        ui.add_enabled(!l.round, egui::DragValue::new(&mut w).prefix("larg. ").suffix(" mm").speed(0.2).range(20.0..=200.0).fixed_decimals(0));
+                        ui.add(egui::DragValue::new(&mut t).prefix("esp. ").suffix(" mm").speed(0.1).range(1.0..=400.0).fixed_decimals(1));
+                        ui.add(egui::DragValue::new(&mut h).prefix("alt. ").suffix(" mm").speed(0.2).range(20.0..=500.0).fixed_decimals(0));
+                        ui.add_enabled(!l.round, egui::DragValue::new(&mut w).prefix("larg. ").suffix(" mm").speed(0.2).range(20.0..=500.0).fixed_decimals(0));
                         ui.checkbox(&mut l.round, "Disco");
                         l.gap_before = g / 1e3;
                         l.thickness = t / 1e3;
@@ -804,6 +815,15 @@ impl PenSim {
                 group(ui, "VISTA", |ui| {
                     if tbtn(ui, "◧", if self.section { "Corte\nligado" } else { "Corte\ndesl." }, self.section, true, 62.0).clicked() {
                         self.section = !self.section;
+                    }
+                    if tbtn(ui, "●", "Nós\nredondos", self.round_nodes, true, 62.0).clicked() {
+                        self.round_nodes = !self.round_nodes;
+                    }
+                    if tbtn(ui, "∴", "Ocultar\nsoltas", self.hide_loose, true, 62.0).clicked() {
+                        self.hide_loose = !self.hide_loose;
+                    }
+                    if tbtn(ui, "◌", "Contorno", self.outline, true, 62.0).clicked() {
+                        self.outline = !self.outline;
                     }
                 });
                 group(ui, "EXECUÇÃO", |ui| {
@@ -989,11 +1009,11 @@ impl PenSim {
                 let l: &mut Layer = &mut self.cfg.design.layers[i];
                 mat_combo(ui, "lm", &mut l.material);
                 let (mut t, mut g, mut w, mut h) = (l.thickness * 1e3, l.gap_before * 1e3, l.width * 1e3, l.height * 1e3);
-                ui.add(egui::Slider::new(&mut t, 1.0..=80.0).text("espessura mm"));
+                ui.add(egui::Slider::new(&mut t, 1.0..=400.0).logarithmic(true).text("espessura mm"));
                 ui.add(egui::Slider::new(&mut g, 0.0..=40.0).text("folga antes mm"));
-                ui.add(egui::Slider::new(&mut w, 20.0..=150.0).text(if l.round { "diâmetro mm" } else { "largura mm" }));
+                ui.add(egui::Slider::new(&mut w, 20.0..=500.0).logarithmic(true).text(if l.round { "diâmetro mm" } else { "largura mm" }));
                 if !l.round {
-                    ui.add(egui::Slider::new(&mut h, 20.0..=150.0).text("altura mm"));
+                    ui.add(egui::Slider::new(&mut h, 20.0..=500.0).logarithmic(true).text("altura mm"));
                 }
                 ui.checkbox(&mut l.round, "Seção circular (disco)");
                 l.thickness = t / 1e3;
@@ -1021,6 +1041,24 @@ impl PenSim {
                 ui.add(egui::Slider::new(&mut self.cfg.obliquity_deg, 0.0..=70.0).text("obliquidade °"));
                 ui.add(egui::Slider::new(&mut self.cfg.time_factor, 0.5..=3.0).text("tempo final ×"));
                 ui.checkbox(&mut self.cfg.clamp_edges, "Engastar bordas do alvo (apoio fixo)");
+                ui.separator();
+                ui.label(RichText::new("Realismo e velocidade").strong());
+                let mut noise = (self.cfg.noise * 100.0) as f32;
+                if ui.add(egui::Slider::new(&mut noise, 0.0..=40.0).text("ruído do material %")).on_hover_text("Variação aleatória da resistência/ruptura por ligação. 0 = material ideal (fratura 'perfeita').").changed() {
+                    self.cfg.noise = noise as f64 / 100.0;
+                }
+                let mut jit = (self.cfg.jitter * 100.0) as f32;
+                if ui.add(egui::Slider::new(&mut jit, 0.0..=15.0).text("jitter dos nós %")).on_hover_text("Perturba a posição dos nós (em % do espaçamento) para quebrar o padrão de malha regular.").changed() {
+                    self.cfg.jitter = jit as f64 / 100.0;
+                }
+                ui.checkbox(&mut self.cfg.symmetry, "Simetria (2–4× mais rápido)");
+                if self.cfg.symmetry {
+                    ui.weak("Com simetria, o padrão de fratura se repete espelhado nos quadrantes (o ruído varia dentro de cada um). Desligue para obter fraturas totalmente assimétricas, a um custo maior.");
+                }
+                let mut sl = (self.cfg.sleep_ratio * 100.0) as f32;
+                if ui.add(egui::Slider::new(&mut sl, 0.0..=8.0).text("região ativa %")).on_hover_text("Nós em repouso longe do impacto não são calculados até serem atingidos por ondas acima de X% da velocidade de impacto. 0 = calcula tudo. Acelera muito alvos grossos.").changed() {
+                    self.cfg.sleep_ratio = sl as f64 / 100.0;
+                }
                 ui.weak("Obliquidade no plano X–Z, medida a partir da normal da placa.");
             }
             Sel::Mesh => {
@@ -1314,6 +1352,7 @@ impl PenSim {
             self.cam.zoom = 1.0;
             self.cam.pan = Vec2::ZERO;
         }
+        let round_id = if self.round_nodes { self.disc_tex.as_ref().map(|t| t.id()) } else { None };
         let results = self.ws == Ws::Results && !snap.frames.is_empty() && (snap.done || self.live_view);
         let dx = self.cfg.dx as f32;
         let cut = 0.25 * dx;
@@ -1347,6 +1386,9 @@ impl PenSim {
                 for i in 0..n {
                     let ry = flip(snap.ref_pos[i], m)[1];
                     if self.section && !in_section(ry) {
+                        continue;
+                    }
+                    if self.hide_loose && f.damage[i] >= 0.9 {
                         continue;
                     }
                     if snap.surface[i] || (self.section && near_face(ry)) || f.damage[i] > 0.4 {
@@ -1399,18 +1441,30 @@ impl PenSim {
                 };
                 let (lo, hi) = (r.0, if r.1 > r.0 { r.1 } else { r.0 + 1.0 });
                 let bands = self.bands;
-                view3d::render(&painter, &view, dx, &ext_pos, &idx, false, Some(&light), &|i| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands));
+                view3d::render(&painter, &view, dx, &ext_pos, &idx, false, Some(&light), round_id, &|i| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands));
                 legend(&painter, rect, self.field, lo, hi);
+                if self.outline {
+                    let (parts, np) = (snap.parts.clone(), self.cfg.design.n_proj_parts() as u8);
+                    view3d::outline(&painter, &view, dx, &ext_pos, &idx, &|i| parts[i % n] < np, Color32::from_rgb(20, 24, 36));
+                }
             } else {
                 let parts = snap.parts.clone();
                 let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
-                view3d::render(&painter, &view, dx, &ext_pos, &idx, true, Some(&light), &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
+                view3d::render(&painter, &view, dx, &ext_pos, &idx, true, Some(&light), round_id, &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
+                if self.outline {
+                    let np = self.cfg.design.n_proj_parts() as u8;
+                    view3d::outline(&painter, &view, dx, &ext_pos, &idx, &|i| parts[i % n] < np, Color32::from_rgb(20, 24, 36));
+                }
             }
             painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, format!("t = {:.1} µs", f.time * 1e6), FontId::monospace(15.0), Color32::from_gray(30));
         } else {
             let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
             let idx: Vec<u32> = if self.section { p.idx.iter().cloned().filter(|&i| in_section(p.pos[i as usize][1])).collect() } else { p.idx.clone() };
-            view3d::render(&painter, &view, p.dx, &p.pos, &idx, true, None, &|i| mats[(p.part[i] as usize).min(mats.len() - 1)]);
+            view3d::render(&painter, &view, p.dx, &p.pos, &idx, true, None, round_id, &|i| mats[(p.part[i] as usize).min(mats.len() - 1)]);
+            if self.outline {
+                let np = self.cfg.design.n_proj_parts() as u8;
+                view3d::outline(&painter, &view, p.dx, &p.pos, &idx, &|i| p.part[i] < np, Color32::from_rgb(20, 24, 36));
+            }
             let label = p.note.clone().unwrap_or_else(|| format!("Modelo · {} nós", p.pos.len()));
             painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, label, FontId::proportional(13.0), Color32::from_gray(60));
         }

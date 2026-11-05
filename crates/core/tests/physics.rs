@@ -121,6 +121,8 @@ fn sym_vs_full(angle: f64) {
         let mut c = cfg(1000.0);
         c.obliquity_deg = angle;
         c.symmetry = sym;
+        c.noise = 0.0;
+        c.jitter = 0.0;
         c.n_frames = 8;
         let mut s = Sim::new(c).unwrap();
         s.run_to_end();

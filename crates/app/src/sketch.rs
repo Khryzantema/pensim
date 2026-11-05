@@ -391,7 +391,7 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
         false
     };
     let apply_y = |ls: &mut Vec<Layer>, i: usize, y: f64| -> bool {
-        let h = (2.0 * snapv(y)).clamp(20.0, 200.0) / 1e3;
+        let h = (2.0 * snapv(y)).clamp(20.0, 500.0) / 1e3;
         let mut ch = false;
         if (ls[i].height - h).abs() > 1e-9 {
             ls[i].height = h;

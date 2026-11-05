@@ -157,6 +157,13 @@ pub struct Config {
     pub n_frames: usize,
     /// simula só 1/2 (obliquidade ≠ 0) ou 1/4 (impacto normal) do modelo, com nós-fantasma
     pub symmetry: bool,
+    /// região ativa adaptativa: nós em repouso longe do impacto dormem até um vizinho passar de
+    /// `sleep_ratio × velocidade de impacto` (0 desliga)
+    pub sleep_ratio: f64,
+    /// heterogeneidade do material: variação (±) da resistência/ruptura por ligação (0 = ideal)
+    pub noise: f64,
+    /// perturbação aleatória da posição dos nós, em fração de dx (quebra a anisotropia da malha)
+    pub jitter: f64,
 }
 
 impl Default for Config {
@@ -215,6 +222,9 @@ impl Preset {
             time_factor: 1.0,
             n_frames: 100,
             symmetry: true,
+            sleep_ratio: 0.03,
+            noise: 0.15,
+            jitter: 0.05,
         }
     }
 }
@@ -272,7 +282,8 @@ impl Config {
     /// Tempo final automático [s].
     pub fn t_end(&self) -> f64 {
         let t_eff = self.target_thickness() / self.obliquity().cos().max(0.3);
-        (3.0 * (t_eff + self.design.projectile.length()) / self.velocity.max(1.0) * self.time_factor)
-            .clamp(40e-6, 3e-3)
+        // +35%: o projétil precisa sair bastante do alvo antes de a simulação terminar
+        (3.0 * 1.35 * (t_eff + self.design.projectile.length()) / self.velocity.max(1.0) * self.time_factor)
+            .clamp(54e-6, 4e-3)
     }
 }

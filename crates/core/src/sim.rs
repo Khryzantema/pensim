@@ -18,6 +18,8 @@ struct Bond {
     w: f32,
     sp: f32,
     acc: f32,
+    /// fator aleatório fixo da ligação (0..255 → −1..+1): heterogeneidade do material
+    rnd: u8,
 }
 
 /// Um nó por linha de cache (64 B): posição, amolecimento térmico, temperatura e velocidade.
@@ -130,6 +132,10 @@ pub struct Sim {
     n_proj: u8,
     /// nós calculados (reais); os demais em `p` são fantasmas espelhados
     n_real: usize,
+    /// nós acordados (calculados) e nós rápidos (velocidade acima do limiar)
+    awake: Vec<bool>,
+    /// velocidade-limiar de despertar [m/s] (0 = região ativa desligada)
+    sleep_v: f64,
     /// normais de superfície (apontando para fora) na configuração de referência; ~0 no interior
     normals: Vec<[f32; 3]>,
     /// planos de simetria (bit 1 = y, bit 2 = z)
@@ -301,6 +307,8 @@ impl Sim {
             fill: vec![],
             n_proj: model.n_proj,
             n_real,
+            awake: vec![true; n_real],
+            sleep_v: 0.0,
             normals: vec![[0.0; 3]; n_real],
             sym,
             src,
@@ -320,6 +328,13 @@ impl Sim {
         sim.locals = (0..nch).map(|_| vec![[0.0; 4]; n_real]).collect();
         sim.dt = sim.stable_dt();
         sim.ke0 = sim.kinetic(Some(true));
+        if sim.cfg.sleep_ratio > 0.0 {
+            // só o projétil começa acordado; a placa acorda onde recebe força (contato/ondas)
+            sim.sleep_v = sim.cfg.sleep_ratio * sim.cfg.velocity;
+            for i in 0..n_real {
+                sim.awake[i] = sim.part[i] < sim.n_proj;
+            }
+        }
         Ok(sim)
     }
 
@@ -488,7 +503,9 @@ impl Sim {
                                     // dono único: real–real com j > i; real–fantasma com i ≤ origem do fantasma
                                     let keep = if j < nr { j > i } else { i <= self.src[j - nr] as usize };
                                     if keep {
-                                        list.push(Bond { j: j as u32, ixi: (1.0 / xi) as f32, w: w as f32, sp: 0.0, acc: 0.0 });
+                                        let (ka, kb, kc) = if j < nr { (i as u64, j as u64, 0u64) } else { (i as u64, self.src[j - nr] as u64, self.gmask[j - nr] as u64 + 1) };
+                                        let rnd = (((crate::geometry::Model::hash_unit(7, ka, kb, kc) + 1.0) * 127.5).round() as i64).clamp(0, 255) as u8;
+                                        list.push(Bond { j: j as u32, ixi: (1.0 / xi) as f32, w: w as f32, sp: 0.0, acc: 0.0, rnd });
                                     }
                                 }
                             }
@@ -558,6 +575,11 @@ impl Sim {
             .sum()
     }
 
+    /// Nós acordados (fração calculada) — útil para diagnóstico.
+    pub fn awake_fraction(&self) -> f64 {
+        self.awake.iter().filter(|&&a| a).count() as f64 / self.n_real.max(1) as f64
+    }
+
     /// Atualiza os fantasmas a partir dos nós reais (posição, velocidade, temperatura espelhadas).
     fn sync_ghosts(&mut self) {
         if self.src.is_empty() {
@@ -608,6 +630,8 @@ impl Sim {
             let src = &self.src;
             let gmask = &self.gmask;
             let near = &self.near;
+            let awake = &self.awake;
+            let noise = self.cfg.noise;
             let cell_start = &self.cell_start;
             let cell_items = &self.cell_items;
             let cell_of = &self.cell_of;
@@ -626,6 +650,7 @@ impl Sim {
                         let i = base + ii;
                         let me = &p[i];
                         let fi = fixed[i];
+                        let ai = awake[i];
                         let b = part[i] as usize;
                         let mat = &mats[b];
                         let cvv = c_bond[b] * v2;
@@ -633,6 +658,8 @@ impl Sim {
                         let sy0 = mat.yield_strength / mat.young;
                         let hard = mat.hardening / mat.young;
                         let comp = mat.comp_factor;
+                        // materiais frágeis têm bem mais dispersão de resistência
+                        let nf = (noise * if comp >= 5.0 { 2.0 } else { 1.0 }).min(0.6);
                         let heat = TAYLOR_QUINNEY * 0.5 / (mat.rho * mat.cp * vol);
                         let (mut ax, mut ay, mut az, mut acc_t) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
                         for bd in bonds.iter_mut() {
@@ -642,6 +669,9 @@ impl Sim {
                             let j = bd.j as usize;
                             if fi && fixed[j] {
                                 continue;
+                            }
+                            if !ai && !awake[if j < nr { j } else { src[j - nr] as usize }] {
+                                continue; // as duas pontas dormem: deformação nula
                             }
                             // destino da reação: nó real j, ou (fantasma) o real de origem com força espelhada
                             let (tgt, sy, sz, wgt) = if j < nr {
@@ -658,13 +688,14 @@ impl Sim {
                             let s = r * ixi - 1.0;
                             let sp = bd.sp as f64;
                             let w = bd.w as f64;
-                            if s > fail {
+                            let u = bd.rnd as f64 * (1.0 / 127.5) - 1.0;
+                            if s > fail * (1.0 + nf * u) {
                                 let s_el = s - sp;
                                 tot.e_fr += wgt * 0.5 * cvv * s_el * s_el * w / ixi;
                                 bd.ixi = -1.0;
                                 continue;
                             }
-                            let sy_t = (sy0 + hard * bd.acc as f64) * (0.5 * (me.soft + q.soft));
+                            let sy_t = (sy0 + hard * bd.acc as f64) * (0.5 * (me.soft + q.soft)) * (1.0 + 0.3 * nf * u);
                             let mut s_el = s - sp;
                             let mut dtemp = 0.0;
                             if s_el > sy_t || s_el < -sy_t * comp {
@@ -708,7 +739,7 @@ impl Sim {
                             let id = ((qc[2] * g.n[1] + qc[1]) * g.n[0] + qc[0]) as usize;
                             for k in cell_start[id]..cell_start[id + 1] {
                                 let j = cell_items[k as usize] as usize;
-                                if j >= nr || (same_cell && j <= i) || (fi && fixed[j]) {
+                                if j >= nr || (same_cell && j <= i) || (fi && fixed[j]) || (!ai && !awake[j]) {
                                     continue;
                                 }
                                 let rc = if part[j] == part[i] { 0.8 * dx } else { 0.95 * dx };
@@ -746,6 +777,9 @@ impl Sim {
                                                 continue;
                                             }
                                             let org = src[j - nr] as usize;
+                                            if !ai && !awake[org] {
+                                                continue;
+                                            }
                                             if org < i {
                                                 continue; // o par espelhado é tratado a partir de `org`
                                             }
@@ -788,7 +822,8 @@ impl Sim {
             let fixed = &self.fixed;
             let mass = &self.mass;
             let mats = &self.mats;
-            self.p[..nr].par_iter_mut().enumerate().with_min_len(256).for_each(|(i, q)| {
+            let sleep_v = self.sleep_v;
+            self.p[..nr].par_iter_mut().zip(self.awake.par_iter_mut()).enumerate().with_min_len(256).for_each(|(i, (q, awake))| {
                 let mut f = [0.0f64; 4];
                 for l in locals {
                     let v = &l[i];
@@ -796,6 +831,15 @@ impl Sim {
                     f[1] += v[1];
                     f[2] += v[2];
                     f[3] += v[3];
+                }
+                if !*awake {
+                    // dormindo: acorda quando a força o aceleraria ao limiar de velocidade em ~10 passos
+                    let mm = mass[part[i] as usize];
+                    let fthr = sleep_v * mm / (10.0 * dt);
+                    if f[0] * f[0] + f[1] * f[1] + f[2] * f[2] <= fthr * fthr {
+                        return;
+                    }
+                    *awake = true;
                 }
                 q.temp += f[3];
                 let m = &mats[part[i] as usize];
@@ -859,7 +903,8 @@ impl Sim {
         let rebounded = front >= np && vm < 0.0;
         if perforated || rebounded {
             self.exit_found = true;
-            let tail = (0.2 * self.time).max(5e-6);
+            // cauda após a saída: +35% para o projétil se afastar bastante do alvo
+            let tail = 1.35 * (0.2 * self.time).max(5e-6);
             self.t_end = self.t_end.min(self.time + tail);
         }
     }
