@@ -75,6 +75,10 @@ enum Grab {
     FilletMid,
     FilletMidH,
     FilletMidV,
+    MultiH,
+    MultiV,
+    /// retângulo de seleção (canto inicial na tela)
+    BoxSel(Pos2),
 }
 
 /// Arredondamento de um canto: o canto `p` entre as linhas p–a e p–b vira uma curva de Bézier
@@ -134,11 +138,14 @@ pub struct DrawEditor {
     grab: Grab,
     /// posição do dedo e valor (u, v) no início do arraste
     g0: (Pos2, [f64; 2]),
+    /// seleção de vários pontos (Mover) e suas posições no início do arraste
+    pub multi: Vec<usize>,
+    m0: Vec<[f64; 2]>,
 }
 
 impl DrawEditor {
     pub fn new(paint: Paint, snap_mm: f64) -> Self {
-        DrawEditor { tool: DTool::Line, current: Some(0), selected: None, paint, undo: vec![], snap_mm, view: None, fit: true, msg: String::new(), fillet: None, grab: Grab::None, g0: (Pos2::ZERO, [0.0; 2]) }
+        DrawEditor { tool: DTool::Line, current: Some(0), selected: None, paint, undo: vec![], snap_mm, view: None, fit: true, msg: String::new(), fillet: None, grab: Grab::None, g0: (Pos2::ZERO, [0.0; 2]), multi: vec![], m0: vec![] }
     }
     pub fn push(&mut self, d: &Drawing) {
         self.undo.push(d.clone());
@@ -151,6 +158,7 @@ impl DrawEditor {
             *d = prev;
             self.current = None;
             self.selected = None;
+            self.multi.clear();
             true
         } else {
             false
@@ -516,6 +524,16 @@ pub fn triangulate(poly: &[[f64; 2]]) -> Vec<[usize; 3]> {
     out
 }
 
+fn centroid(d: &Drawing, ids: &[usize]) -> [f64; 2] {
+    let n = ids.len().max(1) as f64;
+    let (mut x, mut y) = (0.0, 0.0);
+    for &i in ids {
+        x += d.pts[i][0];
+        y += d.pts[i][1];
+    }
+    [x / n, y / n]
+}
+
 /// Setas de arraste horizontal e vertical, afastadas do ponto para o dedo não cobri-lo.
 fn gizmo(p: Pos2, rect: Rect) -> (Pos2, Pos2) {
     let hx = if p.x + 84.0 > rect.right() { -58.0 } else { 58.0 };
@@ -708,6 +726,10 @@ pub fn show(
             let gizmo_hit = ed.selected.filter(|&i| i < d.pts.len()).map_or(false, |i| {
                 let (h, v) = gizmo(to(d.pts[i][0], d.pts[i][1]), rect);
                 h.distance(p) < 24.0 || v.distance(p) < 24.0
+            }) || (ed.multi.len() >= 2 && {
+                let c = centroid(d, &ed.multi);
+                let (h, v) = gizmo(to(c[0], c[1]), rect);
+                h.distance(p) < 24.0 || v.distance(p) < 24.0
             });
             match ed.tool {
                 DTool::Line => match (hp, ed.current) {
@@ -750,8 +772,16 @@ pub fn show(
                     }
                 },
                 DTool::Move => {
-                    if hp.is_some() || !gizmo_hit {
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    if let (true, Some(i)) = (shift, hp) {
+                        if let Some(k) = ed.multi.iter().position(|&x| x == i) {
+                            ed.multi.remove(k);
+                        } else if i != 0 {
+                            ed.multi.push(i);
+                        }
+                    } else if hp.is_some() || !gizmo_hit {
                         ed.selected = hp;
+                        ed.multi.clear();
                     }
                 }
                 DTool::Split => {
@@ -801,6 +831,24 @@ pub fn show(
             }
         }
     }
+    // segurar sobre um ponto (Mover): entra/sai da seleção múltipla
+    if ed.tool == DTool::Move && resp.long_touched() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            if let Some(i) = hit_point(d, p).filter(|&i| i != 0) {
+                if ed.multi.is_empty() {
+                    if let Some(s0) = ed.selected.filter(|&s0| s0 != 0 && s0 != i) {
+                        ed.multi.push(s0);
+                    }
+                }
+                if let Some(k) = ed.multi.iter().position(|&x| x == i) {
+                    ed.multi.remove(k);
+                } else {
+                    ed.multi.push(i);
+                }
+                ed.selected = None;
+            }
+        }
+    }
     // alças do arredondamento e setas do ponto selecionado (posições na tela)
     let fh = ed.fillet.as_ref().filter(|f| f.p < d.pts.len() && f.a < d.pts.len() && f.b < d.pts.len()).map(|f| {
         let (s0, e0) = f.ends(d);
@@ -808,7 +856,15 @@ pub fn show(
         let (gh, gv) = gizmo(hq, rect);
         (to(s0[0], s0[1]), to(e0[0], e0[1]), hq, gh, gv)
     });
-    let sel = ed.selected.filter(|&i| i > 0 && i < d.pts.len() && matches!(ed.tool, DTool::Move | DTool::Point));
+    ed.multi.retain(|&i| i > 0 && i < d.pts.len());
+    let multi_on = ed.multi.len() >= 2 && ed.tool == DTool::Move;
+    let mg = if multi_on {
+        let c = centroid(d, &ed.multi);
+        Some(gizmo(to(c[0], c[1]), rect))
+    } else {
+        None
+    };
+    let sel = ed.selected.filter(|&i| i > 0 && i < d.pts.len() && matches!(ed.tool, DTool::Move | DTool::Point) && !multi_on);
     let pg = sel.map(|i| gizmo(to(d.pts[i][0], d.pts[i][1]), rect));
     if resp.drag_started() {
         if let Some(p) = resp.interact_pointer_pos() {
@@ -816,6 +872,15 @@ pub fn show(
             ed.grab = Grab::Pan;
             if let Some((hs, he, _hq, gh, gv)) = fh {
                 ed.grab = if near(gh) { Grab::FilletMidH } else if near(gv) { Grab::FilletMidV } else if near(hs) { Grab::FilletStart } else if near(he) { Grab::FilletEnd } else { Grab::Pan };
+            }
+            if ed.grab == Grab::Pan {
+                if let Some((gh, gv)) = mg {
+                    if near(gh) {
+                        ed.grab = Grab::MultiH;
+                    } else if near(gv) {
+                        ed.grab = Grab::MultiV;
+                    }
+                }
             }
             if ed.grab == Grab::Pan {
                 if let (Some(i), Some((gh, gv))) = (sel, pg) {
@@ -829,6 +894,19 @@ pub fn show(
             // pontos só se movem pelas setas (arrastar o ponto direto move a vista), para evitar acidentes
             if ed.grab == Grab::Pan && ed.tool == DTool::Move && hit_point(d, p) == Some(0) {
                 ed.msg = "O ponto de origem fica fixo.".into();
+            }
+            // segurar antes de arrastar (Mover): retângulo de seleção em vez de mover a vista
+            if ed.grab == Grab::Pan && ed.tool == DTool::Move {
+                let held = ui.input(|i| i.pointer.press_start_time().map_or(0.0, |t0| i.time - t0));
+                let shift = ui.input(|i| i.modifiers.shift);
+                if held > 0.35 || shift {
+                    let start = ui.input(|i| i.pointer.press_origin()).unwrap_or(p);
+                    ed.grab = Grab::BoxSel(start);
+                }
+            }
+            if matches!(ed.grab, Grab::MultiH | Grab::MultiV) {
+                ed.push(d);
+                ed.m0 = ed.multi.iter().map(|&i| d.pts[i]).collect();
             }
             let v0 = match ed.grab {
                 Grab::Point(i) | Grab::PointH(i) | Grab::PointV(i) => d.pts[i],
@@ -904,13 +982,42 @@ pub fn show(
                         }
                     }
                 }
-                Grab::None => {}
+                Grab::MultiH | Grab::MultiV => {
+                    let horiz = ed.grab == Grab::MultiH;
+                    for (k, &i) in ed.multi.iter().enumerate() {
+                        let q0 = ed.m0[k];
+                        let q = if horiz { [sn(q0[0] + du), q0[1]] } else { [q0[0], sn(q0[1] + dv).max(vmin)] };
+                        if d.pts[i] != q {
+                            d.pts[i] = q;
+                            changed = true;
+                        }
+                    }
+                }
+                Grab::BoxSel(_) | Grab::None => {}
             }
         }
     }
     if resp.drag_stopped() {
+        if let (Grab::BoxSel(a), Some(b)) = (ed.grab, resp.interact_pointer_pos().or(resp.hover_pos())) {
+            let r = Rect::from_two_pos(a, b);
+            let add = ui.input(|i| i.modifiers.shift);
+            if !add {
+                ed.multi.clear();
+            }
+            for (i, q) in d.pts.iter().enumerate() {
+                let sp = Pos2::new(c.x + (sx * (q[0] - cu) * s) as f32, c.y - ((q[1] - cv) * s) as f32);
+                if i != 0 && r.contains(sp) && !ed.multi.contains(&i) {
+                    ed.multi.push(i);
+                }
+            }
+            ed.selected = if ed.multi.len() == 1 { Some(ed.multi[0]) } else { None };
+            if ed.multi.len() == 1 {
+                ed.multi.clear();
+            }
+        }
         ed.grab = Grab::None;
     }
+    let boxsel = if let Grab::BoxSel(a) = ed.grab { resp.interact_pointer_pos().map(|b| Rect::from_two_pos(a, b)) } else { None };
     ed.view = Some([cu, cv, s]);
     let to = |u: f64, v: f64| Pos2::new(c.x + (sx * (u - cu) * s) as f32, c.y - ((v - cv) * s) as f32);
 
@@ -965,7 +1072,23 @@ pub fn show(
         let (gh, gv) = gizmo(hq, rect);
         draw_gizmo(&painter, hq, gh, gv, matches!(ed.grab, Grab::FilletMidH), matches!(ed.grab, Grab::FilletMidV));
     }
-    if let Some(i) = ed.selected.filter(|&i| i > 0 && i < d.pts.len() && matches!(ed.tool, DTool::Move | DTool::Point)) {
+    if let Some(r) = boxsel {
+        painter.rect_filled(r, 2.0, Color32::from_rgba_unmultiplied(0, 112, 192, 30));
+        painter.rect_stroke(r, 2.0, Stroke::new(1.5, Color32::from_rgb(0, 112, 192)), egui::StrokeKind::Inside);
+    }
+    for &i in &ed.multi {
+        if i < d.pts.len() {
+            let pp = to(d.pts[i][0], d.pts[i][1]);
+            painter.circle_stroke(pp, 11.0, Stroke::new(2.5, Color32::from_rgb(255, 140, 0)));
+        }
+    }
+    if ed.multi.len() >= 2 && ed.tool == DTool::Move {
+        let cc = centroid(d, &ed.multi);
+        let pp = to(cc[0], cc[1]);
+        painter.circle_filled(pp, 5.0, Color32::from_rgb(255, 140, 0));
+        let (gh, gv) = gizmo(pp, rect);
+        draw_gizmo(&painter, pp, gh, gv, ed.grab == Grab::MultiH, ed.grab == Grab::MultiV);
+    } else if let Some(i) = ed.selected.filter(|&i| i > 0 && i < d.pts.len() && matches!(ed.tool, DTool::Move | DTool::Point)) {
         let pp = to(d.pts[i][0], d.pts[i][1]);
         let (gh, gv) = gizmo(pp, rect);
         draw_gizmo(&painter, pp, gh, gv, matches!(ed.grab, Grab::PointH(_)), matches!(ed.grab, Grab::PointV(_)));
@@ -973,7 +1096,7 @@ pub fn show(
     let hint = match ed.tool {
         DTool::Line => "Desenhar: a linha sai do ponto com anel laranja (no começo, a origem vermelha). Toque na tela para criar o próximo ponto; toque num ponto existente para ligar até ele",
         DTool::Point => "Ponto: toque na tela para criar um ponto solto",
-        DTool::Move => "Mover: toque num ponto e arraste as setas (vermelha = horizontal, verde = vertical)",
+        DTool::Move => "Mover: toque num ponto e arraste as setas (vermelha = horizontal, verde = vertical). Vários pontos: segure e arraste para fazer um retângulo, ou segure sobre cada ponto",
         DTool::Split => "Dividir: toque numa linha para pôr um ponto no meio",
         DTool::Erase => "Apagar: toque num ponto ou numa linha",
         DTool::Bucket => "Balde: toque dentro de um contorno fechado para encher com o material",
@@ -1042,6 +1165,42 @@ pub fn show(
             }
         });
     });
+    // barra do arredondamento (logo acima da faixa de ferramentas)
+    if ed.fillet.is_some() {
+        egui::Area::new(egui::Id::new(("fillet_bar", mode == Mode::Projectile))).order(egui::Order::Foreground).fixed_pos(rect.left_bottom() + Vec2::new(6.0, -94.0)).show(&ctx, |ui| {
+            let (mut apply, mut cancel) = (false, false);
+            if let Some(f) = ed.fillet.as_mut() {
+                egui::Frame::NONE.fill(Color32::from_rgba_unmultiplied(255, 255, 255, 245)).stroke(Stroke::new(1.5, Color32::from_rgb(255, 140, 0))).corner_radius(12.0).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button(" − ").clicked() && f.n > 2 {
+                            f.n -= 1;
+                        }
+                        ui.label(RichText::new(format!("{} pontos", f.n)).size(13.0));
+                        if ui.button(" + ").clicked() && f.n < 40 {
+                            f.n += 1;
+                        }
+                        if ui.add(egui::Button::new(RichText::new("✓ Aplicar").strong().color(Color32::WHITE)).fill(Color32::from_rgb(0, 112, 192)).corner_radius(14.0).min_size(Vec2::new(90.0, 30.0))).clicked() {
+                            apply = true;
+                        }
+                        if ui.add(egui::Button::new("✕").corner_radius(14.0).min_size(Vec2::new(32.0, 30.0))).on_hover_text("Cancelar").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            }
+            if cancel {
+                ed.msg.clear();
+                ed.fillet = None;
+            }
+            if apply {
+                if let Some(f) = ed.fillet.take() {
+                    ed.push(d);
+                    d.apply_fillet(&f);
+                    changed = true;
+                }
+            }
+        });
+    }
     if let Some(i) = ed.selected.filter(|&i| i < d.pts.len()) {
         let q = d.pts[i];
         let txt = if mode == Mode::Projectile { format!("ponto {}: a = {:.1} mm · r = {:.1} mm", i, q[0], q[1]) } else { format!("ponto {}: x = {:.1} mm · z = {:.1} mm", i, q[0], q[1]) };

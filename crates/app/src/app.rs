@@ -962,6 +962,7 @@ impl PenSim {
             ui.add_space(2.0);
             ui.label(RichText::new(am.note).size(12.5).color(Color32::from_gray(90)));
         });
+        self.velocity_card(ui);
         card(ui, "Peças e materiais", |ui| {
             let mats = self.cfg.design.materials();
             ui.horizontal(|ui| {
@@ -1064,6 +1065,18 @@ impl PenSim {
         self.next_btn(ui, Ws::Target, "Próximo: alvo  →");
     }
 
+    fn velocity_card(&mut self, ui: &mut egui::Ui) {
+        card(ui, "Velocidade de impacto", |ui| {
+            ui.add(egui::Slider::new(&mut self.cfg.velocity, 50.0..=3000.0).suffix(" m/s").fixed_decimals(0).clamping(egui::SliderClamping::Never));
+            if self.pdraw.is_none() {
+                let vb = AMMO[self.ammo_idx].velocity;
+                if (self.cfg.velocity - vb).abs() > 0.5 && ui.small_button(format!("usar a de boca ({vb:.0} m/s)")).clicked() {
+                    self.cfg.velocity = vb;
+                }
+            }
+        });
+    }
+
     fn step_ammo_drawn(&mut self, ui: &mut egui::Ui) {
         card(ui, "Desenho do projétil", |ui| {
             ui.label(RichText::new("Desenhe metade do corte (acima do eixo). Feche cada contorno e encha com o balde: o contorno mais interno vale (ex.: contorno externo = camisa, interno = núcleo).").size(12.5).color(Color32::from_gray(90)));
@@ -1083,6 +1096,7 @@ impl PenSim {
                 ui.colored_label(WARN, "Ainda não há peça pintada: feche um contorno e use o balde.");
             }
         });
+        self.velocity_card(ui);
         ui.horizontal(|ui| {
             if ui.button("🗋 Recomeçar o desenho").clicked() {
                 if let Some(d) = self.pdraw.as_mut() {
@@ -1280,12 +1294,8 @@ impl PenSim {
 
     fn step_sim(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         card(ui, "Impacto", |ui| {
-            ui.add(egui::Slider::new(&mut self.cfg.velocity, 100.0..=3000.0).suffix(" m/s").text("velocidade").fixed_decimals(0));
-            let vb = AMMO[self.ammo_idx].velocity;
-            if (self.cfg.velocity - vb).abs() > 0.5 && ui.small_button(format!("usar a de boca ({vb:.0} m/s)")).clicked() {
-                self.cfg.velocity = vb;
-            }
-            ui.add(egui::Slider::new(&mut self.cfg.obliquity_deg, 0.0..=85.0).suffix(" °").text("ângulo do alvo").fixed_decimals(0));
+            kv(ui, "Velocidade (aba Munição)", format!("{:.0} m/s", self.cfg.velocity));
+            kv(ui, "Ângulo do alvo (aba Alvo)", format!("{:.0}°", self.cfg.obliquity_deg));
         });
         card(ui, "Qualidade", |ui| self.quality_section(ui));
         egui::CollapsingHeader::new(RichText::new("Avançado").strong()).id_salt("adv").show(ui, |ui| {
@@ -2089,8 +2099,16 @@ impl PenSim {
             painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, label, FontId::proportional(13.0), Color32::from_gray(60));
         }
         view3d::triad(&painter, &view);
-        if self.ws == Ws::Results && self.job.is_some() && !snap.done && snap.error.is_none() && !results {
-            self.progress_card(ui, &painter, rect, snap);
+        if self.ws == Ws::Results && self.job.is_some() && !snap.done && snap.error.is_none() {
+            // progresso discreto no topo (sem cobrir o 3D)
+            let p = snap.progress.clamp(0.0, 1.0) as f32;
+            let el = self.started_at.elapsed().as_secs_f64();
+            let eta = if p > 0.03 { format!(" · faltam ~{}", fmt_secs(el * (1.0 - p as f64) / p as f64)) } else { String::new() };
+            let bar = Rect::from_min_size(rect.left_top(), Vec2::new(rect.width(), 4.0));
+            painter.rect_filled(bar, 0.0, Color32::from_gray(220));
+            painter.rect_filled(Rect::from_min_size(bar.min, Vec2::new(bar.width() * p, 4.0)), 0.0, ACCENT);
+            painter.text(rect.left_top() + Vec2::new(10.0, 30.0), Align2::LEFT_TOP, format!("Calculando {:.0}%{eta}", p * 100.0), FontId::proportional(13.0), Color32::from_gray(50));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
 
         // ViewCube simplificado
