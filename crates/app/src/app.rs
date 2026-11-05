@@ -1461,7 +1461,7 @@ impl PenSim {
             match o.kind {
                 OutcomeKind::Perforation => ("Perfurou", BAD),
                 OutcomeKind::PartialPenetration => ("Ficou cravado", WARN),
-                OutcomeKind::Rejected => (if o.penetration <= 1e-9 { "Ricocheteou" } else { "Parou" }, GOOD),
+                OutcomeKind::Rejected => (if o.v_residual.abs() > 0.1 * v0 { "Ricocheteou" } else { "Rebateu / parou na frente" }, GOOD),
             }
         };
         let stat = |ui: &mut egui::Ui, k: &str, v: String| {

@@ -1342,7 +1342,12 @@ impl Sim {
         // ricochete: ainda na frente do alvo e sem contato há um tempo (a 80° vx pode continuar > 0)
         let grace = 0.25 * self.cfg.design.projectile.length() / self.cfg.velocity.max(1.0);
         let bounced = xcm < 0.0 && (vxm < 0.0 || self.time - self.last_touch > grace);
-        let outside = xcm > self.back_x || bounced;
+        // ricochete raspando: sem contato há um tempo e andando quase paralelo à placa (ou se
+        // afastando). Distingue da cauda de um dardo no túnel, que segue entrando (vx alto).
+        let nmf = n_main.max(1) as f64;
+        let speed = ((vx_main / nmf).powi(2) + (vy_main / nmf).powi(2) + (vz_main / nmf).powi(2)).sqrt();
+        let skim = !touching && self.had_contact && self.time - self.last_touch > grace && vxm < 0.3 * speed;
+        let outside = xcm > self.back_x || bounced || skim;
         // corpo inteiro fora do alvo (nó mais recuado depois da face traseira, ou o mais avançado antes
         // da frontal): o que ainda encosta nele é o tampão ejetado, não o alvo
         let len = self.cfg.design.projectile.length();
@@ -1605,9 +1610,11 @@ impl Sim {
         let exited = self.sep_time.is_some() && tip > self.back_x + 2.0 * self.cfg.dx && behind_frac > 0.1;
         let kind = if (behind_frac > 0.5 || exited) && v_res > 0.0 {
             OutcomeKind::Perforation
-        } else if behind_frac < 0.05 && (v_res < 0.0 || (self.sep_time.is_some() && tip < 0.5 * self.cfg.dx)) {
+        } else if behind_frac < 0.5 && (self.sep_time.is_some() || (v_res < 0.0 && behind_frac < 0.05)) {
+            // soltou-se do alvo sem atravessar: ricocheteou ou rebateu
             OutcomeKind::Rejected
         } else {
+            // terminou preso dentro do alvo
             OutcomeKind::PartialPenetration
         };
         let ke_p = self.kinetic(Some(true));
