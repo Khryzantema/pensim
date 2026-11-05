@@ -12,6 +12,7 @@ fn main() {
     if env("CORE", 1.0) < 0.5 { c.design.projectile.core = None; }
     c.n_frames = 20;
     c.obliquity_deg = env("A", 0.0);
+    c.state_based = env("OSB", 1.0) > 0.5;
     c.sleep_ratio = env("SLEEP", 0.03);
     c.symmetry = env("SYM", 1.0) > 0.5;
     c.noise = env("NOISE", 0.15);

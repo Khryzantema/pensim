@@ -188,6 +188,8 @@ pub struct Sim {
     gfac: f64,
     /// tempos acumulados [s]: grade, forças (ligações+contato), integração
     pub prof: [f64; 3],
+    /// tempo da passada prévia do state-based [s]
+    pub prof_p1: f64,
     exit_found: bool,
     /// estiramento médio das ligações de cada nó (≈ dilatação/3), do passo anterior
     sbar: Vec<f32>,
@@ -499,6 +501,7 @@ impl Sim {
             near,
             gfac,
             prof: [0.0; 3],
+            prof_p1: 0.0,
             exit_found: false,
             sbar: vec![0.0; n_real],
             osb: cfg.state_based,
@@ -564,7 +567,7 @@ impl Sim {
             sim.mvol = mv.iter().map(|&v| v as f32).collect();
             sim.mcur = sim.mvol.clone();
         }
-        sim.dt = sim.stable_dt() * if sim.osb { std::env::var("OSBDT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.8) } else { 1.0 };
+        sim.dt = sim.stable_dt() * if sim.osb { std::env::var("OSBDT").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) } else { 1.0 };
         sim.ke0 = sim.kinetic(Some(true));
         {
             let (mut sx, mut np) = (0.0, 0.0);
@@ -1025,6 +1028,7 @@ impl Sim {
         let nch = self.locals.len();
         let per = (nr + nch - 1) / nch;
         let all_awake = self.all_awake;
+        let tp1 = Instant::now();
         if self.osb {
             // state-based, passo 1 (estado ATUAL): por nó, as somas
             //   Sθ = Σ|ξ|e V, S1 = Σ(e−e_p)² V, S2 = Σ(e−e_p)|ξ| V, S3 = Σ|ξ|² V
@@ -1191,6 +1195,7 @@ impl Sim {
                 }
             });
         }
+        self.prof_p1 += tp1.elapsed().as_secs_f64();
         let tots: Vec<Tot> = {
             let p = &self.p;
             let part = &self.part;
@@ -1773,9 +1778,11 @@ impl Sim {
             let nm = n_main as f64;
             let sp = ((vx_main / nm).powi(2) + (vy_main / nm).powi(2) + (vz_main / nm).powi(2)).sqrt();
             let v0 = self.cfg.velocity.max(1.0);
-            if sp > 0.08 * v0 {
+            // parado: centro de massa lento OU quase sem energia cinética (projétil cravado vibrando)
+            let ke_low = self.kinetic(Some(true)) < 0.003 * self.ke0.max(1e-30);
+            if sp > 0.08 * v0 && !ke_low {
                 self.rest_since = None;
-            } else if sp < 0.04 * v0 {
+            } else if sp < 0.04 * v0 || ke_low {
                 let t0 = *self.rest_since.get_or_insert(self.time);
                 if self.time - t0 > (0.08 * self.time).max(0.04 * self.t_end) {
                     self.exit_found = true;
@@ -1816,6 +1823,12 @@ impl Sim {
         while !self.done() {
             self.advance_for(Duration::from_secs(3600));
         }
+    }
+
+    /// Encerra agora (o usuário decidiu parar): grava o quadro atual e fixa o fim neste instante.
+    pub fn finish_now(&mut self) {
+        self.capture();
+        self.t_end = self.time;
     }
 
     pub fn capture(&mut self) {

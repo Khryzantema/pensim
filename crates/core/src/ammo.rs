@@ -165,11 +165,23 @@ fn shell(s: Shell) -> Built {
         regions.push(reg("Para-brisa balístico", wsp.clone(), shrink(&wsp, wall), mat(s.ws_mat)));
     }
     if s.he_g > 0.0 {
-        // volume da carga (densidade ~1,65 g/cm³) num cilindro de raio he_r·D, perto da base
-        let rc = s.he_r * d;
-        let len = (s.he_g / 1.65 * 1000.0 / (std::f64::consts::PI * rc * rc)).max(0.2 * d);
-        let a1 = l - 0.40 * d;
-        regions.push(reg("Carga explosiva", cyl(a1 - len, a1, rc), vec![], mat(FILL)));
+        // câmara da carga como nos cortes de APHE: curta e larga, frente arredondada (ogiva),
+        // no terço traseiro; atrás dela a espoleta de base (corpo) e o traçante no fundo
+        let vol = s.he_g / 1.65 * 1000.0; // mm³ (densidade ~1,65 g/cm³)
+        let pi = std::f64::consts::PI;
+        let mut rc = s.he_r.max(0.16) * d;
+        // volume = cilindro (comprimento ≥ rc) + frente ogival (~½ do cilindro equivalente)
+        let vmin = pi * rc * rc * (rc + 0.6 * rc);
+        if vol < vmin {
+            rc *= (vol / vmin).cbrt();
+        }
+        let lo = 1.2 * rc;
+        let lc = ((vol - 0.5 * pi * rc * rc * lo) / (pi * rc * rc)).max(0.3 * rc);
+        let a1 = l - 0.45 * d; // fundo da câmara (espoleta de base atrás)
+        let a0 = a1 - lc - lo;
+        regions.push(reg("Carga explosiva", with(ogive(a0, lo, rc), &[[a1, rc]]), vec![], mat(FILL)));
+        // traçante no fundo da espoleta
+        regions.push(reg("Traçante", cyl(l - 0.16 * d, l, 0.07 * d), vec![], mat(FILL)));
     }
     // cinta de condução de cobre
     let (b0, b1) = (l - 0.72 * d, l - 0.58 * d);

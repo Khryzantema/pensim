@@ -30,6 +30,8 @@ pub struct Shared {
 pub struct Job {
     pub shared: Arc<Mutex<Shared>>,
     pub paused: Arc<AtomicBool>,
+    /// encerrar agora e mostrar o resultado com o que já foi calculado
+    pub finish: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -44,7 +46,8 @@ impl Job {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let paused = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
-        let (s, p, c) = (shared.clone(), paused.clone(), cancel.clone());
+        let finish = Arc::new(AtomicBool::new(false));
+        let (s, p, c, fin) = (shared.clone(), paused.clone(), cancel.clone(), finish.clone());
         std::thread::spawn(move || {
             let mut sim = match Sim::new(cfg) {
                 Ok(s) => s,
@@ -70,6 +73,24 @@ impl Job {
             }
             let mut wall = 0.0;
             while !c.load(Ordering::SeqCst) && !sim.done() {
+                if fin.load(Ordering::SeqCst) {
+                    // parar aqui: grava o quadro atual e encerra como se tivesse terminado
+                    sim.finish_now();
+                    let new: Vec<Arc<PackedFrame>> = sim.frames.drain(..).map(Arc::new).collect();
+                    let live = sim.outcome();
+                    let mut g = s.lock().unwrap();
+                    g.frames.extend(new);
+                    g.live = Some(live);
+                    g.steps = sim.step_count;
+                    g.sim_time = sim.time;
+                    g.progress = 1.0;
+                    g.wall = wall;
+                    g.t_end = sim.time;
+                    g.done = true;
+                    drop(g);
+                    ctx.request_repaint();
+                    break;
+                }
                 if p.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(20));
                     continue;
@@ -92,7 +113,7 @@ impl Job {
                 ctx.request_repaint();
             }
         });
-        Job { shared, paused, cancel }
+        Job { shared, paused, finish, cancel }
     }
 }
 

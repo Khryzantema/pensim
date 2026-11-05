@@ -155,7 +155,12 @@ pub fn show(ui: &mut egui::Ui, ed: &mut SketchEditor, profile: &mut Vec<[f64; 2]
         for g in &pr.regions {
             let col = match &g.fill {
                 pensim_core::Fill::Void => bg,
-                pensim_core::Fill::Body => cols.first().copied().unwrap_or(Color32::GRAY),
+                pensim_core::Fill::Body => {
+                    // mesma cor do corpo (que é desenhado translúcido sobre o fundo)
+                    let c = fill;
+                    let mix = |a: u8, b: u8| ((a as f32) * (170.0 / 255.0) + (b as f32) * (85.0 / 255.0)) as u8;
+                    Color32::from_rgb(mix(c.r(), bg.r()), mix(c.g(), bg.g()), mix(c.b(), bg.b()))
+                }
                 pensim_core::Fill::Mat(_) => {
                     next += 1;
                     cols.get(next - 1).copied().unwrap_or(Color32::GRAY)

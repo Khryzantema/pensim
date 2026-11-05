@@ -125,7 +125,7 @@ struct Preview {
     note: Option<String>,
 }
 
-type Key = (Design, [f64; 9], [bool; 2]);
+type Key = (Design, [f64; 9], [bool; 3]);
 
 /// Simulação aberta de um arquivo salvo.
 struct Loaded {
@@ -364,7 +364,7 @@ impl PenSim {
             section: true,
             range: [(0.0, 0.0); 7],
             view_idx: 0,
-            live_view: false,
+            live_view: true,
             autoplayed: false,
             playing: false,
             loop_play: false,
@@ -475,7 +475,7 @@ impl PenSim {
 
     fn key(&self) -> Key {
         let c = &self.cfg;
-        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, c.time_factor, c.noise, c.jitter, c.sleep_ratio, self.res_nodes], [c.clamp_edges, c.symmetry && c.state_based])
+        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, c.time_factor, c.noise, c.jitter, c.sleep_ratio, self.res_nodes], [c.clamp_edges, c.symmetry, c.state_based])
     }
 
     /// Escala interna (invisível): faz o diâmetro do projétil ter `res_nodes` nós na malha.
@@ -1421,7 +1421,13 @@ impl PenSim {
                     }
                     ui.checkbox(&mut self.live_view, "Ver ao vivo");
                 });
-                ui.weak("A reprodução começa sozinha quando terminar.");
+                if ui.add_sized([ui.available_width(), 36.0], egui::Button::new(RichText::new("■ Parar aqui e ver o resultado").strong()).corner_radius(8.0)).on_hover_text("Encerra o cálculo agora; o resultado usa o que já foi simulado").clicked() {
+                    if let Some(j) = &self.job {
+                        j.finish.store(true, Ordering::SeqCst);
+                        j.paused.store(false, Ordering::SeqCst);
+                    }
+                }
+                ui.weak("Ao vivo você acompanha a animação; pare quando achar que já viu o suficiente. A reprodução completa começa sozinha no fim.");
             });
         }
         if snap.live.is_some() {
@@ -2127,6 +2133,15 @@ impl PenSim {
             painter.rect_filled(bar, 0.0, Color32::from_gray(220));
             painter.rect_filled(Rect::from_min_size(bar.min, Vec2::new(bar.width() * p, 4.0)), 0.0, ACCENT);
             painter.text(rect.left_top() + Vec2::new(10.0, 30.0), Align2::LEFT_TOP, format!("Calculando {:.0}%{eta}", p * 100.0), FontId::proportional(13.0), Color32::from_gray(50));
+            let ctx3 = ui.ctx().clone();
+            egui::Area::new(egui::Id::new("stop_here")).order(egui::Order::Foreground).fixed_pos(rect.left_top() + Vec2::new(10.0, 50.0)).show(&ctx3, |ui| {
+                if ui.add(egui::Button::new(RichText::new("■ Parar aqui").strong()).corner_radius(14.0)).on_hover_text("Encerra o cálculo agora e mostra o resultado").clicked() {
+                    if let Some(j) = &self.job {
+                        j.finish.store(true, Ordering::SeqCst);
+                        j.paused.store(false, Ordering::SeqCst);
+                    }
+                }
+            });
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
 

@@ -7,6 +7,7 @@ fn main() {
     c.design.layers[0].thickness = env("PLATE", 300.0) * 1e-3 * s;
     c.dx = env("DX", 1.0) * 1e-3;
     c.n_frames = 30;
+    c.state_based = env("OSB", 1.0) > 0.5;
     c.sleep_ratio = env("SLEEP", c.sleep_ratio);
     let mut sim = Sim::new(c).unwrap();
     println!("nós {} dt={:.3e}", sim.n(), sim.dt);
@@ -22,6 +23,6 @@ fn main() {
     let k = sim.step_count;
     println!("t_end={:.1}µs sep={:?} {:?}", sim.t_end()*1e6, sim.separation_time().map(|t| t*1e6), sim.outcome().kind);
     let o = sim.outcome(); println!("v_res={:.0} pen={:.1}mm abs={:.0}% err={:.2}%", o.v_residual, o.penetration*1e3, o.energy_absorbed_pct, o.energy_error_pct);
-    println!("fases ms/passo: grade {:.2} forças {:.2} integração {:.2}", 1e3*sim.prof[0]/sim.step_count as f64, 1e3*sim.prof[1]/sim.step_count as f64, 1e3*sim.prof[2]/sim.step_count as f64);
+    println!("fases ms/passo: grade {:.2} forças {:.2} (passo1 {:.2}) integração {:.2}", 1e3*sim.prof[0]/sim.step_count as f64, 1e3*sim.prof[1]/sim.step_count as f64, 1e3*sim.prof_p1/sim.step_count as f64, 1e3*sim.prof[2]/sim.step_count as f64);
     println!("total {:.1}s passos {k}", t0.elapsed().as_secs_f64());
 }
