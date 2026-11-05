@@ -7,6 +7,7 @@ use pensim_core::{Config, Design, Frame, Layer, Model, Nose, Outcome, OutcomeKin
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+const RES_PRESETS: [(&str, f64); 5] = [("Rascunho", 0.0025), ("Rápida", 0.002), ("Média", 0.0015), ("Fina", 0.001), ("Muito fina", 0.0008)];
 const ACCENT: Color32 = Color32::from_rgb(0, 112, 192);
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -74,6 +75,7 @@ impl Field {
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Ws {
     Design,
+    Resolution,
     Sim,
     Results,
 }
@@ -358,7 +360,7 @@ fn group(ui: &mut egui::Ui, name: &str, add: impl FnOnce(&mut egui::Ui)) {
 impl PenSim {
     fn ribbon(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, snap: &Snap) {
         ui.horizontal(|ui| {
-            for (w, l) in [(Ws::Design, "PROJETO"), (Ws::Sim, "SIMULAÇÃO"), (Ws::Results, "RESULTADOS")] {
+            for (w, l) in [(Ws::Design, "PROJETO"), (Ws::Resolution, "RESOLUÇÃO"), (Ws::Sim, "SIMULAÇÃO"), (Ws::Results, "RESULTADOS")] {
                 if ui.selectable_label(self.ws == w, RichText::new(l).strong()).clicked() {
                     self.ws = w;
                     if w != Ws::Design {
@@ -431,6 +433,27 @@ impl PenSim {
                             });
                         });
                     }
+                }
+                Ws::Resolution => {
+                    group(ui, "PREDEFINIÇÕES", |ui| {
+                        for (l, dx) in RES_PRESETS {
+                            let on = (self.cfg.dx - dx).abs() < 1e-9;
+                            if ui.add(egui::Button::new(RichText::new(format!("{:.1} mm\n{l}", dx * 1e3)).size(12.0)).min_size(Vec2::new(70.0, 48.0)).selected(on)).clicked() {
+                                self.cfg.dx = dx;
+                            }
+                        }
+                    });
+                    group(ui, "AJUSTE FINO", |ui| {
+                        let mut mm = self.cfg.dx * 1e3;
+                        if ui.add(egui::DragValue::new(&mut mm).range(0.6..=3.0).speed(0.02).suffix(" mm").fixed_decimals(2)).changed() {
+                            self.cfg.dx = mm / 1e3;
+                        }
+                    });
+                    group(ui, "EXECUTAR", |ui| {
+                        if rbtn(ui, "▶", "Simular").clicked() {
+                            self.start(ctx);
+                        }
+                    });
                 }
                 Ws::Sim => {
                     group(ui, "IMPACTO", |ui| {
@@ -540,6 +563,10 @@ impl PenSim {
             }
             return;
         }
+        if self.ws == Ws::Resolution {
+            self.resolution_panel(ui, ctx);
+            return;
+        }
         ui.label(RichText::new("PROPRIEDADES").small().weak());
         match self.sel {
             Sel::Sketch => {
@@ -615,22 +642,8 @@ impl PenSim {
                 ui.weak("Obliquidade no plano X–Z, medida a partir da normal da placa.");
             }
             Sel::Mesh => {
-                ui.heading("Malha");
-                ui.label("Espaçamento entre nós:");
-                ui.horizontal_wrapped(|ui| {
-                    for (l, dx) in [("2,0 mm rápida", 0.002), ("1,5 mm média", 0.0015), ("1,0 mm fina", 0.001), ("0,8 mm muito fina", 0.0008)] {
-                        ui.selectable_value(&mut self.cfg.dx, dx, l);
-                    }
-                });
-                ui.label("Horizonte (× espaçamento):");
-                ui.horizontal(|ui| {
-                    for h in [2.0, 2.5, 3.0] {
-                        ui.selectable_value(&mut self.cfg.horizon_m, h, format!("{h}"));
-                    }
-                });
-                let n = self.estimate_nodes();
-                ui.label(format!("≈ {:.0} nós · ≈ {:.0} MB", n, n * (self.cfg.horizon_m.powi(3) * 4.19) * 0.5 * 28.0 * 2.0 / 1e6));
-                ui.weak("Mais fino = mais fiel e bem mais lento (custo ∝ nós × passos).");
+                self.resolution_panel(ui, ctx);
+                return;
             }
         }
         if self.ws != Ws::Design || !matches!(self.sel, Sel::Sketch) {
@@ -642,6 +655,83 @@ impl PenSim {
             if stale && self.started_key.is_some() {
                 ui.colored_label(Color32::from_rgb(190, 120, 0), "Modelo alterado desde a última simulação.");
             }
+        }
+    }
+
+    fn resolution_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Resolução da simulação");
+        ui.label("Quanto menor o espaçamento entre nós, mais fiel é a fratura e a geometria do projétil, mas o custo cresce rápido.");
+        ui.add_space(4.0);
+        ui.label("Predefinições:");
+        ui.horizontal_wrapped(|ui| {
+            for (l, dx) in RES_PRESETS {
+                ui.selectable_value(&mut self.cfg.dx, dx, format!("{l} · {:.1} mm", dx * 1e3));
+            }
+        });
+        let mut mm = self.cfg.dx * 1e3;
+        if ui.add(egui::Slider::new(&mut mm, 0.6..=3.0).logarithmic(true).text("espaçamento mm")).changed() {
+            self.cfg.dx = mm / 1e3;
+        }
+        ui.label("Horizonte (× espaçamento): 2 = rápido · 3 = mais preciso");
+        ui.horizontal(|ui| {
+            for h in [2.0, 2.5, 3.0] {
+                ui.selectable_value(&mut self.cfg.horizon_m, h, format!("{h}"));
+            }
+        });
+        ui.add(egui::Slider::new(&mut self.cfg.n_frames, 16..=120).text("quadros gravados"));
+        ui.separator();
+
+        let n = self.estimate_nodes();
+        let bonds = 4.19 * self.cfg.horizon_m.powi(3);
+        let mem_bonds = n * bonds * 28.0 / 1e6;
+        let mem_frames = n * 36.0 * self.cfg.n_frames as f64 / 1e6;
+        let mem = mem_bonds + mem_frames;
+        let base = Preset::Rifle762.config();
+        let base_n = 30000.0_f64;
+        let rel = (n / base_n) * (self.cfg.horizon_m / base.horizon_m).powi(3) * (base.dx / self.cfg.dx);
+        let d = self.cfg.design.projectile.max_radius() * 2.0;
+        let thin = self.cfg.design.layers.iter().map(|l| l.thickness).fold(f64::MAX, f64::min);
+        let across_d = d / self.cfg.dx;
+        let across_t = thin / self.cfg.dx;
+        egui::Grid::new("resgrid").num_columns(2).striped(true).show(ui, |ui| {
+            ui.label("Nós estimados");
+            ui.label(format!("≈ {:.0}", n));
+            ui.end_row();
+            ui.label("Ligações por nó");
+            ui.label(format!("≈ {:.0}", bonds));
+            ui.end_row();
+            ui.label("Memória estimada");
+            ui.label(format!("≈ {:.0} MB", mem));
+            ui.end_row();
+            ui.label("Nós no diâmetro do projétil");
+            ui.label(format!("{:.1}", across_d));
+            ui.end_row();
+            ui.label("Nós na camada mais fina");
+            ui.label(format!("{:.1}", across_t));
+            ui.end_row();
+            ui.label("Custo relativo");
+            ui.label(format!("× {:.1} (vs. padrão ≈ 1,0)", rel));
+            ui.end_row();
+        });
+        let warn = Color32::from_rgb(190, 120, 0);
+        let bad = Color32::from_rgb(200, 50, 40);
+        if across_d < 4.0 {
+            ui.colored_label(warn, "Projétil com menos de 4 nós de diâmetro: geometria grosseira. Reduza o espaçamento.");
+        }
+        if across_t < 3.0 {
+            ui.colored_label(warn, "Camada com menos de 3 nós de espessura: perfuração pouco confiável.");
+        }
+        if mem > 1500.0 || n > 120_000.0 {
+            ui.colored_label(bad, "Muito pesado para celular: provável falta de memória ou fechamento do app.");
+        } else if mem > 600.0 || n > 50_000.0 {
+            ui.colored_label(warn, "Pesado para celular: a simulação pode levar vários minutos.");
+        } else {
+            ui.colored_label(Color32::from_rgb(30, 140, 80), "Adequado para celular.");
+        }
+        ui.weak("O viewport mostra a malha atual: ajuste e veja os nós mudarem antes de simular.");
+        ui.separator();
+        if ui.add_sized([ui.available_width(), 42.0], egui::Button::new(RichText::new("▶ Simular com esta resolução").strong().color(Color32::WHITE)).fill(ACCENT)).clicked() {
+            self.start(ctx);
         }
     }
 
