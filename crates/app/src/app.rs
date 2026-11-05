@@ -694,7 +694,11 @@ impl PenSim {
             self.sheet_tab = 1;
         }
         self.sync_drawings();
-        self.refresh_preview();
+        // a malha 3D da prévia só é montada quando aparece (montar a cada mudança do desenho travava a edição)
+        let need3d = matches!(self.ws, Ws::Sim | Ws::Resolution | Ws::Results) || self.peek3d;
+        if need3d {
+            self.refresh_preview();
+        }
         // painel de propriedades acompanha a aba: PROJÉTIL → projétil, ALVO → camada selecionada
         match self.ws {
             Ws::Projectile => {
