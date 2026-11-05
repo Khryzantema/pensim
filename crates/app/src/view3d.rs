@@ -173,14 +173,16 @@ pub fn input(ui: &egui::Ui, resp: &Response, cam: &mut Camera) {
     }
 }
 
-/// Contorno (silhueta) do projétil: mapa de ocupação em tela + profundidade do alvo, para que o
-/// contorno apareça só onde o projétil está visível e separa o projétil do alvo e do fundo.
+/// Contorno externo (1 px) das partículas do projétil: mapa de ocupação em tela + profundidade do
+/// alvo. O traço envolve cada partícula/silhueta sem cobrir sua cor, aparece só onde o projétil
+/// está visível (não sobre o alvo que o encobre) e separa o projétil do alvo e do fundo.
 pub fn outline(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3]], idx: &[u32], is_proj: &dyn Fn(usize) -> bool, color: Color32) {
-    const CELL: f32 = 2.0; // pontos de tela por célula
+    const CELL: f32 = 1.0; // pontos de tela por célula
     let r = v.rect;
-    let (gw, gh) = (((r.width() / CELL).ceil() as usize).max(1), ((r.height() / CELL).ceil() as usize).max(1));
-    let radius = ((node_size * v.scale() * 0.74) / CELL).max(0.8);
+    let (gw, gh) = (((r.width() / CELL).ceil() as usize).max(3), ((r.height() / CELL).ceil() as usize).max(3));
+    let radius = ((node_size * v.scale() * 0.74) / CELL).max(1.0);
     let rc = radius.ceil() as i32;
+    let r2 = radius * radius + 0.5;
     let mut zt = vec![f32::NEG_INFINITY; gw * gh]; // profundidade do alvo mais próxima (maior = mais perto)
     let mut proj: Vec<(i32, i32, f32)> = Vec::new();
     for &i in idx {
@@ -192,7 +194,7 @@ pub fn outline(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3
             for dy in -rc..=rc {
                 for dx in -rc..=rc {
                     let (x, y) = (cx + dx, cy + dy);
-                    if x >= 0 && y >= 0 && (x as usize) < gw && (y as usize) < gh && (dx * dx + dy * dy) as f32 <= radius * radius + 0.5 {
+                    if x >= 0 && y >= 0 && (x as usize) < gw && (y as usize) < gh && (dx * dx + dy * dy) as f32 <= r2 {
                         let z = &mut zt[y as usize * gw + x as usize];
                         if d > *z {
                             *z = d;
@@ -203,28 +205,36 @@ pub fn outline(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3
         }
     }
     let eps = node_size * 0.5;
-    let mut occ = vec![false; gw * gh];
+    let mut zp = vec![f32::NEG_INFINITY; gw * gh]; // profundidade do projétil visível (NEG_INFINITY = vazio)
     for (cx, cy, d) in proj {
         for dy in -rc..=rc {
             for dx in -rc..=rc {
                 let (x, y) = (cx + dx, cy + dy);
-                if x >= 0 && y >= 0 && (x as usize) < gw && (y as usize) < gh && (dx * dx + dy * dy) as f32 <= radius * radius + 0.5 {
+                if x >= 0 && y >= 0 && (x as usize) < gw && (y as usize) < gh && (dx * dx + dy * dy) as f32 <= r2 {
                     let k = y as usize * gw + x as usize;
-                    if d >= zt[k] - eps {
-                        occ[k] = true;
+                    if d >= zt[k] - eps && d > zp[k] {
+                        zp[k] = d;
                     }
                 }
             }
         }
     }
+    // anel externo: célula vazia vizinha (4-conexa) de célula ocupada; some onde o alvo está na frente
     let mut mesh = egui::Mesh::default();
-    for y in 0..gh {
-        for x in 0..gw {
-            if !occ[y * gw + x] {
+    let occ = |k: usize| zp[k] > f32::NEG_INFINITY;
+    for y in 1..gh - 1 {
+        for x in 1..gw - 1 {
+            let k = y * gw + x;
+            if occ(k) {
                 continue;
             }
-            let edge = x == 0 || y == 0 || x + 1 == gw || y + 1 == gh || !occ[y * gw + x - 1] || !occ[y * gw + x + 1] || !occ[(y - 1) * gw + x] || !occ[(y + 1) * gw + x];
-            if edge {
+            let mut zn = f32::NEG_INFINITY;
+            for kk in [k - 1, k + 1, k - gw, k + gw] {
+                if occ(kk) && zp[kk] > zn {
+                    zn = zp[kk];
+                }
+            }
+            if zn > f32::NEG_INFINITY && zt[k] <= zn + eps {
                 let tl = Pos2::new(r.left() + x as f32 * CELL, r.top() + y as f32 * CELL);
                 mesh.add_colored_rect(Rect::from_min_size(tl, Vec2::splat(CELL)), color);
             }
