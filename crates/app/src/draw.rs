@@ -436,6 +436,71 @@ impl Drawing {
     }
 }
 
+/// Triangulação por "orelhas" de um polígono simples (côncavo ou convexo). Pontos repetidos
+/// e "espinhos" (linhas soltas percorridas ida e volta) são ignorados.
+pub fn triangulate(poly: &[[f64; 2]]) -> Vec<[usize; 3]> {
+    let n = poly.len();
+    if n < 3 {
+        return vec![];
+    }
+    let ccw = poly_area(poly) > 0.0;
+    let mut idx: Vec<usize> = (0..n).collect();
+    // remove repetidos consecutivos
+    idx.dedup_by(|a, b| (poly[*a][0] - poly[*b][0]).abs() < 1e-12 && (poly[*a][1] - poly[*b][1]).abs() < 1e-12);
+    let cross = |o: [f64; 2], a: [f64; 2], b: [f64; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let inside = |p: [f64; 2], a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
+        let (d1, d2, d3) = (cross(a, b, p), cross(b, c, p), cross(c, a, p));
+        let neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        let pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+        !(neg && pos)
+    };
+    let mut out = vec![];
+    let mut guard = 0;
+    while idx.len() > 3 && guard < 10 * n * n + 100 {
+        guard += 1;
+        let m = idx.len();
+        let mut cut = false;
+        for k in 0..m {
+            let (ia, ib, ic) = (idx[(k + m - 1) % m], idx[k], idx[(k + 1) % m]);
+            let (a, b, c) = (poly[ia], poly[ib], poly[ic]);
+            let cr = cross(a, b, c);
+            let convex = if ccw { cr > 1e-14 } else { cr < -1e-14 };
+            if cr.abs() <= 1e-14 {
+                // colinear ou espinho: tira o vértice do meio sem gerar triângulo
+                idx.remove(k);
+                cut = true;
+                break;
+            }
+            if !convex {
+                continue;
+            }
+            let blocked = idx.iter().any(|&j| j != ia && j != ib && j != ic && {
+                let p = poly[j];
+                (p != a && p != b && p != c) && inside(p, a, b, c)
+            });
+            if blocked {
+                continue;
+            }
+            out.push([ia, ib, ic]);
+            idx.remove(k);
+            cut = true;
+            break;
+        }
+        if !cut {
+            break;
+        }
+    }
+    if idx.len() == 3 {
+        out.push([idx[0], idx[1], idx[2]]);
+    } else if idx.len() > 3 {
+        // polígono que se cruza: leque como último recurso
+        for k in 1..idx.len() - 1 {
+            out.push([idx[0], idx[k], idx[k + 1]]);
+        }
+    }
+    out
+}
+
 fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     let ab = b - a;
     let t = ((p - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
@@ -517,50 +582,38 @@ pub fn show(
 
     bg(&painter, &to);
 
-    // preenchimentos (amostrados na tela: aceita contornos côncavos)
+    // preenchimentos em vetor: cada contorno triangulado, do maior para o menor
+    // (o mais interno é pintado por cima, que é a mesma regra da simulação)
     let fills = d.sorted_fills();
-    if !fills.is_empty() {
-        let mut fb = [f64::MAX, f64::MIN, f64::MAX, f64::MIN];
-        for (p, _) in &fills {
-            for q in p {
-                fb[0] = fb[0].min(q[0]);
-                fb[1] = fb[1].max(q[0]);
-                fb[2] = fb[2].min(q[1]);
-                fb[3] = fb[3].max(q[1]);
-            }
-        }
-        if mode == Mode::Projectile {
-            fb[2] = -fb[3];
-        }
-        let (pa, pb) = (to(fb[0], fb[3]), to(fb[1], fb[2]));
-        let area = Rect::from_two_pos(pa, pb).intersect(rect);
-        let cell = 3.0f32;
+    {
         let mut mesh = egui::Mesh::default();
-        let mut y = area.top();
-        while y < area.bottom() {
-            let mut x = area.left();
-            while x < area.right() {
-                let (u, v) = from(Pos2::new(x + cell * 0.5, y + cell * 0.5));
-                let vv = if mode == Mode::Projectile { v.abs() } else { v };
-                if let Some(pnt) = d.paint_at(&fills, u, vv) {
-                    let col = match &pnt {
-                        Paint::Void => Color32::from_rgba_unmultiplied(255, 255, 255, 200),
-                        Paint::Mat(m) => {
-                            let c = mat_color(m.name);
-                            // metade espelhada mais clara (opaca, sem listras de sobreposição)
-                            if mode == Mode::Projectile && v < 0.0 {
-                                let l = |x: u8| ((x as f32) * 0.5 + 127.0) as u8;
-                                Color32::from_rgb(l(c.r()), l(c.g()), l(c.b()))
-                            } else {
-                                c
-                            }
-                        }
-                    };
-                    mesh.add_colored_rect(Rect::from_min_size(Pos2::new(x, y), Vec2::splat(cell + 0.4)), col);
-                }
-                x += cell;
+        let mut add_poly = |poly: &[[f64; 2]], col: Color32, mirror: bool| {
+            let tris = triangulate(poly);
+            let base = mesh.vertices.len() as u32;
+            for q in poly {
+                let pp = if mirror { to(q[0], -q[1]) } else { to(q[0], q[1]) };
+                mesh.colored_vertex(pp, col);
             }
-            y += cell;
+            for t in tris {
+                mesh.add_triangle(base + t[0] as u32, base + t[1] as u32, base + t[2] as u32);
+            }
+        };
+        let colors: Vec<Color32> = fills
+            .iter()
+            .map(|(_, pnt)| match pnt {
+                Paint::Void => Color32::from_rgb(250, 251, 253),
+                Paint::Mat(m) => mat_color(m.name),
+            })
+            .collect();
+        if mode == Mode::Projectile {
+            // metade espelhada, mais clara, só para dar a ideia do sólido
+            for ((poly, _), c) in fills.iter().zip(&colors) {
+                let l = |x: u8| ((x as f32) * 0.5 + 127.0) as u8;
+                add_poly(poly, Color32::from_rgb(l(c.r()), l(c.g()), l(c.b())), true);
+            }
+        }
+        for ((poly, _), c) in fills.iter().zip(&colors) {
+            add_poly(poly, *c, false);
         }
         painter.add(egui::Shape::mesh(mesh));
     }
@@ -834,6 +887,15 @@ mod tests {
         d.add_edge(c, e);
         d.add_edge(e, a);
         vec![a, b, c, e]
+    }
+
+    #[test]
+    fn triangulation_covers_concave() {
+        // "L" côncavo: área dos triângulos = área do polígono
+        let p = vec![[0.0, 0.0], [4.0, 0.0], [4.0, 1.0], [1.0, 1.0], [1.0, 3.0], [0.0, 3.0]];
+        let t = triangulate(&p);
+        let a: f64 = t.iter().map(|t| poly_area(&[p[t[0]], p[t[1]], p[t[2]]]).abs()).sum();
+        assert!((a - poly_area(&p).abs()).abs() < 1e-9, "área {a}");
     }
 
     #[test]

@@ -122,35 +122,56 @@ pub fn show(ui: &mut egui::Ui, ed: &mut SketchEditor, profile: &mut Vec<[f64; 2]
         poly.append(&mut back);
         painter.add(egui::Shape::closed_line(poly, Stroke::new(2.0, Color32::from_rgb(30, 60, 120))));
     }
-    // peças internas (somente exibição): corte amostrado com a mesma regra da malha
+    // peças internas (somente exibição), em vetor: cada peça vira um polígono no plano a–r,
+    // pintado na ordem de aplicação (a última que contém o ponto vale, como na malha)
     if let Some((pr, cols)) = parts {
-        let (na, nr) = (220usize, 70usize);
-        let da = len / na as f64;
-        let dr = rmax / nr as f64;
-        let mut mesh = egui::Mesh::default();
         let bg = Color32::from_rgb(250, 251, 253);
-        for ia in 0..na {
-            let a = (ia as f64 + 0.5) * da;
-            let ro = pr.radius_at(a * 1e-3) * 1e3;
-            if ro <= 0.0 {
-                continue;
-            }
-            for ir in 0..nr {
-                let r = (ir as f64 + 0.5) * dr;
-                if r > ro {
-                    break;
+        let mut mesh = egui::Mesh::default();
+        let mut add = |poly: &[[f64; 2]], col: Color32| {
+            let tris = crate::draw::triangulate(poly);
+            for sgn in [1.0, -1.0] {
+                let base = mesh.vertices.len() as u32;
+                for q in poly {
+                    mesh.colored_vertex(to(q[0] * 1e3, sgn * q[1] * 1e3), col);
                 }
-                let col = match pr.part_at(a * 1e-3, r * 1e-3, 0.0) {
-                    None => bg,
-                    Some(0) => continue,
-                    Some(k) => cols.get(k as usize).copied().unwrap_or(Color32::GRAY),
-                };
-                for sgn in [1.0, -1.0] {
-                    let p0 = to(a - 0.5 * da, sgn * (r - 0.5 * dr));
-                    let p1 = to(a + 0.5 * da, sgn * (r + 0.5 * dr));
-                    mesh.add_colored_rect(egui::Rect::from_two_pos(p0, p1).expand(0.3), col);
+                for t in &tris {
+                    mesh.add_triangle(base + t[0] as u32, base + t[1] as u32, base + t[2] as u32);
                 }
             }
+        };
+        let solid = |prof: &[[f64; 2]]| -> Vec<[f64; 2]> {
+            let mut v: Vec<[f64; 2]> = Vec::new();
+            if let (Some(f), Some(l)) = (prof.first(), prof.last()) {
+                v.push([f[0], 0.0]);
+                v.extend_from_slice(prof);
+                v.push([l[0], 0.0]);
+            }
+            v
+        };
+        if let Some(c) = &pr.core {
+            add(&solid(&c.profile), cols.get(1).copied().unwrap_or(Color32::GRAY));
+        }
+        let mut next = 1 + pr.core.is_some() as usize;
+        for g in &pr.regions {
+            let col = match &g.fill {
+                pensim_core::Fill::Void => bg,
+                pensim_core::Fill::Body => cols.first().copied().unwrap_or(Color32::GRAY),
+                pensim_core::Fill::Mat(_) => {
+                    next += 1;
+                    cols.get(next - 1).copied().unwrap_or(Color32::GRAY)
+                }
+            };
+            let poly: Vec<[f64; 2]> = if !g.poly.is_empty() {
+                g.poly.clone()
+            } else if g.inner.is_empty() {
+                solid(&g.outer)
+            } else {
+                // casca: contorno de fora e, de volta, o de dentro
+                let mut v = g.outer.clone();
+                v.extend(g.inner.iter().rev().cloned());
+                v
+            };
+            add(&poly, col);
         }
         painter.add(egui::Shape::mesh(mesh));
     }
