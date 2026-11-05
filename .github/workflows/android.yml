@@ -1,0 +1,59 @@
+name: Android APK
+
+on:
+  push:
+    branches: ["claude/**", "main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Testes do núcleo
+        run: cargo test --release -p pensim-core
+
+      - name: Instalar cargo-apk
+        run: cargo install cargo-apk --locked
+
+      - name: Chave de assinatura (autoassinada)
+        run: |
+          keytool -genkeypair -v -keystore "$RUNNER_TEMP/pensim.keystore" -alias pensim \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass pensim-ci -keypass pensim-ci -dname "CN=PenSim,O=PenSim,C=BR"
+
+      - name: Compilar APK (release)
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_LATEST_HOME }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+          CARGO_APK_RELEASE_KEYSTORE: ${{ runner.temp }}/pensim.keystore
+          CARGO_APK_RELEASE_KEYSTORE_PASSWORD: pensim-ci
+        run: |
+          cargo apk build --release -p pensim-app
+          find target -name '*.apk' -print
+          cp "$(find target -name 'PenSim*.apk' | head -1)" PenSim.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PenSim-apk
+          path: PenSim.apk
+
+      - name: Publicar no Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v0.1.${{ github.run_number }}" PenSim.apk \
+            --target "${{ github.sha }}" --prerelease \
+            --title "PenSim v0.1.${{ github.run_number }}" \
+            --notes "APK arm64 (Android 8+), assinado com chave autoassinada de CI. Instale permitindo fontes desconhecidas."

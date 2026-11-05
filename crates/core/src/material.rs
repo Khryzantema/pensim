@@ -1,0 +1,53 @@
+/// Propriedades de material (SI). A peridinâmica de ligação 3D fixa ν = 1/4.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Material {
+    pub name: &'static str,
+    /// Densidade [kg/m³]
+    pub rho: f64,
+    /// Módulo de Young [Pa]
+    pub young: f64,
+    /// Escoamento (tração) [Pa]
+    pub yield_strength: f64,
+    /// Módulo de encruamento linear [Pa]
+    pub hardening: f64,
+    /// Estiramento de ligação que causa fratura em tração
+    pub fail_stretch: f64,
+    /// Razão escoamento compressão/tração (frágeis ≫ 1)
+    pub comp_factor: f64,
+    /// Calor específico [J/kg/K]
+    pub cp: f64,
+    /// Temperatura de fusão [K]
+    pub t_melt: f64,
+}
+
+const fn m(
+    name: &'static str, rho: f64, young: f64, ys: f64, h: f64, fail: f64, comp: f64, cp: f64,
+    tm: f64,
+) -> Material {
+    Material { name, rho, young, yield_strength: ys, hardening: h, fail_stretch: fail,
+        comp_factor: comp, cp, t_melt: tm }
+}
+
+pub const T_REF: f64 = 293.0;
+
+pub const LIBRARY: &[Material] = &[
+    m("Aço blindagem RHA", 7850.0, 205e9, 1.10e9, 1.0e9, 0.12, 1.0, 477.0, 1800.0),
+    m("Aço doce 1020", 7850.0, 205e9, 0.35e9, 0.5e9, 0.25, 1.0, 477.0, 1800.0),
+    m("Alumínio 6061-T6", 2700.0, 69e9, 0.28e9, 0.1e9, 0.18, 1.0, 896.0, 925.0),
+    m("Titânio Ti-6Al-4V", 4430.0, 114e9, 0.95e9, 0.4e9, 0.08, 1.0, 526.0, 1900.0),
+    m("Liga de tungstênio", 17600.0, 360e9, 1.20e9, 0.5e9, 0.06, 1.0, 134.0, 1700.0),
+    m("Cobre", 8960.0, 120e9, 0.09e9, 0.3e9, 0.40, 1.0, 385.0, 1356.0),
+    m("Chumbo", 11340.0, 16e9, 0.015e9, 0.02e9, 0.50, 1.0, 129.0, 600.0),
+    m("Concreto", 2400.0, 30e9, 3.0e6, 0.0, 3.0e-4, 15.0, 880.0, 1500.0),
+    m("Cerâmica Al2O3", 3900.0, 370e9, 0.25e9, 0.0, 8.5e-4, 8.0, 880.0, 2300.0),
+];
+
+impl Material {
+    /// Micromódulo 3D (ν = 1/4): c = 18K / (π δ⁴), K = 2E/3 → c = 12E / (π δ⁴).
+    pub fn micromodulus(&self, horizon: f64) -> f64 {
+        12.0 * self.young / (std::f64::consts::PI * horizon.powi(4))
+    }
+    pub fn sound_speed(&self) -> f64 {
+        (self.young / self.rho).sqrt()
+    }
+}

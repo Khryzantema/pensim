@@ -1,0 +1,40 @@
+[package]
+name = "pensim-app"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "pensim"
+path = "src/main.rs"
+
+[dependencies]
+pensim-core = { path = "../core" }
+log = "0.4"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "android-native-activity"] }
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.14"
+
+# Empacotamento com `cargo apk build -p pensim-app --release`
+[package.metadata.android]
+package = "dev.pensim.ballistics"
+apk_name = "PenSim"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "PenSim Balística"
+
+[package.metadata.android.application.activity]
+orientation = "unspecified"
+config_changes = "orientation|keyboardHidden|screenSize"
