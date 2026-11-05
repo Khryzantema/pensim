@@ -248,50 +248,54 @@ pub fn outline(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3
     painter.with_clip_rect(r).add(egui::Shape::mesh(mesh));
 }
 
-/// Desenha a malha de faces (Gouraud por canto, descarte de faces de costas, ordenação por profundidade).
+/// Desenha a malha de faces: vértices compartilhados (Gouraud por canto), descarte de faces de
+/// costas e ordenação por profundidade só dos índices.
 pub fn render_surf(painter: &egui::Painter, v: &View, m: &crate::mesh::SurfMesh, ld: [f32; 3], color: &dyn Fn(usize, bool) -> Color32) {
     let (_, _, e) = v.cam.basis();
     let proj: Vec<(Pos2, f32)> = m.verts.iter().map(|&p| v.project(p)).collect();
     let mut order: Vec<(f32, u32)> = Vec::with_capacity(m.quads.len());
+    let clip = v.rect.expand(40.0);
     for (qi, q) in m.quads.iter().enumerate() {
         let mut nn = [0.0f32; 3];
         let mut dep = 0.0;
+        let mut inside = false;
         for &vi in &q.v {
             let n = m.normals[vi as usize];
             nn = [nn[0] + n[0], nn[1] + n[1], nn[2] + n[2]];
-            dep += proj[vi as usize].1;
+            let (p, d) = proj[vi as usize];
+            dep += d;
+            inside |= clip.contains(p);
         }
-        if dot(nn, e) < -0.2 {
-            continue; // de costas
+        if !inside || dot(nn, e) < -0.2 {
+            continue; // fora da tela ou de costas
         }
-        order.push((dep * 0.25, qi as u32));
+        order.push((dep, qi as u32));
     }
     order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    let (dmin, dmax) = order.first().map_or((0.0, 1.0), |f| (f.0, order.last().unwrap().0));
+    let (dmin, dmax) = order.first().map_or((0.0, 1.0), |f| (f.0 * 0.25, order.last().unwrap().0 * 0.25));
     let h = [ld[0] + e[0], ld[1] + e[1], ld[2] + e[2]];
     let hm = dot(h, h).sqrt().max(1e-6);
-    let clip = v.rect.expand(40.0);
-    let mut mesh = egui::Mesh::default();
-    mesh.reserve_vertices(order.len() * 4);
-    mesh.reserve_triangles(order.len() * 2);
     let uv = egui::epaint::WHITE_UV;
-    for (d, qi) in order {
-        let q = &m.quads[qi as usize];
-        if !q.v.iter().any(|&vi| clip.contains(proj[vi as usize].0)) {
-            continue;
-        }
-        let c0 = color(q.cell as usize, q.cut);
-        let depth_t = 0.78 + 0.22 * ((d - dmin) / (dmax - dmin).max(1e-9));
-        let base = mesh.vertices.len() as u32;
-        for &vi in &q.v {
-            let n = m.normals[vi as usize];
+    let mut mesh = egui::Mesh::default();
+    mesh.vertices = m
+        .verts
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let n = m.normals[i];
             let dif = dot(n, ld).max(0.0);
             let sp = (dot(n, h) / hm).max(0.0).powi(24);
+            let depth_t = 0.78 + 0.22 * ((proj[i].1 - dmin) / (dmax - dmin).max(1e-9)).clamp(0.0, 1.0);
             let t = depth_t * (0.34 + 0.80 * dif + 0.22 * sp);
+            let c0 = color(m.vcell[i] as usize, m.vcut[i]);
             let f = |ch: u8| ((ch as f32 * t).clamp(0.0, 255.0)) as u8;
-            mesh.vertices.push(egui::epaint::Vertex { pos: proj[vi as usize].0, uv, color: Color32::from_rgb(f(c0.r()), f(c0.g()), f(c0.b())) });
-        }
-        mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            egui::epaint::Vertex { pos: proj[i].0, uv, color: Color32::from_rgb(f(c0.r()), f(c0.g()), f(c0.b())) }
+        })
+        .collect();
+    mesh.indices.reserve(order.len() * 6);
+    for (_, qi) in order {
+        let q = &m.quads[qi as usize].v;
+        mesh.indices.extend_from_slice(&[q[0], q[1], q[2], q[0], q[2], q[3]]);
     }
     painter.with_clip_rect(v.rect).add(egui::Shape::mesh(mesh));
 }

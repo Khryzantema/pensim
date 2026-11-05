@@ -1685,6 +1685,7 @@ dependencies = [
  "log",
  "pensim-core",
  "png 0.17.16",
+ "rayon",
 ]
 
 [[package]]

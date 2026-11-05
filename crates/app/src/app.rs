@@ -221,6 +221,7 @@ pub struct PenSim {
     round_nodes: bool,
     faces: bool,
     mesh_cache: Option<(MeshKey, Option<Arc<crate::mesh::SurfMesh>>)>,
+    topo_cache: Option<((u64, usize, usize, u32, u64), Arc<crate::mesh::Topo>)>,
     disc_tex: Option<egui::TextureHandle>,
     /// margens extras (pt) somadas à área segura automática: [esq, topo, dir, base]
     extra_inset: [f32; 4],
@@ -326,6 +327,7 @@ impl PenSim {
             round_nodes: true,
             faces: false,
             mesh_cache: None,
+            topo_cache: None,
             disc_tex: Some(view3d::disc_texture(&cc.egui_ctx)),
             extra_inset: [0.0, 0.0, 0.0, 0.0],
             ws: Ws::Projectile,
@@ -1618,7 +1620,7 @@ impl PenSim {
             mk("Contato", Color32::GRAY, &|f| f.e_contact),
         ]);
         ui.add_space(8.0);
-        line_plot(ui, 170.0, "Velocidade do projétil (vx do CM)", "t real [µs]", "m/s", &[Series { name: "vx", color: Color32::from_rgb(30, 110, 220), markers: false, pts: fr.iter().map(|f| (f.time * 1e6 / rs, f.vx_proj)).collect() }]);
+        line_plot(ui, 170.0, "Velocidade do projétil (parte que saiu pela traseira)", "t real [µs]", "m/s", &[Series { name: "vx", color: Color32::from_rgb(30, 110, 220), markers: false, pts: fr.iter().map(|f| (f.time * 1e6 / rs, f.vx_proj)).collect() }]);
     }
 
     fn ui_limit(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1821,23 +1823,33 @@ impl PenSim {
                     Some((k, m)) if *k == key => m.clone(),
                     _ => {
                         let np8 = self.cfg.design.n_proj_parts() as u8;
-                        let (hl, hp, ht, sec) = (self.hide_loose, self.hide_proj, self.hide_target, self.section);
-                        let vis = |mi: usize, i: usize| -> u8 {
-                            if hl && f.damage[i] >= 0.9 {
-                                return 0;
-                            }
-                            let is_p = snap.parts[i] < np8;
-                            if (is_p && hp) || (!is_p && ht) {
-                                return 0;
-                            }
-                            if sec && !in_section(flip(snap.ref_pos[i], masks[mi])[1]) {
-                                return 2;
-                            }
-                            1
-                        };
                         let (sa, ca) = (self.started_obl.to_radians().sin() as f32, self.started_obl.to_radians().cos() as f32);
-                        let turn2 = |q: [f32; 3]| [ca * q[0] - sa * q[2], q[1], -(sa * q[0] + ca * q[2])];
-                        let m = crate::mesh::build(n, &masks, &f.pos, &snap.ref_pos, &snap.parts, np8, dx, self.started_obl.to_radians() as f32, 400_000, &flip, &turn2, &vis).map(Arc::new);
+                        // topologia fixa por simulação (cache)
+                        let tkey = (self.job_id, n, masks.len(), dx.to_bits(), self.started_obl.to_bits());
+                        let topo = match &self.topo_cache {
+                            Some((k, t)) if *k == tkey => t.clone(),
+                            _ => {
+                                let t = Arc::new(crate::mesh::topo(n, &masks, &snap.ref_pos, &snap.parts, np8, dx, self.started_obl.to_radians() as f32, &flip));
+                                self.topo_cache = Some((tkey, t.clone()));
+                                t
+                            }
+                        };
+                        let (hl, hp, ht, sec) = (self.hide_loose, self.hide_proj, self.hide_target, self.section);
+                        let mut vis = vec![0u8; n * masks.len()];
+                        for (mi, &mm) in masks.iter().enumerate() {
+                            for i in 0..n {
+                                let is_p = snap.parts[i] < np8;
+                                vis[mi * n + i] = if (hl && f.damage[i] >= 0.9) || (is_p && hp) || (!is_p && ht) {
+                                    0
+                                } else if sec && !in_section(flip(snap.ref_pos[i], mm)[1]) {
+                                    2
+                                } else {
+                                    1
+                                };
+                            }
+                        }
+                        let turn2 = move |q: [f32; 3]| [ca * q[0] - sa * q[2], q[1], -(sa * q[0] + ca * q[2])];
+                        let m = crate::mesh::build(&topo, &f.pos, &vis, dx, 400_000, &flip, &turn2).map(Arc::new);
                         self.mesh_cache = Some((key, m.clone()));
                         m
                     }

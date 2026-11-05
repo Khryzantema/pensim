@@ -1509,10 +1509,10 @@ impl Sim {
             if self.part[i] < self.n_proj {
                 let q = self.p[i];
                 ke_p += 0.5 * self.mass[self.part[i] as usize] * (q.vx * q.vx + q.vy * q.vy + q.vz * q.vz);
-                vx_p += q.vx;
                 np += 1.0;
             }
         }
+        vx_p = self.residual_velocity();
         // parada antecipada: energia cinética do projétil estável por 4 quadros
         self.ke_hist.push(ke_p);
         let h = &self.ke_hist;
@@ -1537,7 +1537,7 @@ impl Sim {
             damage: tens.iter().map(|t| t.2).collect(),
             ke_proj: ke_p * self.gfac,
             ke_target: self.kinetic(Some(false)) * self.gfac,
-            vx_proj: vx_p / np.max(1.0),
+            vx_proj: vx_p,
             e_elastic: e_el * self.gfac,
             e_contact: e_ct * self.gfac,
             e_plastic: self.e_pl * self.gfac,
@@ -1546,19 +1546,47 @@ impl Sim {
         self.frames.push(crate::store::PackedFrame::pack(&frame, self.compress_frames));
     }
 
+    /// Velocidade do projétil ao longo da trajetória: da parte que já saiu pela face traseira
+    /// (se for > 5% da massa), senão média ponderada pela massa de todo o projétil.
+    pub fn residual_velocity(&self) -> f64 {
+        let d = self.dir;
+        let (mut mp, mut mb, mut pv, mut pvb) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for i in 0..self.n_real {
+            if self.part[i] < self.n_proj {
+                let q = self.p[i];
+                let m = self.mass[self.part[i] as usize];
+                let v = q.vx * d[0] + q.vz * d[2];
+                mp += m;
+                pv += m * v;
+                if q.x > self.back_x {
+                    mb += m;
+                    pvb += m * v;
+                }
+            }
+        }
+        if mb > 0.05 * mp { pvb / mb } else { pv / mp.max(1e-30) }
+    }
+
     pub fn outcome(&self) -> Outcome {
         let n = self.n_real;
         let d = self.dir;
-        let (mut np, mut behind, mut vx, mut tip) = (0.0f64, 0.0f64, 0.0f64, f64::MIN);
+        // massas: o projétil tem peças de densidades diferentes (chumbo, aço, tungstênio…)
+        let (mut mp, mut mb, mut pv, mut pvb, mut tip) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, f64::MIN);
+        let (mut np, mut behind) = (0.0f64, 0.0f64);
         let (mut nt, mut ejected) = (0.0f64, 0.0f64);
         for i in 0..n {
             let q = self.p[i];
             if self.part[i] < self.n_proj {
+                let m = self.mass[self.part[i] as usize];
+                let v = q.vx * d[0] + q.vz * d[2]; // velocidade ao longo da trajetória original
                 np += 1.0;
-                vx += q.vx * d[0] + q.vz * d[2]; // velocidade ao longo da trajetória original
+                mp += m;
+                pv += m * v;
                 tip = tip.max(q.x);
                 if q.x > self.back_x {
                     behind += 1.0;
+                    mb += m;
+                    pvb += m * v;
                 }
             } else {
                 nt += 1.0;
@@ -1567,7 +1595,10 @@ impl Sim {
                 }
             }
         }
-        let v_res = vx / np.max(1.0);
+        // velocidade residual = o que saiu pela face traseira (fragmentos erodidos que ficaram presos
+        // no furo, parados, não puxam a média para baixo); se nada saiu, a média do projétil todo
+        let _ = (mb, pvb, pv);
+        let v_res = self.residual_velocity();
         let behind_frac = behind / np.max(1.0);
         // perfurou: a maior parte passou, ou o que restou do corpo saiu pela face traseira
         // (dardos longos se erodem: o que atravessa pode ser bem menos que a metade)

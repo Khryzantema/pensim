@@ -1,9 +1,38 @@
 //! Malha de faces que segue os nós (superfície por "cantos" da rede).
 //!
-//! Cada nó é uma célula cúbica da rede inicial. Para cada célula visível cuja vizinha está vazia
-//! (ou cortada pela seção) gera-se uma face. Os 4 cantos da face são compartilhados e ficam em
-//! `canto ideal + média dos deslocamentos dos nós vizinhos`, então a malha acompanha a deformação.
+//! Cada nó é uma célula cúbica da rede inicial. Para cada célula visível cuja vizinha está vazia,
+//! cortada pela seção ou já separada (trinca) gera-se uma face. Os cantos ficam em
+//! `canto ideal + média dos deslocamentos das células vizinhas que continuam presas`.
+//!
+//! Desempenho: a topologia (célula de cada nó numa grade densa) é montada uma vez por simulação
+//! (`Topo`); por quadro só se calculam deslocamentos e faces, em paralelo, e os vértices são
+//! compartilhados entre faces.
+use rayon::prelude::*;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// Hash rápido (estilo Fx) para chaves inteiras.
+#[derive(Default)]
+struct Fx(u64);
+impl Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        }
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn write_u32(&mut self, v: u32) {
+        self.write_u64(v as u64);
+    }
+}
+type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
+
+const NONE: u32 = u32::MAX;
 
 #[derive(Clone, Copy)]
 pub struct Quad {
@@ -18,11 +47,15 @@ pub struct Quad {
 pub struct SurfMesh {
     pub verts: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    /// nó que dá a cor de cada vértice, e se ele está numa face de corte
+    pub vcell: Vec<u32>,
+    pub vcut: Vec<bool>,
     pub quads: Vec<Quad>,
     /// fragmentos de um nó só (sem vizinho preso): desenhados como nós redondos
     pub loose: Vec<u32>,
 }
 
+#[derive(Clone, Copy)]
 struct Lattice {
     o: [f32; 3],
     e: [[f32; 3]; 3],
@@ -56,33 +89,47 @@ impl Lattice {
     }
 }
 
-fn pack(g: u64, k: [i32; 3]) -> u64 {
-    const B: i64 = 1 << 20;
-    (g << 63) | (((k[0] as i64 + B) as u64 & 0x1F_FFFF) << 42) | (((k[1] as i64 + B) as u64 & 0x1F_FFFF) << 21) | ((k[2] as i64 + B) as u64 & 0x1F_FFFF)
+/// Grade densa de um grupo (projétil ou alvo).
+struct Grid {
+    lat: Lattice,
+    min: [i32; 3],
+    dim: [i32; 3],
+    cell: Vec<u32>,
 }
 
-/// `vis(mi, i)`: 0 = oculto, 1 = visível, 2 = removido só pelo corte de seção.
-/// `cur`/`refp`: posições atuais e iniciais (frame da simulação). `flip` espelha pela máscara `m`;
-/// `turn` leva o frame da simulação ao frame da tela.
-#[allow(clippy::too_many_arguments)]
-pub fn build(
+impl Grid {
+    #[inline]
+    fn at(&self, k: [i32; 3]) -> u32 {
+        let r = [k[0] - self.min[0], k[1] - self.min[1], k[2] - self.min[2]];
+        if r[0] < 0 || r[1] < 0 || r[2] < 0 || r[0] >= self.dim[0] || r[1] >= self.dim[1] || r[2] >= self.dim[2] {
+            return NONE;
+        }
+        self.cell[((r[0] as usize * self.dim[1] as usize) + r[1] as usize) * self.dim[2] as usize + r[2] as usize]
+    }
+    #[inline]
+    fn corner_id(&self, c: [i32; 3]) -> u64 {
+        let r = [(c[0] - self.min[0]) as u64, (c[1] - self.min[1]) as u64, (c[2] - self.min[2]) as u64];
+        (r[0] * (self.dim[1] as u64 + 1) + r[1]) * (self.dim[2] as u64 + 1) + r[2]
+    }
+}
+
+/// Topologia fixa de uma simulação: em que célula da rede está cada nó (com as cópias espelhadas).
+pub struct Topo {
     n: usize,
-    masks: &[u8],
-    cur: &[[f32; 3]],
-    refp: &[[f32; 3]],
-    parts: &[u8],
-    n_proj: u8,
-    dx: f32,
-    obliquity_rad: f32,
-    max_quads: usize,
-    flip: &dyn Fn([f32; 3], u8) -> [f32; 3],
-    turn: &dyn Fn([f32; 3]) -> [f32; 3],
-    vis: &dyn Fn(usize, usize) -> u8,
-) -> Option<SurfMesh> {
+    masks: Vec<u8>,
+    grids: [Grid; 2],
+    /// grupo (0 alvo, 1 projétil) e índice de célula de cada nó estendido
+    grp: Vec<u8>,
+    key: Vec<[i32; 3]>,
+    /// posição inicial espelhada (frame da simulação)
+    refx: Vec<[f32; 3]>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn topo(n: usize, masks: &[u8], refp: &[[f32; 3]], parts: &[u8], n_proj: u8, dx: f32, obliquity_rad: f32, flip: &dyn Fn([f32; 3], u8) -> [f32; 3]) -> Topo {
     let (sa, ca) = (obliquity_rad.sin(), obliquity_rad.cos());
     let d = [ca, 0.0, -sa];
     let ev = [sa, 0.0, ca];
-
     // rede do projétil: eixo a (da ponta para trás), u = y, v ⟂ voo
     let (mut tmax, mut tmin) = (f32::MIN, f32::MAX);
     for i in 0..n {
@@ -92,126 +139,198 @@ pub fn build(
             tmin = tmin.min(t);
         }
     }
+    if tmax < tmin {
+        tmax = 0.0;
+        tmin = 0.0;
+    }
     let nm = ((tmax - tmin) / dx).round();
     let sp = if nm >= 1.0 { (tmax - tmin) / nm } else { dx };
-    let proj = Lattice { o: [d[0] * tmax, 0.0, d[2] * tmax], e: [[-d[0], 0.0, -d[2]], [0.0, 1.0, 0.0], ev], s: [sp, dx, dx], c: [0.0, 0.5, 0.5] };
-    let targ = Lattice { o: [0.0; 3], e: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], s: [dx; 3], c: [0.5; 3] };
-
+    let lats = [
+        Lattice { o: [0.0; 3], e: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], s: [dx; 3], c: [0.5; 3] },
+        Lattice { o: [d[0] * tmax, 0.0, d[2] * tmax], e: [[-d[0], 0.0, -d[2]], [0.0, 1.0, 0.0], ev], s: [sp, dx, dx], c: [0.0, 0.5, 0.5] },
+    ];
     let total = n * masks.len();
-    // célula → (índice estendido | bit31 se cortada)
-    let mut map: HashMap<u64, u32> = HashMap::with_capacity(total);
-    let mut cells: Vec<(u64, [i32; 3], u8)> = Vec::new();
+    let mut grp = vec![0u8; total];
+    let mut key = vec![[0i32; 3]; total];
+    let mut refx = vec![[0.0f32; 3]; total];
+    let mut mn = [[i32::MAX; 3]; 2];
+    let mut mx = [[i32::MIN; 3]; 2];
     for (mi, &m) in masks.iter().enumerate() {
         for i in 0..n {
-            let st = vis(mi, i);
-            if st == 0 {
-                continue;
-            }
-            let g = (parts[i] < n_proj) as u64;
-            let lat = if g == 1 { &proj } else { &targ };
-            let k = lat.index(flip(refp[i], m));
-            let e = (mi * n + i) as u32;
-            map.insert(pack(g, k), if st == 2 { e | 0x8000_0000 } else { e });
-            if st == 1 {
-                cells.push((e as u64, k, g as u8));
+            let e = mi * n + i;
+            let g = (parts[i] < n_proj) as usize;
+            let r = flip(refp[i], m);
+            let k = lats[g].index(r);
+            grp[e] = g as u8;
+            key[e] = k;
+            refx[e] = r;
+            for a in 0..3 {
+                mn[g][a] = mn[g][a].min(k[a]);
+                mx[g][a] = mx[g][a].max(k[a]);
             }
         }
     }
-
-    let mut out = SurfMesh::default();
-    // canto + nó de referência do grupo de células que ainda estão juntas → vértice
-    let mut vmap: HashMap<(u64, u32), u32> = HashMap::new();
-    // deslocamento (atual − inicial) de um nó estendido
-    let disp = |e: u32| -> [f32; 3] {
-        let (mi, i) = ((e as usize) / n, (e as usize) % n);
-        let m = masks[mi];
-        let (a, b) = (flip(cur[i], m), flip(refp[i], m));
-        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    let mk = |g: usize| {
+        let (min, dim) = if mn[g][0] > mx[g][0] { ([0; 3], [1; 3]) } else { ([mn[g][0] - 1, mn[g][1] - 1, mn[g][2] - 1], [mx[g][0] - mn[g][0] + 3, mx[g][1] - mn[g][1] + 3, mx[g][2] - mn[g][2] + 3]) };
+        Grid { lat: lats[g], min, dim, cell: vec![NONE; (dim[0] as usize) * (dim[1] as usize) * (dim[2] as usize)] }
     };
+    let mut grids = [mk(0), mk(1)];
+    for e in 0..total {
+        let g = &mut grids[grp[e] as usize];
+        let k = key[e];
+        let r = [k[0] - g.min[0], k[1] - g.min[1], k[2] - g.min[2]];
+        let li = ((r[0] as usize * g.dim[1] as usize) + r[1] as usize) * g.dim[2] as usize + r[2] as usize;
+        g.cell[li] = e as u32;
+    }
+    Topo { n, masks: masks.to_vec(), grids, grp, key, refx }
+}
+
+struct Face {
+    corners: [(u64, [f32; 3]); 4],
+    outward: [f32; 3],
+    cell: u32,
+    cut: bool,
+}
+
+/// `vis[e]`: 0 = oculto, 1 = visível, 2 = removido só pelo corte de seção (por nó estendido).
+/// `cur`: posições atuais (frame da simulação); `turn` leva ao frame da tela.
+pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, flip: &(dyn Fn([f32; 3], u8) -> [f32; 3] + Sync), turn: &(dyn Fn([f32; 3]) -> [f32; 3] + Sync)) -> Option<SurfMesh> {
+    let n = t.n;
+    let total = n * t.masks.len();
+    // deslocamento (atual − inicial) de cada nó estendido
+    let disp: Vec<[f32; 3]> = (0..total)
+        .into_par_iter()
+        .map(|e| {
+            let (mi, i) = (e / n, e % n);
+            let a = flip(cur[i], t.masks[mi]);
+            let b = t.refx[e];
+            [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+        })
+        .collect();
     // duas células vizinhas só "continuam juntas" se a posição relativa mudou menos que isso;
     // senão houve trinca/separação: a face entre elas aparece e os cantos não são compartilhados
     let tol2 = (0.75 * dx) * (0.75 * dx);
-    let together = |da: [f32; 3], v: u32| -> bool {
-        let db = disp(v);
+    let together = |a: usize, b: usize| -> bool {
+        let (da, db) = (disp[a], disp[b]);
         let d = [db[0] - da[0], db[1] - da[1], db[2] - da[2]];
         d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < tol2
     };
-    let mut outward: Vec<[f32; 3]> = Vec::new();
-    for &(e, k, g) in &cells {
-        let lat = if g == 1 { &proj } else { &targ };
-        let gg = g as u64;
-        let de = disp(e as u32);
+    let live = |v: u32| v != NONE && vis[v as usize] == 1;
+
+    let per_cell = |e: usize| -> (Vec<Face>, bool) {
+        let g = &t.grids[t.grp[e] as usize];
+        let k = t.key[e];
+        let gbit = (t.grp[e] as u64) << 63;
+        let mut faces = Vec::new();
         // fragmento isolado: nenhum dos 6 vizinhos continua preso a ele
         let mut attached = false;
+        let mut nb = [NONE; 6];
         for ax in 0..3 {
-            for sgn in [-1i32, 1] {
+            for (si, sgn) in [-1i32, 1].into_iter().enumerate() {
                 let mut nk = k;
                 nk[ax] += sgn;
-                if let Some(&v) = map.get(&pack(gg, nk)) {
-                    if v & 0x8000_0000 == 0 && together(de, v) {
-                        attached = true;
-                    }
+                let v = g.at(nk);
+                nb[ax * 2 + si] = v;
+                if live(v) && together(e, v as usize) {
+                    attached = true;
                 }
             }
         }
         if !attached {
-            out.loose.push(e as u32);
-            continue;
+            return (faces, true);
         }
         for ax in 0..3 {
-            for sgn in [-1i32, 1] {
-                let mut nk = k;
-                nk[ax] += sgn;
-                let nb = map.get(&pack(gg, nk)).copied();
-                let cut = match nb {
-                    None => false,
-                    Some(v) if v & 0x8000_0000 != 0 => true,
-                    Some(v) if !together(de, v) => false, // trinca: face exposta
-                    Some(_) => continue,
+            for (si, sgn) in [-1i32, 1].into_iter().enumerate() {
+                let v = nb[ax * 2 + si];
+                let cut = if v == NONE || vis[v as usize] == 0 {
+                    false
+                } else if vis[v as usize] == 2 {
+                    true
+                } else if !together(e, v as usize) {
+                    false // trinca: face exposta
+                } else {
+                    continue;
                 };
-                if out.quads.len() >= max_quads {
-                    return None;
-                }
                 let (a1, a2) = ((ax + 1) % 3, (ax + 2) % 3);
                 let base = if sgn > 0 { k[ax] + 1 } else { k[ax] };
-                let mut vi = [0u32; 4];
+                let mut corners = [(0u64, [0.0f32; 3]); 4];
                 for (q, (du, dv)) in [(0, 0), (1, 0), (1, 1), (0, 1)].into_iter().enumerate() {
                     let mut c = k;
                     c[ax] = base;
                     c[a1] = k[a1] + du;
                     c[a2] = k[a2] + dv;
-                    // média dos deslocamentos das células em volta do canto que continuam presas a esta
+                    // média dos deslocamentos das células em volta do canto presas a esta
                     let (mut acc, mut cnt, mut rep) = ([0.0f32; 3], 0.0f32, e as u32);
                     for dz in 0..2 {
                         for dy in 0..2 {
                             for dxx in 0..2 {
-                                let cc = [c[0] - dxx, c[1] - dy, c[2] - dz];
-                                if let Some(&v) = map.get(&pack(gg, cc)) {
-                                    if v & 0x8000_0000 == 0 && (v == e as u32 || together(de, v)) {
-                                        let dd = disp(v);
-                                        acc[0] += dd[0];
-                                        acc[1] += dd[1];
-                                        acc[2] += dd[2];
-                                        cnt += 1.0;
-                                        rep = rep.min(v);
-                                    }
+                                let w = g.at([c[0] - dxx, c[1] - dy, c[2] - dz]);
+                                if live(w) && (w == e as u32 || together(e, w as usize)) {
+                                    let dd = disp[w as usize];
+                                    acc[0] += dd[0];
+                                    acc[1] += dd[1];
+                                    acc[2] += dd[2];
+                                    cnt += 1.0;
+                                    rep = rep.min(w);
                                 }
                             }
                         }
                     }
-                    let key = (pack(gg, c), rep);
-                    let id = *vmap.entry(key).or_insert_with(|| {
-                        let p = lat.corner(c);
-                        let inv = 1.0 / cnt.max(1.0);
-                        out.verts.push(turn([p[0] + acc[0] * inv, p[1] + acc[1] * inv, p[2] + acc[2] * inv]));
-                        (out.verts.len() - 1) as u32
-                    });
-                    vi[q] = id;
+                    let p = g.lat.corner(c);
+                    let inv = 1.0 / cnt.max(1.0);
+                    // chave: canto + representante do grupo de células presas (até ~16 mi de nós)
+                    let id = gbit | (g.corner_id(c) << 24) ^ (rep as u64 & 0xFF_FFFF);
+                    corners[q] = (id, [p[0] + acc[0] * inv, p[1] + acc[1] * inv, p[2] + acc[2] * inv]);
                 }
-                let eo = lat.e[ax];
-                outward.push(turn([eo[0] * sgn as f32, eo[1] * sgn as f32, eo[2] * sgn as f32]));
-                out.quads.push(Quad { v: vi, cell: e as u32, cut });
+                let eo = g.lat.e[ax];
+                faces.push(Face { corners, outward: [eo[0] * sgn as f32, eo[1] * sgn as f32, eo[2] * sgn as f32], cell: e as u32, cut });
             }
+        }
+        (faces, false)
+    };
+
+    let results: Vec<(Vec<Face>, Vec<u32>)> = (0..total)
+        .into_par_iter()
+        .with_min_len(2048)
+        .fold(
+            || (Vec::new(), Vec::new()),
+            |mut acc, e| {
+                if vis[e] == 1 {
+                    let (f, loose) = per_cell(e);
+                    if loose {
+                        acc.1.push(e as u32);
+                    } else {
+                        acc.0.extend(f);
+                    }
+                }
+                acc
+            },
+        )
+        .collect();
+    let nq: usize = results.iter().map(|r| r.0.len()).sum();
+    if nq > max_quads {
+        return None;
+    }
+
+    let mut out = SurfMesh::default();
+    out.quads.reserve(nq);
+    let mut vmap: FxMap<u64, u32> = FxMap::default();
+    vmap.reserve(nq);
+    let mut outward = Vec::with_capacity(nq);
+    for (faces, loose) in results {
+        out.loose.extend(loose);
+        for f in faces {
+            let mut vi = [0u32; 4];
+            for (q, (id, p)) in f.corners.into_iter().enumerate() {
+                vi[q] = *vmap.entry(id).or_insert_with(|| {
+                    out.verts.push(turn(p));
+                    out.vcell.push(f.cell);
+                    out.vcut.push(f.cut);
+                    (out.verts.len() - 1) as u32
+                });
+            }
+            outward.push(turn(f.outward));
+            out.quads.push(Quad { v: vi, cell: f.cell, cut: f.cut });
         }
     }
 
@@ -261,8 +380,9 @@ mod tests {
         let np = cfg.design.n_proj_parts() as u8;
         let flip = |q: [f32; 3], _m: u8| q;
         let turn = |q: [f32; 3]| q;
-        let vis = |_mi: usize, _i: usize| 1u8;
-        let sm = build(pos.len(), &[0], &pos, &pos, &parts, np, cfg.dx as f32, cfg.obliquity() as f32, usize::MAX, &flip, &turn, &vis).unwrap();
+        let vis = vec![1u8; pos.len()];
+        let t = topo(pos.len(), &[0], &pos, &parts, np, cfg.dx as f32, cfg.obliquity() as f32, &flip);
+        let sm = build(&t, &pos, &vis, cfg.dx as f32, usize::MAX, &flip, &turn).unwrap();
         (sm, pos.len(), cfg.dx as f32)
     }
 
@@ -286,5 +406,30 @@ mod tests {
             eprintln!("  x∈[{x0:.4},{x1:.4}] dx={dx}");
             eprintln!("obl={obl} nós={n} faces={}", sm.quads.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use pensim_core::{Model, Preset};
+    #[test]
+    #[ignore]
+    fn mesh_speed() {
+        let mut cfg = Preset::Rifle762.config();
+        cfg.dx = 0.0006;
+        cfg.symmetry = false;
+        let m = Model::build(&cfg).unwrap();
+        let pos: Vec<[f32; 3]> = m.pos.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
+        let np = cfg.design.n_proj_parts() as u8;
+        let flip = |q: [f32; 3], _m: u8| q;
+        let turn = |q: [f32; 3]| q;
+        let vis = vec![1u8; pos.len()];
+        let t0 = std::time::Instant::now();
+        let t = topo(pos.len(), &[0], &pos, &m.part, np, cfg.dx as f32, 0.0, &flip);
+        let t1 = t0.elapsed();
+        let t0 = std::time::Instant::now();
+        let sm = build(&t, &pos, &vis, cfg.dx as f32, usize::MAX, &flip, &turn).unwrap();
+        eprintln!("nós={} topo={:?} quadro={:?} faces={} vértices={}", pos.len(), t1, t0.elapsed(), sm.quads.len(), sm.verts.len());
     }
 }
