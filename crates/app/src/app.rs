@@ -87,7 +87,8 @@ impl Field {
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Ws {
-    Design,
+    Projectile,
+    Target,
     Resolution,
     Sim,
     Results,
@@ -160,8 +161,8 @@ pub struct PenSim {
     sel: Sel,
     res_tab: ResTab,
     sheet_tab: u8,
-    sketch_mode: bool,
-    target_mode: bool,
+    /// nas abas PROJÉTIL/ALVO: mostra o modelo em 3D em vez do editor 2D
+    peek3d: bool,
     sketch: SketchEditor,
     cam: Camera,
     job: Option<Job>,
@@ -238,12 +239,11 @@ impl PenSim {
             round_nodes: true,
             disc_tex: Some(view3d::disc_texture(&cc.egui_ctx)),
             extra_inset: [0.0, 0.0, 0.0, 0.0],
-            ws: Ws::Design,
+            ws: Ws::Projectile,
             sel: Sel::Projectile,
             res_tab: ResTab::Summary,
             sheet_tab: 0,
-            sketch_mode: false,
-            target_mode: false,
+            peek3d: false,
             sketch: SketchEditor::default(),
             cam: Camera::iso(),
             job: None,
@@ -272,19 +272,20 @@ impl PenSim {
                 "res" => Ws::Resolution,
                 "sim" => Ws::Sim,
                 "results" => Ws::Results,
-                _ => Ws::Design,
+                "target" => Ws::Target,
+                _ => Ws::Projectile,
             };
         }
         if let Some(v) = std::env::var("PENSIM_DX").ok().and_then(|v| v.parse::<f64>().ok()) {
             me.cfg.dx = v / 1e3;
         }
         if std::env::var("PENSIM_TARGET").is_ok() {
-            me.target_mode = true;
+            me.ws = Ws::Target;
             me.cfg.design.layers.push(Layer { thickness: 0.008, gap_before: 0.004, width: 0.05, height: 0.05, round: false, material: LIBRARY[2].clone() });
             me.sketch.tsel = Some((1, true));
         }
         if std::env::var("PENSIM_SKETCH").is_ok() {
-            me.sketch_mode = true;
+            me.ws = Ws::Projectile;
             me.sel = Sel::Sketch;
             me.sketch.selected = Some(3);
         }
@@ -462,6 +463,20 @@ impl PenSim {
         }
         self.view_idx = self.view_idx.min(snap.frames.len().saturating_sub(1));
         self.refresh_preview();
+        // painel de propriedades acompanha a aba: PROJÉTIL → projétil, ALVO → camada selecionada
+        match self.ws {
+            Ws::Projectile => {
+                if !matches!(self.sel, Sel::Projectile | Sel::Sketch) {
+                    self.sel = Sel::Projectile;
+                }
+            }
+            Ws::Target => {
+                let n = self.cfg.design.layers.len().max(1);
+                let i = self.sketch.tsel.map(|t| t.0).unwrap_or(0).min(n - 1);
+                self.sel = Sel::Layer(i);
+            }
+            _ => {}
+        }
 
         // área segura: mantém a interface fora da barra de status, do recorte da câmera e da navegação
         let sys = system_insets(&ctx);
@@ -598,14 +613,30 @@ impl PenSim {
     }
 
     fn tabs(&mut self, ui: &mut egui::Ui) {
-        for (w, l) in [(Ws::Design, "PROJETO"), (Ws::Resolution, "RESOLUÇÃO"), (Ws::Sim, "SIMULAÇÃO"), (Ws::Results, "RESULTADOS")] {
+        for (w, l) in [(Ws::Projectile, "PROJÉTIL"), (Ws::Target, "ALVO"), (Ws::Resolution, "RESOLUÇÃO"), (Ws::Sim, "SIMULAÇÃO"), (Ws::Results, "RESULTADOS")] {
             if ui.selectable_label(self.ws == w, RichText::new(l).strong()).clicked() {
                 self.ws = w;
-                if w != Ws::Design {
-                    self.sketch_mode = false;
-                    self.target_mode = false;
+                self.peek3d = false;
+                if matches!(w, Ws::Projectile | Ws::Target) {
+                    self.sheet_tab = 1; // abre as propriedades (material, espessura…)
                 }
             }
+        }
+    }
+
+    /// Seleciona um item e abre a aba correspondente (PROJÉTIL, ALVO, RESOLUÇÃO ou SIMULAÇÃO).
+    fn goto(&mut self, sel: Sel) {
+        self.sel = sel;
+        self.sheet_tab = 1;
+        self.peek3d = false;
+        match sel {
+            Sel::Sketch | Sel::Projectile => self.ws = Ws::Projectile,
+            Sel::Layer(i) => {
+                self.ws = Ws::Target;
+                self.sketch.tsel = Some((i, true));
+            }
+            Sel::Conditions => self.ws = Ws::Sim,
+            Sel::Mesh => self.ws = Ws::Resolution,
         }
     }
 
@@ -628,8 +659,7 @@ impl PenSim {
 
     fn toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, snap: &Snap) {
         ui.horizontal(|ui| match self.ws {
-            Ws::Design => {
-                if self.target_mode {
+            Ws::Target => {
                     group(ui, "CAMADA SELECIONADA", |ui| {
                         let sel = self.sketch.tsel.map(|t| t.0).unwrap_or(0).min(self.cfg.design.layers.len() - 1);
                         let l = &mut self.cfg.design.layers[sel];
@@ -664,12 +694,32 @@ impl PenSim {
                             ui.selectable_value(&mut self.sketch.snap_mm, s, format!("{s} mm"));
                         }
                     });
-                    group(ui, "SAIR", |ui| {
-                        if tbtn(ui, "✔", "Concluir", false, true, 62.0).clicked() {
-                            self.target_mode = false;
+                    group(ui, "VISTA", |ui| {
+                        if tbtn(ui, "▣", if self.peek3d { "Voltar ao\ndesenho" } else { "Ver em\n3D" }, self.peek3d, true, 70.0).clicked() {
+                            self.peek3d = !self.peek3d;
                         }
                     });
-                } else if self.sketch_mode {
+            }
+            Ws::Projectile => {
+                    group(ui, "BIBLIOTECA DE MUNIÇÕES", |ui| {
+                        let name = AMMO[self.ammo_idx].name;
+                        egui::ComboBox::from_id_salt("ammo").width(if compact() { 190.0 } else { 270.0 }).selected_text(name).show_ui(ui, |ui| {
+                            let mut last = "";
+                            for (i, a) in AMMO.iter().enumerate() {
+                                if a.group != last {
+                                    ui.label(RichText::new(a.group).strong().color(ACCENT));
+                                    last = a.group;
+                                }
+                                if ui.selectable_label(i == self.ammo_idx, a.name).clicked() {
+                                    self.load_ammo(i, a.scale);
+                                }
+                            }
+                        });
+                        let mut sc = self.ammo_scale;
+                        if ui.add(egui::DragValue::new(&mut sc).prefix("escala ×").speed(0.01).range(0.03..=3.0).fixed_decimals(2)).on_hover_text("Todas as dimensões × escala (mesma velocidade)").changed() {
+                            self.load_ammo(self.ammo_idx, sc);
+                        }
+                    });
                     group(ui, "FERRAMENTAS DE ESBOÇO", |ui| {
                         for (t, i, l) in [(Tool::Move, "✥", "Mover"), (Tool::Add, "+", "Ponto"), (Tool::Delete, "✕", "Excluir")] {
                             if tbtn(ui, i, l, self.sketch.tool == t, true, 62.0).clicked() {
@@ -700,38 +750,6 @@ impl PenSim {
                             ui.selectable_value(&mut self.sketch.snap_mm, s, format!("{s} mm"));
                         }
                     });
-                    group(ui, "SAIR", |ui| {
-                        if tbtn(ui, "✔", "Concluir", false, true, 62.0).clicked() {
-                            self.sketch_mode = false;
-                        }
-                    });
-                } else {
-                    group(ui, "BIBLIOTECA DE MUNIÇÕES", |ui| {
-                        let name = AMMO[self.ammo_idx].name;
-                        egui::ComboBox::from_id_salt("ammo").width(if compact() { 190.0 } else { 270.0 }).selected_text(name).show_ui(ui, |ui| {
-                            let mut last = "";
-                            for (i, a) in AMMO.iter().enumerate() {
-                                if a.group != last {
-                                    ui.label(RichText::new(a.group).strong().color(ACCENT));
-                                    last = a.group;
-                                }
-                                if ui.selectable_label(i == self.ammo_idx, a.name).clicked() {
-                                    self.load_ammo(i, a.scale);
-                                }
-                            }
-                        });
-                        let mut sc = self.ammo_scale;
-                        if ui.add(egui::DragValue::new(&mut sc).prefix("escala ×").speed(0.01).range(0.03..=3.0).fixed_decimals(2)).on_hover_text("Todas as dimensões × escala (mesma velocidade)").changed() {
-                            self.load_ammo(self.ammo_idx, sc);
-                        }
-                    });
-                    group(ui, "ESBOÇO", |ui| {
-                        if tbtn(ui, "✎", "Editar\nperfil", false, true, 62.0).clicked() {
-                            self.sketch_mode = true;
-                            self.target_mode = false;
-                            self.sel = Sel::Sketch;
-                        }
-                    });
                     group(ui, "PONTA", |ui| {
                         for n in Nose::ALL {
                             if tbtn(ui, "◗", n.label(), false, true, 62.0).clicked() {
@@ -742,27 +760,11 @@ impl PenSim {
                             }
                         }
                     });
-                    group(ui, "ALVO", |ui| {
-                        if tbtn(ui, "✎", "Editar\nalvo", false, true, 62.0).clicked() {
-                            self.target_mode = true;
-                            self.sketch_mode = false;
-                            self.sel = Sel::Layer(0);
-                        }
-                        if tbtn(ui, "+", "Camada", false, true, 62.0).clicked() {
-                            let mut l = self.cfg.design.layers.last().cloned().unwrap_or_else(|| Preset::Rifle762.config().design.layers[0].clone());
-                            l.thickness = 0.008;
-                            l.material = LIBRARY[2].clone();
-                            self.cfg.design.layers.push(l);
-                            self.sel = Sel::Layer(self.cfg.design.layers.len() - 1);
-                        }
-                        if let Sel::Layer(i) = self.sel {
-                            if tbtn(ui, "✕", "Remover", false, self.cfg.design.layers.len() > 1, 62.0).clicked() {
-                                self.cfg.design.layers.remove(i);
-                                self.sel = Sel::Layer(0);
-                            }
+                    group(ui, "VISTA", |ui| {
+                        if tbtn(ui, "▣", if self.peek3d { "Voltar ao\ndesenho" } else { "Ver em\n3D" }, self.peek3d, true, 70.0).clicked() {
+                            self.peek3d = !self.peek3d;
                         }
                     });
-                }
             }
             Ws::Resolution => {
                 group(ui, "PREDEFINIÇÕES", |ui| {
@@ -875,11 +877,7 @@ impl PenSim {
         ui.label(RichText::new("NAVEGADOR").small().weak());
         let mut pick = |this: &mut PenSim, ui: &mut egui::Ui, sel: Sel, text: String| {
             if ui.selectable_label(this.sel == sel, text).clicked() {
-                this.sel = sel;
-                this.sheet_tab = 1;
-                if sel == Sel::Sketch {
-                    this.ws = Ws::Design;
-                }
+                this.goto(sel);
             }
         };
         egui::CollapsingHeader::new("Documento").default_open(true).show(ui, |ui| {
@@ -938,10 +936,7 @@ impl PenSim {
             Sel::Sketch => {
                 ui.heading("Esboço 1 · perfil");
                 ui.label("Contorno externo do projétil no plano a–r, revolvido em torno do eixo. A ponta fica em a = 0.");
-                if ui.button("✎ Editar esboço").clicked() {
-                    self.sketch_mode = true;
-                    self.ws = Ws::Design;
-                }
+                ui.weak("Edite na aba PROJÉTIL: arraste os pontos ou use as setas.");
                 let p = &self.cfg.design.projectile;
                 ui.label(format!("Pontos: {} · L = {:.1} mm · ⌀ = {:.1} mm", p.profile.len(), p.length() * 1e3, p.max_radius() * 2e3));
                 ui.separator();
@@ -1000,11 +995,8 @@ impl PenSim {
                     return;
                 }
                 ui.heading(format!("Extrusão {}", i + 1));
-                if ui.button("✎ Editar no esboço do alvo").clicked() {
-                    self.target_mode = true;
-                    self.sketch_mode = false;
-                    self.ws = Ws::Design;
-                    self.sketch.tsel = Some((i, true));
+                if self.ws != Ws::Target && ui.button("✎ Editar na aba ALVO").clicked() {
+                    self.goto(Sel::Layer(i));
                 }
                 let l: &mut Layer = &mut self.cfg.design.layers[i];
                 mat_combo(ui, "lm", &mut l.material);
@@ -1066,7 +1058,7 @@ impl PenSim {
                 return;
             }
         }
-        if self.ws != Ws::Design || !matches!(self.sel, Sel::Sketch) {
+        {
             ui.separator();
             let stale = self.started_key.as_ref() != Some(&self.key());
             if ui.add_sized([ui.available_width(), 42.0], egui::Button::new(RichText::new("▶ Simular").strong().color(Color32::WHITE)).fill(ACCENT)).clicked() {
@@ -1305,12 +1297,13 @@ impl PenSim {
             });
         } else {
             // linha do tempo de recursos (estilo Fusion)
+            let mut go: Option<Sel> = None;
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("LINHA DO TEMPO").small().weak());
+                let cur = self.sel;
                 let mut chip = |ui: &mut egui::Ui, sel: Sel, t: String| {
-                    if ui.add(egui::Button::new(RichText::new(t).small()).selected(self.sel == sel)).clicked() {
-                        self.sel = sel;
-                        self.sheet_tab = 1;
+                    if ui.add(egui::Button::new(RichText::new(t).small()).selected(cur == sel)).clicked() {
+                        go = Some(sel);
                     }
                 };
                 chip(ui, Sel::Sketch, "✎ Esboço 1".into());
@@ -1320,6 +1313,9 @@ impl PenSim {
                 }
                 chip(ui, Sel::Conditions, "⚙ Impacto".into());
             });
+            if let Some(s) = go {
+                self.goto(s);
+            }
         }
     }
 
@@ -1332,13 +1328,13 @@ impl PenSim {
     }
 
     fn viewport_inner(&mut self, ui: &mut egui::Ui, snap: &Snap) {
-        if self.target_mode && self.ws == Ws::Design {
+        if self.ws == Ws::Target && !self.peek3d {
             let colors: Vec<Color32> = self.cfg.design.layers.iter().map(|l| mat_color(l.material.name)).collect();
             let proj = self.cfg.design.projectile.profile.clone();
             sketch::show_target(ui, &mut self.sketch, &mut self.cfg.design.layers, &proj, &colors);
             return;
         }
-        if self.sketch_mode && self.ws == Ws::Design {
+        if self.ws == Ws::Projectile && !self.peek3d {
             let fill = mat_color(self.cfg.design.projectile.material.name);
             let core = self.cfg.design.projectile.core.as_ref().map(|c| (c.profile.clone(), mat_color(c.material.name)));
             sketch::show(ui, &mut self.sketch, &mut self.cfg.design.projectile.profile, fill, core.as_ref().map(|(p, c)| (p.as_slice(), *c)));
@@ -1445,7 +1441,7 @@ impl PenSim {
                 legend(&painter, rect, self.field, lo, hi);
                 if self.outline {
                     let (parts, np) = (snap.parts.clone(), self.cfg.design.n_proj_parts() as u8);
-                    view3d::outline(&painter, &view, dx, &ext_pos, &idx, &|i| parts[i % n] < np, Color32::from_rgb(20, 24, 36));
+                    view3d::outline(&painter, &view, dx, &ext_pos, &idx, &|i| if parts[i % n] >= np { 0 } else if f.damage[i % n] >= 0.6 { 2 } else { 1 }, Color32::from_rgb(20, 24, 36));
                 }
             } else {
                 let parts = snap.parts.clone();
@@ -1453,7 +1449,7 @@ impl PenSim {
                 view3d::render(&painter, &view, dx, &ext_pos, &idx, true, Some(&light), round_id, &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
                 if self.outline {
                     let np = self.cfg.design.n_proj_parts() as u8;
-                    view3d::outline(&painter, &view, dx, &ext_pos, &idx, &|i| parts[i % n] < np, Color32::from_rgb(20, 24, 36));
+                    view3d::outline(&painter, &view, dx, &ext_pos, &idx, &|i| if parts[i % n] >= np { 0 } else if f.damage[i % n] >= 0.6 { 2 } else { 1 }, Color32::from_rgb(20, 24, 36));
                 }
             }
             painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, format!("t = {:.1} µs", f.time * 1e6), FontId::monospace(15.0), Color32::from_gray(30));
@@ -1463,7 +1459,7 @@ impl PenSim {
             view3d::render(&painter, &view, p.dx, &p.pos, &idx, true, None, round_id, &|i| mats[(p.part[i] as usize).min(mats.len() - 1)]);
             if self.outline {
                 let np = self.cfg.design.n_proj_parts() as u8;
-                view3d::outline(&painter, &view, p.dx, &p.pos, &idx, &|i| p.part[i] < np, Color32::from_rgb(20, 24, 36));
+                view3d::outline(&painter, &view, p.dx, &p.pos, &idx, &|i| if p.part[i] < np { 1 } else { 0 }, Color32::from_rgb(20, 24, 36));
             }
             let label = p.note.clone().unwrap_or_else(|| format!("Modelo · {} nós", p.pos.len()));
             painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, label, FontId::proportional(13.0), Color32::from_gray(60));

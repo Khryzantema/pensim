@@ -176,7 +176,8 @@ pub fn input(ui: &egui::Ui, resp: &Response, cam: &mut Camera) {
 /// Contorno externo (1 px) das partículas do projétil: mapa de ocupação em tela + profundidade do
 /// alvo. O traço envolve cada partícula/silhueta sem cobrir sua cor, aparece só onde o projétil
 /// está visível (não sobre o alvo que o encobre) e separa o projétil do alvo e do fundo.
-pub fn outline(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3]], idx: &[u32], is_proj: &dyn Fn(usize) -> bool, color: Color32) {
+/// `class(i)`: 0 = alvo (oclui), 1 = corpo do projétil (recebe contorno), 2 = ignorar (partícula solta).
+pub fn outline(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3]], idx: &[u32], class: &dyn Fn(usize) -> u8, color: Color32) {
     const CELL: f32 = 1.0; // pontos de tela por célula
     let r = v.rect;
     let (gw, gh) = (((r.width() / CELL).ceil() as usize).max(3), ((r.height() / CELL).ceil() as usize).max(3));
@@ -188,7 +189,11 @@ pub fn outline(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3
     for &i in idx {
         let (p, d) = v.project(pos[i as usize]);
         let (cx, cy) = (((p.x - r.left()) / CELL) as i32, ((p.y - r.top()) / CELL) as i32);
-        if is_proj(i as usize) {
+        let cl = class(i as usize);
+        if cl == 2 {
+            continue;
+        }
+        if cl == 1 {
             proj.push((cx, cy, d));
         } else {
             for dy in -rc..=rc {

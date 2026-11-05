@@ -150,6 +150,7 @@ pub struct Sim {
     /// tempos acumulados [s]: grade, forças (ligações+contato), integração
     pub prof: [f64; 3],
     exit_found: bool,
+    had_contact: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -317,6 +318,7 @@ impl Sim {
             gfac,
             prof: [0.0; 3],
             exit_found: false,
+            had_contact: false,
             cfg,
         };
         sim.build_bonds(horizon);
@@ -877,35 +879,67 @@ impl Sim {
         self.step_count += 1;
     }
 
-    /// Encerra pouco depois de o projétil sair do alvo (por trás, ao perfurar,
-    /// ou pela frente, ao ricochetear), sem calcular até o tempo final.
+    /// Fim por separação: depois de ter havido contato, quando o corpo principal do projétil
+    /// (nós com ≥ 50% das ligações vivas, sem fragmentos soltos) deixa de tocar o alvo, a
+    /// animação continua por mais 25% do tempo decorrido até esse instante.
     fn check_exit(&mut self) {
         if self.exit_found {
             return;
         }
-        let margin = 0.005f64.max(3.0 * self.cfg.dx);
-        let (mut np, mut behind, mut front, mut vx) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-        for (i, q) in self.p[..self.n_real].iter().enumerate() {
-            if self.part[i] >= self.n_proj {
-                continue;
-            }
-            np += 1.0;
-            vx += q.vx;
-            if q.x > self.back_x + margin {
-                behind += 1.0;
-            }
-            if q.x < -margin {
-                front += 1.0;
+        let nr = self.n_real;
+        let mut alive = vec![0u32; nr];
+        for i in 0..nr {
+            for bd in &self.bonds[i] {
+                if bd.ixi < 0.0 {
+                    continue;
+                }
+                alive[i] += 1;
+                let j = bd.j as usize;
+                let t = if j < nr { j } else { self.src[j - nr] as usize };
+                if t != i {
+                    alive[t] += 1;
+                }
             }
         }
-        let vm = vx / np.max(1.0);
-        let perforated = behind >= 0.5 * np && vm > 0.0;
-        let rebounded = front >= np && vm < 0.0;
-        if perforated || rebounded {
+        let g = self.grid;
+        let reach2 = (1.3 * self.cfg.dx).powi(2);
+        let (mut touching, mut n_main) = (false, 0usize);
+        'nodes: for i in 0..nr {
+            if self.part[i] >= self.n_proj || (alive[i] as f64) < 0.5 * self.initial_bonds[i] as f64 {
+                continue;
+            }
+            n_main += 1;
+            let c0 = cell_coords(self.cell_of[i], &g);
+            let me = &self.p[i];
+            for oz in -1..=1 {
+                for oy in -1..=1 {
+                    for ox in -1..=1 {
+                        let qc = [c0[0] + ox, c0[1] + oy, c0[2] + oz];
+                        if (0..3).any(|k| qc[k] < 0 || qc[k] >= g.n[k]) {
+                            continue;
+                        }
+                        let id = ((qc[2] * g.n[1] + qc[1]) * g.n[0] + qc[0]) as usize;
+                        for k in self.cell_start[id]..self.cell_start[id + 1] {
+                            let j = self.cell_items[k as usize] as usize;
+                            if self.part[j] < self.n_proj {
+                                continue;
+                            }
+                            let q = &self.p[j];
+                            let d2 = (q.x - me.x).powi(2) + (q.y - me.y).powi(2) + (q.z - me.z).powi(2);
+                            if d2 < reach2 {
+                                touching = true;
+                                break 'nodes;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if touching {
+            self.had_contact = true;
+        } else if self.had_contact && n_main > 0 {
             self.exit_found = true;
-            // cauda após a saída: +35% para o projétil se afastar bastante do alvo
-            let tail = 1.35 * (0.2 * self.time).max(5e-6);
-            self.t_end = self.t_end.min(self.time + tail);
+            self.t_end = self.t_end.min(self.time * 1.25);
         }
     }
 

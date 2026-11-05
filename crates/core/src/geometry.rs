@@ -129,7 +129,9 @@ pub fn hash_unit(a: u64, b: u64, c: u64, d: u64) -> f64 {
             .map(|&(a, u, v, _)| [-d[0] * a + ev[0] * v, u, -d[2] * a + ev[2] * v])
             .collect();
         let maxx = wp.iter().map(|p| p[0]).fold(f64::MIN, f64::max);
-        let shift = -0.6 * dx - maxx;
+        // espacinho inicial entre a ponta do projétil e a face do alvo
+        let gap = 0.003f64.max(2.0 * dx);
+        let shift = -gap - maxx;
         for (k, p) in wp.into_iter().enumerate() {
             let jt = cfg.jitter * dx;
             let kk = k as u64;

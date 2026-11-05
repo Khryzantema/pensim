@@ -87,7 +87,7 @@ fn stops_shortly_after_projectile_exits() {
     s.run_to_end();
     assert_eq!(s.outcome().kind, OutcomeKind::Perforation);
     assert!(s.time < 0.85 * full, "parou em {:.1} µs de {:.1} µs", s.time * 1e6, full * 1e6);
-    assert!(s.t_end() + s.dt >= s.time);
+    assert!(s.t_end() + 3.0 * s.dt >= s.time);
 }
 
 #[test]
