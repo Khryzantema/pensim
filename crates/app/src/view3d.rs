@@ -248,11 +248,22 @@ pub fn outline(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3
     painter.with_clip_rect(r).add(egui::Shape::mesh(mesh));
 }
 
-/// Desenha a malha de faces: vértices compartilhados (Gouraud por canto), descarte de faces de
-/// costas e ordenação por profundidade só dos índices.
-pub fn render_surf(painter: &egui::Painter, v: &View, m: &crate::mesh::SurfMesh, ld: [f32; 3], color: &dyn Fn(usize, bool) -> Color32) {
+/// Fragmentos soltos desenhados junto com as faces (mesma ordenação por profundidade).
+pub struct Loose<'a> {
+    pub pos: &'a [[f32; 3]],
+    pub idx: &'a [u32],
+    pub node_size: f32,
+    pub tex: Option<egui::TextureId>,
+    pub color: &'a dyn Fn(usize) -> Color32,
+}
+
+/// Desenha a malha de faces e os fragmentos soltos numa só passada ordenada por profundidade
+/// (vértices compartilhados com Gouraud por canto, descarte de faces de costas).
+pub fn render_surf(painter: &egui::Painter, v: &View, m: &crate::mesh::SurfMesh, ld: [f32; 3], color: &dyn Fn(usize, bool) -> Color32, loose: Option<Loose>) {
     let (_, _, e) = v.cam.basis();
     let proj: Vec<(Pos2, f32)> = m.verts.iter().map(|&p| v.project(p)).collect();
+    // itens: (profundidade, índice) — índice < nq = face, senão fragmento
+    let nq = m.quads.len() as u32;
     let mut order: Vec<(f32, u32)> = Vec::with_capacity(m.quads.len());
     let clip = v.rect.expand(40.0);
     for (qi, q) in m.quads.iter().enumerate() {
@@ -269,14 +280,29 @@ pub fn render_surf(painter: &egui::Painter, v: &View, m: &crate::mesh::SurfMesh,
         if !inside || dot(nn, e) < -0.2 {
             continue; // fora da tela ou de costas
         }
-        order.push((dep, qi as u32));
+        order.push((dep * 0.25, qi as u32));
+    }
+    let mut lproj: Vec<(Pos2, u32)> = Vec::new();
+    if let Some(l) = &loose {
+        for &i in l.idx {
+            let (p, d) = v.project(l.pos[i as usize]);
+            if clip.contains(p) {
+                order.push((d, nq + lproj.len() as u32));
+                lproj.push((p, i));
+            }
+        }
     }
     order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    let (dmin, dmax) = order.first().map_or((0.0, 1.0), |f| (f.0 * 0.25, order.last().unwrap().0 * 0.25));
+    let (dmin, dmax) = order.first().map_or((0.0, 1.0), |f| (f.0, order.last().unwrap().0));
     let h = [ld[0] + e[0], ld[1] + e[1], ld[2] + e[2]];
     let hm = dot(h, h).sqrt().max(1e-6);
-    let uv = egui::epaint::WHITE_UV;
-    let mut mesh = egui::Mesh::default();
+    let tex = loose.as_ref().and_then(|l| l.tex);
+    // com a textura do disco, as faces usam um texel branco opaco dela
+    let uv = if tex.is_some() { Pos2::new(0.35, 0.35) } else { egui::epaint::WHITE_UV };
+    let mut mesh = match tex {
+        Some(t) => egui::Mesh::with_texture(t),
+        None => egui::Mesh::default(),
+    };
     mesh.vertices = m
         .verts
         .iter()
@@ -293,9 +319,26 @@ pub fn render_surf(painter: &egui::Painter, v: &View, m: &crate::mesh::SurfMesh,
         })
         .collect();
     mesh.indices.reserve(order.len() * 6);
-    for (_, qi) in order {
-        let q = &m.quads[qi as usize].v;
-        mesh.indices.extend_from_slice(&[q[0], q[1], q[2], q[0], q[2], q[3]]);
+    let half = loose.as_ref().map_or(1.0, |l| (l.node_size * v.scale() * if l.tex.is_some() { 0.74 } else { 0.62 }).max(0.6));
+    let full_uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+    for (d, k) in order {
+        if k < nq {
+            let q = &m.quads[k as usize].v;
+            mesh.indices.extend_from_slice(&[q[0], q[1], q[2], q[0], q[2], q[3]]);
+        } else if let Some(l) = &loose {
+            let (p, i) = lproj[(k - nq) as usize];
+            let depth_t = 0.72 + 0.28 * ((d - dmin) / (dmax - dmin).max(1e-9)).clamp(0.0, 1.0);
+            let c = (l.color)(i as usize);
+            let f = |ch: u8| ((ch as f32 * depth_t).clamp(0.0, 255.0)) as u8;
+            let col = Color32::from_rgb(f(c.r()), f(c.g()), f(c.b()));
+            let r = Rect::from_center_size(p, Vec2::splat(half * 2.0));
+            if l.tex.is_some() {
+                mesh.add_rect_with_uv(r, full_uv, col);
+            } else {
+                let w = Rect::from_min_max(uv, uv);
+                mesh.add_rect_with_uv(r, w, col);
+            }
+        }
     }
     painter.with_clip_rect(v.rect).add(egui::Shape::mesh(mesh));
 }

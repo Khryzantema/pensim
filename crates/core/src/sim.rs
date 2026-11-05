@@ -1064,7 +1064,9 @@ impl Sim {
                         if bd.ixi >= 0.0 {
                             let u = bd.rnd as f64 * (1.0 / 127.5) - 1.0;
                             let dthr = if nobreak { 1e30 } else { 1.0 + 0.3 * noise * u };
-                            if dmg[i] as f64 >= dthr || dmg[jr] as f64 >= dthr {
+                            // média dos dois lados: a trinca se concentra onde o dano é alto dos dois lados
+                            // ("qualquer um" soltava nós inteiros e virava uma nuvem de pó)
+                            if 0.5 * (dmg[i] as f64 + dmg[jr] as f64) >= dthr {
                                 let q = &p[j];
                                 let (rx, ry, rz) = (q.x - me.x, q.y - me.y, q.z - me.z);
                                 let r = (rx * rx + ry * ry + rz * rz).sqrt();
@@ -1544,7 +1546,9 @@ impl Sim {
             let ptrs: Vec<SyncPtr> = self.locals.iter_mut().map(|v| SyncPtr(v.as_mut_ptr())).collect();
             let part = &self.part;
             let fixed = &self.fixed;
-            let release_dv = 0.02 * self.cfg.velocity;
+            // state-based: as ondas de pressão chegam fortes à borda; a fixação solta só por dano
+            // (ligações rompidas / dano dúctil), não pela força de uma onda passando
+            let release_dv = if self.osb { f64::INFINITY } else { 0.02 * self.cfg.velocity };
             let mass = &self.mass;
             let mats = &self.mats;
             let touched = &self.touched;
@@ -1687,7 +1691,8 @@ impl Sim {
         }
         // fixação danificada (perdeu ligações para o material que rasgou) solta o nó
         for i in 0..nr {
-            if alive[i] < (0.75 * self.initial_bonds[i] as f64) as u32 && self.fixed[i].load(Ordering::Relaxed) {
+            let ductile = self.osb && self.dmg[i] > 0.5;
+            if (alive[i] < (0.75 * self.initial_bonds[i] as f64) as u32 || ductile) && self.fixed[i].load(Ordering::Relaxed) {
                 self.fixed[i].store(false, Ordering::Relaxed);
             }
         }
@@ -1728,7 +1733,13 @@ impl Sim {
                             if self.hg.cell[j] != tc || self.part[j] < self.n_proj {
                                 continue;
                             }
+                            // só conta o alvo de verdade: material inteiro ainda dentro da chapa
+                            // (fragmentos e tampão que viajam com o projétil não o prendem)
+                            let jr = if j < nr { j } else { self.src[j - nr] as usize };
                             let q = &self.p[j];
+                            if (alive[jr] as f64) < 0.5 * self.initial_bonds[jr] as f64 || q.x > self.back_x + self.cfg.dx {
+                                continue;
+                            }
                             let d2 = (q.x - me.x).powi(2) + (q.y - me.y).powi(2) + (q.z - me.z).powi(2);
                             if d2 < reach2 {
                                 touching = true;

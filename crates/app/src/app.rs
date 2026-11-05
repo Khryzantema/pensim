@@ -461,6 +461,9 @@ impl PenSim {
         if std::env::var("PENSIM_HIDETARGET").is_ok() {
             me.hide_target = true;
         }
+        if std::env::var("PENSIM_FACES").is_ok() {
+            me.faces = true;
+        }
         if std::env::var("PENSIM_DEMO").is_ok() {
             me.start(&cc.egui_ctx);
             if std::env::var("PENSIM_ISO").is_ok() {
@@ -2075,14 +2078,15 @@ impl PenSim {
                 let mat_cols: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
                 let part_of = snap.parts.clone();
                 if let Some(sm) = &faces_mesh {
+                    let lc = |i: usize| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands);
+                    let loose = view3d::Loose { pos: &ext_pos, idx: &sm.loose, node_size: dx, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
                     view3d::render_surf(&painter, &view, sm, ld, &|e, cut| {
                         if cut && !self.cut_colored {
                             mat_cols[(part_of[e % n] as usize).min(mat_cols.len() - 1)]
                         } else {
                             rainbow((data[e % n] * sc_f - lo) / (hi - lo), bands)
                         }
-                    });
-                    view3d::render(&painter, &view, dx, &ext_pos, &sm.loose, false, None, self.disc_tex.as_ref().map(|t| t.id()), &|i| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands));
+                    }, Some(loose));
                 } else {
                     view3d::render(&painter, &view, dx, &ext_pos, &idx, false, Some(&light), round_id, &|i| {
                         if plain[i] {
@@ -2101,8 +2105,9 @@ impl PenSim {
                 let parts = snap.parts.clone();
                 let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
                 if let Some(sm) = &faces_mesh {
-                    view3d::render_surf(&painter, &view, sm, ld, &|e, _| mats[(parts[e % n] as usize).min(mats.len() - 1)]);
-                    view3d::render(&painter, &view, dx, &ext_pos, &sm.loose, true, None, self.disc_tex.as_ref().map(|t| t.id()), &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
+                    let lc = |i: usize| mats[(parts[i % n] as usize).min(mats.len() - 1)];
+                    let loose = view3d::Loose { pos: &ext_pos, idx: &sm.loose, node_size: dx, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
+                    view3d::render_surf(&painter, &view, sm, ld, &|e, _| mats[(parts[e % n] as usize).min(mats.len() - 1)], Some(loose));
                 } else {
                     view3d::render(&painter, &view, dx, &ext_pos, &idx, true, Some(&light), round_id, &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
                 }

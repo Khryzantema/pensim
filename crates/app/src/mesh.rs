@@ -210,10 +210,16 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
     // duas células vizinhas só "continuam juntas" se a posição relativa mudou menos que isso;
     // senão houve trinca/separação: a face entre elas aparece e os cantos não são compartilhados
     let tol2 = (0.75 * dx) * (0.75 * dx);
+    // juntas = ainda próximas (até 1,6× a distância original). O metal pode escoar e se deformar
+    // muito sem romper; só uma trinca de verdade afasta os vizinhos
+    let _ = tol2;
     let together = |a: usize, b: usize| -> bool {
+        let (ra, rb) = (t.refx[a], t.refx[b]);
         let (da, db) = (disp[a], disp[b]);
-        let d = [db[0] - da[0], db[1] - da[1], db[2] - da[2]];
-        d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < tol2
+        let r0 = [rb[0] - ra[0], rb[1] - ra[1], rb[2] - ra[2]];
+        let r1 = [r0[0] + db[0] - da[0], r0[1] + db[1] - da[1], r0[2] + db[2] - da[2]];
+        let (l0, l1) = (r0[0] * r0[0] + r0[1] * r0[1] + r0[2] * r0[2], r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2]);
+        l1 < 2.56 * l0.max(1e-30)
     };
     let live = |v: u32| v != NONE && vis[v as usize] == 1;
 
@@ -431,5 +437,32 @@ mod bench {
         let t0 = std::time::Instant::now();
         let sm = build(&t, &pos, &vis, cfg.dx as f32, usize::MAX, &flip, &turn).unwrap();
         eprintln!("nós={} topo={:?} quadro={:?} faces={} vértices={}", pos.len(), t1, t0.elapsed(), sm.quads.len(), sm.verts.len());
+    }
+}
+
+#[cfg(test)]
+mod ammo_faces {
+    use super::*;
+    use pensim_core::{Model, AMMO};
+    #[test]
+    fn projectile_gets_faces() {
+        for k in [4usize, 8, 14, 16] {
+            let a = &AMMO[k];
+            let s = 8.0 * 1.5e-3 / (a.caliber_mm * 1e-3);
+            let mut cfg = a.config(s);
+            cfg.symmetry = false;
+            let m = Model::build(&cfg).unwrap();
+            let pos: Vec<[f32; 3]> = m.pos.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
+            let np = cfg.design.n_proj_parts() as u8;
+            let flip = |q: [f32; 3], _m: u8| q;
+            let turn = |q: [f32; 3]| q;
+            let vis = vec![1u8; pos.len()];
+            let t = topo(pos.len(), &[0], &pos, &m.part, np, cfg.dx as f32, 0.0, &flip);
+            let sm = build(&t, &pos, &vis, cfg.dx as f32, usize::MAX, &flip, &turn).unwrap();
+            let nproj = m.part.iter().filter(|&&p| p < np).count();
+            let loose_p = sm.loose.iter().filter(|&&e| m.part[e as usize] < np).count();
+            let faces_p = sm.quads.iter().filter(|q| m.part[q.cell as usize] < np).count();
+            eprintln!("{}: nós proj {nproj}, soltos {loose_p}, faces proj {faces_p}", a.name);
+        }
     }
 }
