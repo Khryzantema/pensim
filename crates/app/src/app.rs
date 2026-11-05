@@ -8,6 +8,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 const RES_PRESETS: [(&str, f64); 5] = [("Rascunho", 0.0025), ("Rápida", 0.002), ("Média", 0.0015), ("Fina", 0.001), ("Muito fina", 0.0008)];
+/// duração (s) da reprodução completa em velocidade 1×
+const PLAY_SECONDS: f32 = 6.0;
 const ACCENT: Color32 = Color32::from_rgb(0, 112, 192);
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -116,6 +118,8 @@ struct Snap {
     dt: f64,
     steps: u64,
     wall: f64,
+    sim_time: f64,
+    t_end: f64,
     parts: Arc<Vec<u8>>,
     surface: Arc<Vec<bool>>,
     ref_pos: Arc<Vec<[f32; 3]>>,
@@ -141,8 +145,13 @@ pub struct PenSim {
     section: bool,
     range: [(f32, f32); 7],
     view_idx: usize,
-    follow: bool,
-    replay: bool,
+    live_view: bool,
+    autoplayed: bool,
+    playing: bool,
+    loop_play: bool,
+    speed: f32,
+    play_pos: f32,
+    started_at: std::time::Instant,
     preview: Preview,
     preview_key: Option<Key>,
 }
@@ -207,8 +216,13 @@ impl PenSim {
             section: true,
             range: [(0.0, 0.0); 7],
             view_idx: 0,
-            follow: true,
-            replay: false,
+            live_view: false,
+            autoplayed: false,
+            playing: false,
+            loop_play: false,
+            speed: 1.0,
+            play_pos: 0.0,
+            started_at: std::time::Instant::now(),
             preview: Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: None },
             preview_key: None,
         }
@@ -265,8 +279,10 @@ impl PenSim {
         self.job = None;
         self.range = [(0.0, 0.0); 7];
         self.view_idx = 0;
-        self.follow = true;
-        self.replay = false;
+        self.autoplayed = false;
+        self.playing = false;
+        self.play_pos = 0.0;
+        self.started_at = std::time::Instant::now();
         self.started_key = Some(self.key());
         self.job = Some(Job::spawn(self.cfg.clone(), ctx.clone()));
         self.ws = Ws::Results;
@@ -278,9 +294,9 @@ impl PenSim {
         match &self.job {
             Some(j) => {
                 let g = j.shared.lock().unwrap();
-                Snap { frames: g.frames.clone(), live: g.live.clone(), done: g.done, error: g.error.clone(), n: g.n, dt: g.dt, steps: g.steps, wall: g.wall, parts: g.parts.clone(), surface: g.surface.clone(), ref_pos: g.ref_pos.clone() }
+                Snap { frames: g.frames.clone(), live: g.live.clone(), done: g.done, error: g.error.clone(), n: g.n, dt: g.dt, steps: g.steps, wall: g.wall, sim_time: g.sim_time, t_end: g.t_end, parts: g.parts.clone(), surface: g.surface.clone(), ref_pos: g.ref_pos.clone() }
             }
-            None => Snap { frames: vec![], live: None, done: false, error: None, n: 0, dt: 0.0, steps: 0, wall: 0.0, parts: Default::default(), surface: Default::default(), ref_pos: Default::default() },
+            None => Snap { frames: vec![], live: None, done: false, error: None, n: 0, dt: 0.0, steps: 0, wall: 0.0, sim_time: 0.0, t_end: 1.0, parts: Default::default(), surface: Default::default(), ref_pos: Default::default() },
         }
     }
 
@@ -293,15 +309,33 @@ impl eframe::App for PenSim {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let snap = self.snapshot();
-        if self.replay && !snap.frames.is_empty() {
-            if self.view_idx + 1 < snap.frames.len() {
-                self.view_idx += 1;
-                ctx.request_repaint();
-            } else {
-                self.replay = false;
+        // A simulação é calculada por inteiro; só depois é reproduzida (ou ao vivo, se escolhido).
+        let nf = snap.frames.len();
+        if !snap.done {
+            if self.live_view && nf > 0 {
+                self.view_idx = nf - 1;
             }
-        } else if self.follow && !snap.frames.is_empty() {
-            self.view_idx = snap.frames.len() - 1;
+        } else if nf > 0 {
+            if !self.autoplayed {
+                self.autoplayed = true;
+                self.playing = true;
+                self.play_pos = 0.0;
+            }
+            if self.playing {
+                let dt = ctx.input(|i| i.stable_dt).min(0.1);
+                let fps = nf as f32 / PLAY_SECONDS;
+                self.play_pos += dt * fps * self.speed;
+                if self.play_pos >= (nf - 1) as f32 {
+                    if self.loop_play {
+                        self.play_pos = 0.0;
+                    } else {
+                        self.play_pos = (nf - 1) as f32;
+                        self.playing = false;
+                    }
+                }
+                self.view_idx = self.play_pos as usize;
+                ctx.request_repaint();
+            }
         }
         self.view_idx = self.view_idx.min(snap.frames.len().saturating_sub(1));
         self.refresh_preview();
@@ -489,11 +523,35 @@ impl PenSim {
                     });
                     group(ui, "EXECUÇÃO", |ui| {
                         self.pause_btn(ui, snap);
-                        if snap.done && rbtn(ui, "↺", "Repetir").clicked() {
-                            self.view_idx = 0;
-                            self.follow = false;
-                            self.replay = true;
+                        ui.checkbox(&mut self.live_view, "Ao vivo");
+                    });
+                    group(ui, "REPETIÇÃO", |ui| {
+                        let nf = snap.frames.len();
+                        let can = snap.done && nf > 1;
+                        if ui.add_enabled(can, egui::Button::new(RichText::new(if self.playing { "⏸\nPausar" } else { "▶\nReproduzir" }).size(12.0)).min_size(Vec2::new(70.0, 48.0))).clicked() {
+                            if self.playing {
+                                self.playing = false;
+                            } else {
+                                if self.play_pos >= (nf - 1) as f32 {
+                                    self.play_pos = 0.0;
+                                }
+                                self.playing = true;
+                            }
                         }
+                        if ui.add_enabled(can, egui::Button::new(RichText::new("⏮\nInício").size(12.0)).min_size(Vec2::new(56.0, 48.0))).clicked() {
+                            self.play_pos = 0.0;
+                            self.view_idx = 0;
+                        }
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                for sp in [0.1f32, 0.25, 0.5, 1.0, 2.0, 4.0] {
+                                    if ui.selectable_label((self.speed - sp).abs() < 1e-6, format!("{sp}×")).clicked() {
+                                        self.speed = sp;
+                                    }
+                                }
+                            });
+                            ui.checkbox(&mut self.loop_play, "Repetir em laço");
+                        });
                     });
                 }
             });
@@ -735,6 +793,31 @@ impl PenSim {
         }
     }
 
+    fn progress_card(&mut self, ui: &mut egui::Ui, painter: &egui::Painter, rect: Rect, s: &Snap) {
+        let p = (s.sim_time / s.t_end.max(1e-12)).clamp(0.0, 1.0);
+        let elapsed = self.started_at.elapsed().as_secs_f64();
+        let eta = if p > 0.03 { Some(elapsed * (1.0 - p) / p) } else { None };
+        let card = Rect::from_center_size(rect.center(), Vec2::new(rect.width().min(380.0) - 20.0, 150.0));
+        painter.rect_filled(card, 10.0, Color32::from_rgba_unmultiplied(255, 255, 255, 235));
+        painter.rect_stroke(card, 10.0, Stroke::new(1.0, Color32::from_gray(190)), egui::StrokeKind::Inside);
+        painter.text(card.center_top() + Vec2::new(0.0, 14.0), Align2::CENTER_TOP, "Calculando a simulação…", FontId::proportional(17.0), Color32::from_gray(30));
+        let bar = Rect::from_center_size(card.center() + Vec2::new(0.0, -4.0), Vec2::new(card.width() - 40.0, 16.0));
+        painter.rect_filled(bar, 8.0, Color32::from_gray(225));
+        painter.rect_filled(Rect::from_min_size(bar.min, Vec2::new(bar.width() * p as f32, bar.height())), 8.0, ACCENT);
+        let txt = format!(
+            "{:.0}%  ·  {:.0} s decorridos{}  ·  {} nós",
+            p * 100.0,
+            elapsed,
+            eta.map_or(String::new(), |e| format!("  ·  ~{:.0} s restantes", e)),
+            s.n
+        );
+        painter.text(card.center() + Vec2::new(0.0, 22.0), Align2::CENTER_TOP, txt, FontId::proportional(12.0), Color32::from_gray(70));
+        painter.text(card.center() + Vec2::new(0.0, 42.0), Align2::CENTER_TOP, "A reprodução começa sozinha quando terminar.", FontId::proportional(11.0), Color32::from_gray(110));
+        let btn = Rect::from_center_size(card.center_bottom() + Vec2::new(0.0, -2.0), Vec2::ZERO);
+        let _ = btn;
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
     fn ui_summary(&mut self, ui: &mut egui::Ui, s: &Snap) {
         if let Some(e) = &s.error {
             ui.colored_label(Color32::RED, e);
@@ -821,21 +904,35 @@ impl PenSim {
     // ------------------------------------------------------------ status
 
     fn status_bar(&mut self, ui: &mut egui::Ui, s: &Snap) {
-        if self.ws == Ws::Results && s.frames.len() > 1 {
+        if self.ws == Ws::Results && self.job.is_some() && !s.done && s.error.is_none() {
             ui.horizontal(|ui| {
-                let t = s.frames[self.view_idx].time * 1e6;
-                ui.monospace(format!("t = {t:7.1} µs"));
-                let mut i = self.view_idx;
-                let w = (ui.available_width() - 90.0).max(80.0);
-                if ui.add_sized([w, 26.0], egui::Slider::new(&mut i, 0..=s.frames.len() - 1).show_value(false)).changed() {
-                    self.view_idx = i;
-                    self.follow = i + 1 == s.frames.len();
-                    self.replay = false;
-                }
-                ui.label(if self.running(s) { "● simulando" } else if s.done { "concluído" } else { "pausado" });
+                let p = (s.sim_time / s.t_end.max(1e-12)).clamp(0.0, 1.0) as f32;
+                ui.add(egui::ProgressBar::new(p).desired_width((ui.available_width() - 130.0).max(80.0)).text(format!("calculando… {:.0}%", p * 100.0)));
+                ui.label(if self.running(s) { "● em execução" } else { "pausado" });
             });
-        } else if self.ws == Ws::Results && self.job.is_some() {
-            ui.label("Montando malha…");
+        } else if self.ws == Ws::Results && s.frames.len() > 1 {
+            ui.horizontal(|ui| {
+                let nf = s.frames.len();
+                if ui.button(if self.playing { "⏸" } else { "▶" }).clicked() {
+                    if self.playing {
+                        self.playing = false;
+                    } else {
+                        if self.play_pos >= (nf - 1) as f32 {
+                            self.play_pos = 0.0;
+                        }
+                        self.playing = true;
+                    }
+                }
+                let t = s.frames[self.view_idx.min(nf - 1)].time * 1e6;
+                ui.monospace(format!("t = {t:7.1} µs · {}×", self.speed));
+                let mut i = self.view_idx;
+                let w = (ui.available_width() - 20.0).max(80.0);
+                if ui.add_sized([w, 26.0], egui::Slider::new(&mut i, 0..=nf - 1).show_value(false)).changed() {
+                    self.view_idx = i;
+                    self.play_pos = i as f32;
+                    self.playing = false;
+                }
+            });
         } else {
             // linha do tempo de recursos (estilo Fusion)
             ui.horizontal_wrapped(|ui| {
@@ -872,7 +969,7 @@ impl PenSim {
             self.cam.zoom = 1.0;
             self.cam.pan = Vec2::ZERO;
         }
-        let results = self.ws == Ws::Results && !snap.frames.is_empty();
+        let results = self.ws == Ws::Results && !snap.frames.is_empty() && (snap.done || self.live_view);
         let dx = self.cfg.dx as f32;
         let cut = 0.25 * dx;
         let p = &self.preview;
@@ -926,6 +1023,9 @@ impl PenSim {
             painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, format!("Modelo · {} nós", p.pos.len()), FontId::proportional(13.0), Color32::from_gray(60));
         }
         view3d::triad(&painter, &view);
+        if self.ws == Ws::Results && self.job.is_some() && !snap.done && snap.error.is_none() && !results {
+            self.progress_card(ui, &painter, rect, snap);
+        }
 
         // ViewCube simplificado
         let ctx = ui.ctx().clone();

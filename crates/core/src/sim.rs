@@ -5,11 +5,14 @@ use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
 const TAYLOR_QUINNEY: f64 = 0.9;
+/// fração do limite de estabilidade do passo explícito
+const DT_SAFETY: f64 = 0.65;
 
 #[derive(Clone, Copy)]
 struct Bond {
     j: u32,
-    xi: f32,
+    /// 1/comprimento de referência
+    ixi: f32,
     /// correção de volume nas bordas do horizonte
     w: f32,
     sp: f32,
@@ -38,6 +41,7 @@ struct Out {
     e_ct: f64,
     e_pl: f64,
     e_fr: f64,
+    broke: bool,
 }
 
 /// Instantâneo dos campos para visualização (todas as listas têm n nós).
@@ -121,6 +125,9 @@ pub struct Sim {
     gmin: [f64; 3],
     gcs: f64,
     ke_hist: Vec<f64>,
+    fill: Vec<u32>,
+    soft: Vec<f64>,
+    contact_on: Vec<bool>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -187,9 +194,13 @@ impl Sim {
             gmin: [0.0; 3],
             gcs: 0.0,
             ke_hist: vec![],
+            fill: vec![],
+            soft: vec![1.0; n],
+            contact_on: vec![true; n],
             cfg,
         };
         sim.build_bonds(horizon);
+        sim.contact_on = vec![true; n]; // contato em todos os nós: filtrar por superfície perde reações durante a penetração
         sim.dt = sim.stable_dt();
         sim.ke0 = sim.kinetic(Some(true));
         Ok(sim)
@@ -220,13 +231,13 @@ impl Sim {
     }
 
     fn build_grid(&mut self, use_ref: bool, cs_min: f64) {
-        let pts: Vec<[f64; 3]> = if use_ref {
-            self.pos0.clone()
-        } else {
-            self.p.iter().map(|q| [q.x, q.y, q.z]).collect()
+        let n = self.p.len();
+        let get = |i: usize| -> [f64; 3] {
+            if use_ref { self.pos0[i] } else { [self.p[i].x, self.p[i].y, self.p[i].z] }
         };
         let (mut mn, mut mx) = ([f64::MAX; 3], [f64::MIN; 3]);
-        for q in &pts {
+        for i in 0..n {
+            let q = get(i);
             if !q.iter().all(|v| v.is_finite()) {
                 continue;
             }
@@ -238,29 +249,39 @@ impl Sim {
         let ext = (0..3).map(|k| mx[k] - mn[k]).fold(cs_min, f64::max);
         let cs = cs_min.max(ext / 90.0);
         let nn = [0, 1, 2].map(|k| ((mx[k] - mn[k]) / cs).floor() as i64 + 1);
+        let cells = (nn[0] * nn[1] * nn[2]) as usize;
+        let mut cell_of = std::mem::take(&mut self.cell_of);
+        let mut cell_start = std::mem::take(&mut self.cell_start);
+        let mut cell_items = std::mem::take(&mut self.cell_items);
+        let mut fill = std::mem::take(&mut self.fill);
+        cell_start.clear();
+        cell_start.resize(cells + 1, 0);
+        for i in 0..n {
+            let q = get(i);
+            let c = [0, 1, 2].map(|k| (((q[k] - mn[k]) / cs) as i64).clamp(0, nn[k] - 1));
+            let id = (c[2] * nn[1] + c[1]) * nn[0] + c[0];
+            cell_of[i] = id as u32;
+            cell_start[id as usize + 1] += 1;
+        }
+        for c in 0..cells {
+            cell_start[c + 1] += cell_start[c];
+        }
+        fill.clear();
+        fill.extend_from_slice(&cell_start[..cells]);
+        cell_items.clear();
+        cell_items.resize(n, 0);
+        for i in 0..n {
+            let c = cell_of[i] as usize;
+            cell_items[fill[c] as usize] = i as u32;
+            fill[c] += 1;
+        }
         self.grid = GridInfo { n: nn };
         self.gmin = mn;
         self.gcs = cs;
-        let cells = (nn[0] * nn[1] * nn[2]) as usize;
-        self.cell_start.clear();
-        self.cell_start.resize(cells + 1, 0);
-        for (i, q) in pts.iter().enumerate() {
-            let c = [0, 1, 2].map(|k| (((q[k] - mn[k]) / cs) as i64).clamp(0, nn[k] - 1));
-            let id = (c[2] * nn[1] + c[1]) * nn[0] + c[0];
-            self.cell_of[i] = id as u32;
-            self.cell_start[id as usize + 1] += 1;
-        }
-        for c in 0..cells {
-            self.cell_start[c + 1] += self.cell_start[c];
-        }
-        let mut fill = self.cell_start.clone();
-        self.cell_items.clear();
-        self.cell_items.resize(pts.len(), 0);
-        for i in 0..pts.len() {
-            let c = self.cell_of[i] as usize;
-            self.cell_items[fill[c] as usize] = i as u32;
-            fill[c] += 1;
-        }
+        self.cell_of = cell_of;
+        self.cell_start = cell_start;
+        self.cell_items = cell_items;
+        self.fill = fill;
     }
 
     fn build_bonds(&mut self, horizon: f64) {
@@ -294,7 +315,7 @@ impl Sim {
                                     } else {
                                         ((horizon + rr - xi) / dx).clamp(0.0, 1.0)
                                     };
-                                    list.push(Bond { j: j as u32, xi: xi as f32, w: w as f32, sp: 0.0, acc: 0.0, f: 0.0, alive: true });
+                                    list.push(Bond { j: j as u32, ixi: (1.0 / xi) as f32, w: w as f32, sp: 0.0, acc: 0.0, f: 0.0, alive: true });
                                 }
                             }
                         }
@@ -323,9 +344,9 @@ impl Sim {
         for i in 0..self.p.len() {
             let b = self.part[i] as usize;
             let c = self.c_bond[b];
-            let mut s: f64 = self.bonds[i].iter().map(|bd| c * bd.w as f64 * v / bd.xi as f64).sum();
+            let mut s: f64 = self.bonds[i].iter().map(|bd| c * bd.w as f64 * v * bd.ixi as f64).sum();
             s += 12.0 * self.c_contact * v / (0.8 * self.cfg.dx);
-            dt = dt.min(0.5 * (2.0 * self.mats[b].rho / s).sqrt());
+            dt = dt.min(DT_SAFETY * (2.0 * self.mats[b].rho / s).sqrt());
         }
         dt
     }
@@ -349,6 +370,9 @@ impl Sim {
         {
             let p = &self.p;
             let part = &self.part;
+            let fixed = &self.fixed;
+            let soft = &self.soft;
+            let contact_on = &self.contact_on;
             let mats = &self.mats;
             let c_bond = &self.c_bond;
             let c_ct = self.c_contact;
@@ -361,6 +385,10 @@ impl Sim {
                 .enumerate()
                 .with_min_len(32)
                 .for_each(|(i, (bonds, out))| {
+                    if fixed[i] {
+                        *out = Out::default();
+                        return;
+                    }
                     let me = p[i];
                     let b = part[i] as usize;
                     let mat = &mats[b];
@@ -368,75 +396,82 @@ impl Sim {
                     let mut o = Out::default();
                     let v2 = vol * vol;
                     let fail = mat.fail_stretch;
+                    let sy0 = mat.yield_strength / mat.young;
+                    let hard = mat.hardening / mat.young;
+                    let cvv = c * v2;
+                    let soft_i = soft[i];
+                    let (mut fx, mut fy, mut fz) = (0.0f64, 0.0f64, 0.0f64);
                     for bd in bonds.iter_mut() {
                         if !bd.alive {
                             continue;
                         }
-                        let q = p[bd.j as usize];
+                        let q = &p[bd.j as usize];
                         let (rx, ry, rz) = (q.x - me.x, q.y - me.y, q.z - me.z);
                         let r = (rx * rx + ry * ry + rz * rz).sqrt().max(1e-12);
-                        let xi = bd.xi as f64;
-                        let w = bd.w as f64;
-                        let s = (r - xi) / xi;
+                        let ixi = bd.ixi as f64;
+                        let s = r * ixi - 1.0;
                         let sp = bd.sp as f64;
+                        let w = bd.w as f64;
                         if s > fail {
                             bd.alive = false;
                             let s_el = s - sp;
-                            o.e_fr += 0.25 * c * s_el * s_el * xi * w * v2;
+                            o.e_fr += 0.25 * cvv * s_el * s_el * w / ixi;
                             bd.f = 0.0;
+                            o.broke = true;
                             continue;
                         }
-                        let tm = 0.5 * (me.temp + q.temp);
-                        let theta = ((tm - T_REF) / (mat.t_melt - T_REF)).clamp(0.0, 1.0);
-                        let soft = (1.0 - theta).max(0.03);
-                        let sy_t = (mat.yield_strength + mat.hardening * bd.acc as f64) / mat.young * soft;
-                        let sy_c = sy_t * mat.comp_factor;
+                        let soft_b = 0.5 * (soft_i + soft[bd.j as usize]);
+                        let sy_t = (sy0 + hard * bd.acc as f64) * soft_b;
                         let mut s_el = s - sp;
-                        if s_el > sy_t || s_el < -sy_c {
-                            let lim = if s_el > 0.0 { sy_t } else { -sy_c };
+                        if s_el > sy_t || s_el < -sy_t * mat.comp_factor {
+                            let lim = if s_el > 0.0 { sy_t } else { -sy_t * mat.comp_factor };
                             let dsp = s_el - lim;
                             bd.sp = (sp + dsp) as f32;
                             bd.acc += dsp.abs() as f32;
                             s_el = lim;
-                            let de = c * lim.abs() * dsp.abs() * xi * w * v2;
+                            let de = cvv * lim.abs() * dsp.abs() * w / ixi;
                             o.e_pl += 0.5 * de;
                             o.d_temp += TAYLOR_QUINNEY * 0.5 * de / (mat.rho * mat.cp * vol);
                         }
-                        let f = c * s_el * w * v2;
+                        let f = cvv * s_el * w;
                         bd.f = f as f32;
-                        o.f[0] += f * rx / r;
-                        o.f[1] += f * ry / r;
-                        o.f[2] += f * rz / r;
-                        o.e_el += 0.25 * c * s_el * s_el * xi * w * v2;
+                        let k = f / r;
+                        fx += k * rx;
+                        fy += k * ry;
+                        fz += k * rz;
+                        o.e_el += 0.25 * cvv * s_el * s_el * w / ixi;
                     }
-                    // contato por penalidade (gather, 27 células)
-                    let c0 = cell_coords(cell_of[i], &g);
-                    for oz in -1..=1 {
-                        for oy in -1..=1 {
-                            for ox in -1..=1 {
-                                let qc = [c0[0] + ox, c0[1] + oy, c0[2] + oz];
-                                if (0..3).any(|k| qc[k] < 0 || qc[k] >= g.n[k]) {
-                                    continue;
-                                }
-                                let id = ((qc[2] * g.n[1] + qc[1]) * g.n[0] + qc[0]) as usize;
-                                for k in cell_start[id]..cell_start[id + 1] {
-                                    let j = cell_items[k as usize] as usize;
-                                    if j == i {
+                    o.f = [fx, fy, fz];
+                    // contato por penalidade: só nós de superfície ou com ligações rompidas
+                    if contact_on[i] {
+                        let c0 = cell_coords(cell_of[i], &g);
+                        for oz in -1..=1 {
+                            for oy in -1..=1 {
+                                for ox in -1..=1 {
+                                    let qc = [c0[0] + ox, c0[1] + oy, c0[2] + oz];
+                                    if (0..3).any(|k| qc[k] < 0 || qc[k] >= g.n[k]) {
                                         continue;
                                     }
-                                    let rc = if part[j] == part[i] { 0.8 * dx } else { 0.95 * dx };
-                                    let (rx, ry, rz) = (p[j].x - me.x, p[j].y - me.y, p[j].z - me.z);
-                                    let r2 = rx * rx + ry * ry + rz * rz;
-                                    if r2 >= rc * rc {
-                                        continue;
+                                    let id = ((qc[2] * g.n[1] + qc[1]) * g.n[0] + qc[0]) as usize;
+                                    for k in cell_start[id]..cell_start[id + 1] {
+                                        let j = cell_items[k as usize] as usize;
+                                        if j == i {
+                                            continue;
+                                        }
+                                        let rc = if part[j] == part[i] { 0.8 * dx } else { 0.95 * dx };
+                                        let (rx, ry, rz) = (p[j].x - me.x, p[j].y - me.y, p[j].z - me.z);
+                                        let r2 = rx * rx + ry * ry + rz * rz;
+                                        if r2 >= rc * rc {
+                                            continue;
+                                        }
+                                        let r = r2.sqrt().max(1e-9);
+                                        let s = (r - rc) / rc;
+                                        let f = c_ct * s * v2;
+                                        o.f[0] += f * rx / r;
+                                        o.f[1] += f * ry / r;
+                                        o.f[2] += f * rz / r;
+                                        o.e_ct += 0.25 * c_ct * s * s * rc * v2;
                                     }
-                                    let r = r2.sqrt().max(1e-9);
-                                    let s = (r - rc) / rc;
-                                    let f = c_ct * s * v2;
-                                    o.f[0] += f * rx / r;
-                                    o.f[1] += f * ry / r;
-                                    o.f[2] += f * rz / r;
-                                    o.e_ct += 0.25 * c_ct * s * s * rc * v2;
                                 }
                             }
                         }
@@ -448,24 +483,36 @@ impl Sim {
             let part = &self.part;
             let fixed = &self.fixed;
             let mass = &self.mass;
-            self.p.par_iter_mut().zip(self.out.par_iter()).enumerate().with_min_len(256).for_each(
-                |(i, (q, o))| {
+            let mats = &self.mats;
+            self.p
+                .par_iter_mut()
+                .zip(self.out.par_iter())
+                .zip(self.soft.par_iter_mut())
+                .zip(self.contact_on.par_iter_mut())
+                .enumerate()
+                .with_min_len(256)
+                .for_each(|(i, (((q, o), soft), con))| {
                     q.temp += o.d_temp;
+                    let m = &mats[part[i] as usize];
+                    let theta = ((q.temp - T_REF) / (m.t_melt - T_REF)).clamp(0.0, 1.0);
+                    *soft = (1.0 - theta).max(0.03);
+                    if o.broke {
+                        *con = true;
+                    }
                     if fixed[i] {
                         q.vx = 0.0;
                         q.vy = 0.0;
                         q.vz = 0.0;
                         return;
                     }
-                    let m = mass[part[i] as usize];
-                    q.vx += o.f[0] / m * dt;
-                    q.vy += o.f[1] / m * dt;
-                    q.vz += o.f[2] / m * dt;
+                    let mm = mass[part[i] as usize];
+                    q.vx += o.f[0] / mm * dt;
+                    q.vy += o.f[1] / mm * dt;
+                    q.vz += o.f[2] / mm * dt;
                     q.x += q.vx * dt;
                     q.y += q.vy * dt;
                     q.z += q.vz * dt;
-                },
-            );
+                });
         }
         let (dpl, dfr) = self.out.iter().fold((0.0, 0.0), |a, o| (a.0 + o.e_pl, a.1 + o.e_fr));
         self.e_pl += dpl;

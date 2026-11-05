@@ -71,3 +71,10 @@ fn sweep_brackets_limit() {
     let v = v50.expect("V50");
     assert!(v > 300.0 && v < 1500.0);
 }
+
+#[test]
+fn very_high_speed_stays_stable() {
+    let o = run(2500.0);
+    assert!(o.v_residual.is_finite());
+    assert!(o.energy_error_pct.abs() < 5.0, "erro {}%", o.energy_error_pct);
+}

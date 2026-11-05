@@ -17,6 +17,7 @@ pub struct Shared {
     pub t_end: f64,
     pub steps: u64,
     pub wall: f64,
+    pub sim_time: f64,
     pub back_x: f64,
     pub parts: Arc<Vec<u8>>,
     pub surface: Arc<Vec<bool>>,
@@ -77,6 +78,7 @@ impl Job {
                 g.frames.extend(new);
                 g.live = Some(live);
                 g.steps = sim.step_count;
+                g.sim_time = sim.time;
                 g.wall = wall;
                 g.t_end = sim.t_end();
                 g.done = sim.done();
