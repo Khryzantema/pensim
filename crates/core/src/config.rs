@@ -522,9 +522,10 @@ impl Config {
     }
     /// Tempo final automático [s].
     pub fn t_end(&self) -> f64 {
-        let t_eff = self.target_thickness() / self.obliquity().cos().max(0.3);
-        // +35%: o projétil precisa sair bastante do alvo antes de a simulação terminar
-        (3.0 * 1.35 * (t_eff + self.design.projectile.length() + 2.0 * self.design.projectile.max_radius()) / self.velocity.max(1.0) * self.time_factor)
-            .clamp(54e-6, 4e-3)
+        // tempo MÁXIMO de segurança (o fim normal é quando o projétil anda o comprimento dele + 5× a
+        // espessura do alvo): 3× o tempo que levaria em velocidade constante, contando a folga inicial
+        let p = &self.design.projectile;
+        let dist = 2.0 * p.length() + 5.0 * self.target_thickness() + 2.0 * p.max_radius();
+        (3.0 * dist / self.velocity.max(1.0) * self.time_factor).clamp(54e-6, 10e-3)
     }
 }

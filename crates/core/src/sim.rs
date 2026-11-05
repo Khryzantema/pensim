@@ -233,6 +233,10 @@ pub struct Sim {
     dir: [f64; 3],
     last_touch: f64,
     rest_since: Option<f64>,
+    /// fim da simulação: posição inicial da traseira, quanto o corpo principal andou e a meta
+    rear0: f64,
+    travel: f64,
+    travel_goal: f64,
     /// intervalo entre quadros [s] (dobra se gravar quadros demais)
     frame_dt: f64,
     captured: usize,
@@ -531,6 +535,9 @@ impl Sim {
             dir: model.dir,
             last_touch: 0.0,
             rest_since: None,
+            rear0: 0.0,
+            travel: 0.0,
+            travel_goal: 1.0,
             // o evento real dura ~1/3 do tempo máximo (a simulação termina na separação + 25%)
             frame_dt: cfg.t_end() / (3.0 * cfg.n_frames.max(1) as f64),
             captured: 0,
@@ -578,6 +585,9 @@ impl Sim {
                 }
             }
             sim.xcm0 = sx / f64::max(np, 1.0);
+            let d = sim.dir;
+            sim.rear0 = (0..n_real).filter(|&i| sim.part[i] < sim.n_proj).map(|i| sim.p[i].x * d[0] + sim.p[i].z * d[2]).fold(f64::MAX, f64::min);
+            sim.travel_goal = sim.cfg.design.projectile.length() + 5.0 * sim.cfg.target_thickness();
             // o corpo sai do alvo quando o centro de massa passa da face traseira + meio comprimento
             sim.x_exit = sim.back_x + 0.5 * sim.cfg.design.projectile.length();
         }
@@ -634,21 +644,15 @@ impl Sim {
         if self.done() {
             return 1.0;
         }
-        if let Some(ts) = self.sep_time {
-            let tail = (self.t_end - ts).max(1e-12);
-            return 0.8 + 0.2 * ((self.time - ts) / tail).clamp(0.0, 1.0);
-        }
-        let (mut sx, mut np) = (0.0, 0.0);
-        for i in 0..self.n_real {
-            if self.part[i] < self.n_proj {
-                sx += self.p[i].x;
-                np += 1.0;
-            }
-        }
-        let xcm = sx / f64::max(np, 1.0);
-        let p_pen = ((xcm - self.xcm0) / (self.x_exit - self.xcm0).max(1e-9)).clamp(0.0, 1.0);
+        // quanto a traseira do corpo principal já andou da distância de fim (ou do tempo máximo)
+        let p_tr = (self.travel / self.travel_goal.max(1e-12)).clamp(0.0, 1.0);
         let p_time = (self.time / self.t_end).clamp(0.0, 1.0);
-        (0.8 * p_pen).max(0.8 * p_time).min(0.8)
+        p_tr.max(p_time).min(0.99)
+    }
+
+    /// (andado, meta) da traseira do corpo principal [m]
+    pub fn travel_info(&self) -> (f64, f64) {
+        (self.travel, self.travel_goal)
     }
 
     /// instante (s) em que o corpo principal se separou do alvo, se já ocorreu
@@ -1671,9 +1675,6 @@ impl Sim {
     /// (nós com ≥ 50% das ligações vivas, sem fragmentos soltos) deixa de tocar o alvo, a
     /// animação continua por mais 25% do tempo decorrido até esse instante.
     fn check_exit(&mut self) {
-        if self.exit_found {
-            return;
-        }
         let nr = self.n_real;
         let mut alive = vec![0u32; nr];
         for i in 0..nr {
@@ -1778,27 +1779,27 @@ impl Sim {
             self.had_contact = true;
             self.last_touch = self.time;
         }
-        if self.had_contact && n_main > 0 && outside && (!touching || far_out) {
+        // separação: só para classificar o resultado (não encerra a simulação)
+        if !self.exit_found && self.had_contact && n_main > 0 && outside && (!touching || far_out) {
             self.exit_found = true;
             self.sep_time = Some(self.time);
-            self.t_end = self.t_end.min(self.time * 1.25);
         }
-        // projétil parado (cravado, ou rebatido e encostado no alvo sem se soltar): o evento acabou;
-        // o que sobra é o alvo vibrando. Exige ficar parado por um tempo para não parar numa pausa curta.
-        if self.had_contact && n_main > 0 && !self.exit_found {
-            let nm = n_main as f64;
-            let sp = ((vx_main / nm).powi(2) + (vy_main / nm).powi(2) + (vz_main / nm).powi(2)).sqrt();
-            let v0 = self.cfg.velocity.max(1.0);
-            // parado: centro de massa lento OU quase sem energia cinética (projétil cravado vibrando)
-            let ke_low = self.kinetic(Some(true)) < 0.003 * self.ke0.max(1e-30);
-            if sp > 0.08 * v0 && !ke_low {
-                self.rest_since = None;
-            } else if sp < 0.04 * v0 || ke_low {
-                let t0 = *self.rest_since.get_or_insert(self.time);
-                if self.time - t0 > (0.08 * self.time).max(0.04 * self.t_end) {
-                    self.exit_found = true;
-                    self.t_end = self.t_end.min(self.time * 1.1);
+        // ÚNICO critério de fim: a traseira do corpo principal do projétil (só o que continua
+        // preso a ele; fragmentos não contam) andou o comprimento do projétil + 5× a espessura do alvo
+        if n_main > 0 {
+            let d = self.dir;
+            // deslocamento médio dos nós do corpo principal em relação à posição inicial de cada um
+            // (a traseira de um corpo inteiro anda o mesmo que o centro dele)
+            let mut acc = 0.0;
+            for i in 0..nr {
+                if is_main(i) {
+                    let p0 = self.pos0[i];
+                    acc += (self.p[i].x - p0[0]) * d[0] + (self.p[i].z - p0[2]) * d[2];
                 }
+            }
+            self.travel = (acc / n_main as f64).max(0.0);
+            if self.travel >= self.travel_goal {
+                self.t_end = self.t_end.min(self.time);
             }
         }
     }
@@ -1963,9 +1964,7 @@ impl Sim {
             let (mn, mx) = (w.iter().cloned().fold(f64::MAX, f64::min), w.iter().cloned().fold(f64::MIN, f64::max));
             // parada antecipada só se o projétil estiver de fato parado (energia desprezível e estável);
             // enquanto ele ainda avança dentro do alvo, a simulação continua até ele sair (ou até o tempo máximo)
-            if mx - mn < 0.004 * self.ke0.max(1e-12) && ke_p < 2e-5 * self.ke0.max(1e-12) {
-                self.t_end = self.time;
-            }
+            let _ = (mn, mx);
         }
         let (e_el, e_ct) = (self.cur_e_el, self.cur_e_ct);
         let frame = Frame {
