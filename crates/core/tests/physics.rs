@@ -114,3 +114,36 @@ fn scaled_projectile_with_core_runs() {
     let o = s.outcome();
     assert!(o.energy_error_pct.abs() < 5.0, "erro {}%", o.energy_error_pct);
 }
+
+/// O modelo reduzido por simetria deve reproduzir o modelo completo.
+fn sym_vs_full(angle: f64) {
+    let mk = |sym: bool| {
+        let mut c = cfg(1000.0);
+        c.obliquity_deg = angle;
+        c.symmetry = sym;
+        c.n_frames = 8;
+        let mut s = Sim::new(c).unwrap();
+        s.run_to_end();
+        let o = s.outcome();
+        let ep = s.frames.last().unwrap().e_plastic;
+        (o, ep, s.n(), s.n_physical())
+    };
+    let (full, ef, nf, _) = mk(false);
+    let (half, eh, nh, nphys) = mk(true);
+    assert!(nh < nf, "simetria deve reduzir os nós ({nh} vs {nf})");
+    assert_eq!(nphys, nf, "nós físicos devem bater com o modelo completo");
+    assert_eq!(full.kind, half.kind);
+    assert!((full.v_residual - half.v_residual).abs() < 2.0 + 0.02 * full.v_residual.abs(), "vres {} vs {}", full.v_residual, half.v_residual);
+    assert!((ef - eh).abs() / ef.max(1.0) < 0.01, "energia plástica {ef} vs {eh}");
+    assert!(half.energy_error_pct.abs() < 3.0);
+}
+
+#[test]
+fn symmetry_matches_full_model_normal_impact() {
+    sym_vs_full(0.0);
+}
+
+#[test]
+fn symmetry_matches_full_model_oblique_impact() {
+    sym_vs_full(25.0);
+}

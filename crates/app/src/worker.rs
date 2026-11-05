@@ -19,6 +19,7 @@ pub struct Shared {
     pub wall: f64,
     pub sim_time: f64,
     pub back_x: f64,
+    pub sym: u8,
     pub parts: Arc<Vec<u8>>,
     pub surface: Arc<Vec<bool>>,
     pub ref_pos: Arc<Vec<[f32; 3]>>,
@@ -55,7 +56,8 @@ impl Job {
             };
             {
                 let mut g = s.lock().unwrap();
-                g.n = sim.n();
+                g.n = sim.n_physical();
+                g.sym = sim.symmetry();
                 g.dt = sim.dt;
                 g.t_end = sim.t_end();
                 g.back_x = sim.plate_back();

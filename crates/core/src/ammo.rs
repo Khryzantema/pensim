@@ -110,6 +110,7 @@ impl Ammo {
             clamp_edges: true,
             time_factor: 1.0,
             n_frames: 100,
+            symmetry: true,
         };
         cfg
     }

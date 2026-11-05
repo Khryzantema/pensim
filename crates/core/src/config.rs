@@ -155,6 +155,8 @@ pub struct Config {
     pub clamp_edges: bool,
     pub time_factor: f64,
     pub n_frames: usize,
+    /// simula só 1/2 (obliquidade ≠ 0) ou 1/4 (impacto normal) do modelo, com nós-fantasma
+    pub symmetry: bool,
 }
 
 impl Default for Config {
@@ -212,6 +214,7 @@ impl Preset {
             clamp_edges: true,
             time_factor: 1.0,
             n_frames: 100,
+            symmetry: true,
         }
     }
 }
@@ -241,12 +244,22 @@ impl Config {
         let rm = p.max_radius();
         layers + std::f64::consts::PI * rm * rm * p.length() * 0.7 / dx3
     }
+    /// Fator de redução de nós por simetria (1, 2 ou 4), já com ~25% de nós-fantasma.
+    pub fn sym_gain(&self) -> f64 {
+        if !self.symmetry {
+            1.0
+        } else if self.obliquity_deg.abs() < 1e-9 {
+            4.0 / 1.3
+        } else {
+            2.0 / 1.2
+        }
+    }
     pub fn bonds_per_node(&self) -> f64 {
         4.19 * self.horizon_m.powi(3)
     }
     /// Memória aproximada (MB): ligações + estado dos nós + quadros gravados.
     pub fn estimate_memory_mb(&self) -> f64 {
-        let n = self.estimate_nodes();
+        let n = self.estimate_nodes() / self.sym_gain();
         let threads = std::thread::available_parallelism().map_or(4, |v| v.get()) as f64;
         n * (self.bonds_per_node() * 10.0 + 150.0 + 32.0 * threads + 36.0 * self.n_frames as f64) / 1e6
     }

@@ -131,6 +131,7 @@ struct Snap {
     wall: f64,
     sim_time: f64,
     t_end: f64,
+    sym: u8,
     parts: Arc<Vec<u8>>,
     surface: Arc<Vec<bool>>,
     ref_pos: Arc<Vec<[f32; 3]>>,
@@ -276,6 +277,12 @@ impl PenSim {
         }
         if std::env::var("PENSIM_DEMO").is_ok() {
             me.start(&cc.egui_ctx);
+            if std::env::var("PENSIM_ISO").is_ok() {
+                me.cam = Camera::iso();
+            }
+            if std::env::var("PENSIM_NOSECTION").is_ok() {
+                me.section = false;
+            }
         }
         me
     }
@@ -299,7 +306,7 @@ impl PenSim {
             self.preview = Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: Some("Malha fina demais para pré-visualizar (> 700 mil nós).".into()) };
             return;
         }
-        match Model::build(&self.cfg) {
+        match Model::build_full(&self.cfg) {
             Ok(m) => {
                 let pos: Vec<[f32; 3]> = m.pos.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
                 let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -339,9 +346,9 @@ impl PenSim {
         match &self.job {
             Some(j) => {
                 let g = j.shared.lock().unwrap();
-                Snap { frames: g.frames.clone(), live: g.live.clone(), done: g.done, error: g.error.clone(), n: g.n, dt: g.dt, steps: g.steps, wall: g.wall, sim_time: g.sim_time, t_end: g.t_end, parts: g.parts.clone(), surface: g.surface.clone(), ref_pos: g.ref_pos.clone() }
+                Snap { frames: g.frames.clone(), live: g.live.clone(), done: g.done, error: g.error.clone(), n: g.n, dt: g.dt, steps: g.steps, wall: g.wall, sim_time: g.sim_time, t_end: g.t_end, sym: g.sym, parts: g.parts.clone(), surface: g.surface.clone(), ref_pos: g.ref_pos.clone() }
             }
-            None => Snap { frames: vec![], live: None, done: false, error: None, n: 0, dt: 0.0, steps: 0, wall: 0.0, sim_time: 0.0, t_end: 1.0, parts: Default::default(), surface: Default::default(), ref_pos: Default::default() },
+            None => Snap { frames: vec![], live: None, done: false, error: None, n: 0, dt: 0.0, steps: 0, wall: 0.0, sim_time: 0.0, t_end: 1.0, sym: 0, parts: Default::default(), surface: Default::default(), ref_pos: Default::default() },
         }
     }
 
@@ -1294,22 +1301,36 @@ impl PenSim {
         } else if results {
             let f = &snap.frames[self.view_idx];
             let n = f.pos.len();
-            let idx: Vec<u32> = (0..n as u32)
-                .filter(|&i| {
-                    let i = i as usize;
-                    let ry = snap.ref_pos[i][1];
+            // a simulação calcula só 1/2 ou 1/4 do modelo (simetria); as demais cópias são espelhadas aqui
+            let masks: Vec<u8> = match snap.sym {
+                0 => vec![0],
+                1 => vec![0, 1],
+                2 => vec![0, 2],
+                _ => vec![0, 1, 2, 3],
+            };
+            let flip = |q: [f32; 3], m: u8| [q[0], if m & 1 != 0 { -q[1] } else { q[1] }, if m & 2 != 0 { -q[2] } else { q[2] }];
+            let mut ext_pos: Vec<[f32; 3]> = Vec::with_capacity(n * masks.len());
+            for &m in &masks {
+                ext_pos.extend(f.pos.iter().map(|&q| flip(q, m)));
+            }
+            let mut idx: Vec<u32> = Vec::new();
+            for (mi, &m) in masks.iter().enumerate() {
+                for i in 0..n {
+                    let ry = flip(snap.ref_pos[i], m)[1];
                     if self.section && !in_section(ry) {
-                        return false;
+                        continue;
                     }
-                    snap.surface[i] || (self.section && near_face(ry)) || f.damage[i] > 0.4
-                })
-                .collect();
+                    if snap.surface[i] || (self.section && near_face(ry)) || f.damage[i] > 0.4 {
+                        idx.push((mi * n + i) as u32);
+                    }
+                }
+            }
             let fi = Field::ALL.iter().position(|x| *x == self.field).unwrap();
             let sc_f = self.field.scale();
             if let Some(data) = self.field.data(f) {
                 let (mut mx, mut mn) = (f32::MIN, f32::MAX);
                 for &i in &idx {
-                    let v = data[i as usize] * sc_f;
+                    let v = data[i as usize % n] * sc_f;
                     mx = mx.max(v);
                     mn = mn.min(v);
                 }
@@ -1322,12 +1343,12 @@ impl PenSim {
                 };
                 let (lo, hi) = (r.0, if r.1 > r.0 { r.1 } else { r.0 + 1.0 });
                 let bands = self.bands;
-                view3d::render(&painter, &view, dx, &f.pos, &idx, false, &|i| rainbow((data[i] * sc_f - lo) / (hi - lo), bands));
+                view3d::render(&painter, &view, dx, &ext_pos, &idx, false, &|i| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands));
                 legend(&painter, rect, self.field, lo, hi);
             } else {
                 let parts = snap.parts.clone();
                 let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
-                view3d::render(&painter, &view, dx, &f.pos, &idx, true, &|i| mats[(parts[i] as usize).min(mats.len() - 1)]);
+                view3d::render(&painter, &view, dx, &ext_pos, &idx, true, &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
             }
             painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, format!("t = {:.1} µs", f.time * 1e6), FontId::monospace(15.0), Color32::from_gray(30));
         } else {

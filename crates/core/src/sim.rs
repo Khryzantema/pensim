@@ -128,6 +128,17 @@ pub struct Sim {
     ke_hist: Vec<f64>,
     fill: Vec<u32>,
     n_proj: u8,
+    /// nós calculados (reais); os demais em `p` são fantasmas espelhados
+    n_real: usize,
+    /// planos de simetria (bit 1 = y, bit 2 = z)
+    sym: u8,
+    /// por fantasma: nó real de origem e máscara de espelhamento
+    src: Vec<u32>,
+    gmask: Vec<u8>,
+    /// nós reais perto de um plano de simetria (podem ter contato com fantasmas)
+    near: Vec<bool>,
+    /// fator de energia física: nº de cópias do nó real no modelo completo
+    gfac: f64,
     /// tempos acumulados [s]: grade, forças (ligações+contato), integração
     pub prof: [f64; 3],
     exit_found: bool,
@@ -136,6 +147,42 @@ pub struct Sim {
 #[derive(Clone, Copy, Default)]
 struct GridInfo {
     n: [i64; 3],
+}
+
+/// Espalha os bits de `v` (até 21) para ocupar cada terceira posição.
+fn spread3(mut v: u64) -> u64 {
+    v &= 0x1f_ffff;
+    v = (v | v << 32) & 0x1f00000000ffff;
+    v = (v | v << 16) & 0x1f0000ff0000ff;
+    v = (v | v << 8) & 0x100f00f00f00f00f;
+    v = (v | v << 4) & 0x10c30c30c30c30c3;
+    v = (v | v << 2) & 0x1249249249249249;
+    v
+}
+
+/// Reordena os nós em curva de Morton: vizinhos no espaço ficam próximos na memória,
+/// o que melhora muito o uso de cache nos laços de ligação e contato.
+fn morton_reorder(m: &mut Model, dx: f64) {
+    let n = m.pos.len();
+    let mut mn = [f64::MAX; 3];
+    for q in &m.pos {
+        for k in 0..3 {
+            mn[k] = mn[k].min(q[k]);
+        }
+    }
+    let key: Vec<u64> = m
+        .pos
+        .iter()
+        .map(|q| {
+            let c = [0, 1, 2].map(|k| ((q[k] - mn[k]) / dx).floor().max(0.0) as u64);
+            spread3(c[0]) | spread3(c[1]) << 1 | spread3(c[2]) << 2
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_unstable_by_key(|&i| key[i]);
+    m.pos = order.iter().map(|&i| m.pos[i]).collect();
+    m.part = order.iter().map(|&i| m.part[i]).collect();
+    m.fixed = order.iter().map(|&i| m.fixed[i]).collect();
 }
 
 /// Deslocamentos de células "à frente": a própria célula + 13 vizinhas (meia vizinhança).
@@ -161,11 +208,44 @@ impl Sim {
                 ));
             }
         }
-        let model = Model::build(&cfg)?;
+        let mut model = Model::build(&cfg)?;
+        morton_reorder(&mut model, cfg.dx);
         let dx = cfg.dx;
         let vol = dx * dx * dx;
         let horizon = cfg.horizon_m * dx;
+        let n_real = model.pos.len();
+        let sym = model.sym;
+        let masks: Vec<u8> = match sym {
+            0 => vec![],
+            1 | 2 => vec![sym],
+            _ => vec![1, 2, 3],
+        };
+        let mirror = |q: [f64; 3], m: u8| -> [f64; 3] { [q[0], if m & 1 != 0 { -q[1] } else { q[1] }, if m & 2 != 0 { -q[2] } else { q[2] }] };
+        let (mut src, mut gmask) = (vec![], vec![]);
+        for r in 0..n_real {
+            let q = model.pos[r];
+            for &m in &masks {
+                let ok_y = m & 1 == 0 || q[1] <= horizon + 1e-12;
+                let ok_z = m & 2 == 0 || q[2] <= horizon + 1e-12;
+                if ok_y && ok_z {
+                    src.push(r as u32);
+                    gmask.push(m);
+                }
+            }
+        }
+        for (g, &r) in src.iter().enumerate() {
+            let q = mirror(model.pos[r as usize], gmask[g]);
+            model.pos.push(q);
+            let (pt, fx) = (model.part[r as usize], model.fixed[r as usize]);
+            model.part.push(pt);
+            model.fixed.push(fx);
+        }
         let n = model.pos.len();
+        let near: Vec<bool> = (0..n_real).map(|i| {
+            let q = model.pos[i];
+            (sym & 1 != 0 && q[1] <= 2.0 * horizon) || (sym & 2 != 0 && q[2] <= 2.0 * horizon)
+        }).collect();
+        let gfac = match sym { 0 => 1.0, 3 => 4.0, _ => 2.0 };
         let c_bond: Vec<f64> = model.mats.iter().map(|m| m.micromodulus(horizon)).collect();
         let c_contact = c_bond.iter().cloned().fold(0.0, f64::max);
         let mass: Vec<f64> = model.mats.iter().map(|m| m.rho * vol).collect();
@@ -174,11 +254,12 @@ impl Sim {
             .map(|i| {
                 let q = model.pos[i];
                 let proj = model.part[i] < model.n_proj;
+                let sz = if i >= n_real && gmask[i - n_real] & 2 != 0 { -1.0 } else { 1.0 };
                 P {
                     x: q[0], y: q[1], z: q[2], temp: T_REF, soft: 1.0,
                     vx: if proj { speed * model.dir[0] } else { 0.0 },
                     vy: 0.0,
-                    vz: if proj { speed * model.dir[2] } else { 0.0 },
+                    vz: if proj { sz * speed * model.dir[2] } else { 0.0 },
                 }
             })
             .collect();
@@ -194,9 +275,9 @@ impl Sim {
             pos0: model.pos,
             part: model.part,
             fixed: model.fixed,
-            surface: vec![false; n],
-            bonds: vec![vec![]; n],
-            initial_bonds: vec![0; n],
+            surface: vec![false; n_real],
+            bonds: vec![vec![]; n_real],
+            initial_bonds: vec![0; n_real],
             mats: model.mats,
             c_bond,
             c_contact,
@@ -217,20 +298,35 @@ impl Sim {
             ke_hist: vec![],
             fill: vec![],
             n_proj: model.n_proj,
+            n_real,
+            sym,
+            src,
+            gmask,
+            near,
+            gfac,
             prof: [0.0; 3],
             exit_found: false,
             cfg,
         };
         sim.build_bonds(horizon);
         let nch = rayon::current_num_threads().max(1);
-        sim.locals = (0..nch).map(|_| vec![[0.0; 4]; n]).collect();
+        sim.locals = (0..nch).map(|_| vec![[0.0; 4]; n_real]).collect();
         sim.dt = sim.stable_dt();
         sim.ke0 = sim.kinetic(Some(true));
         Ok(sim)
     }
 
+    /// nós calculados (os quadros têm este tamanho)
     pub fn n(&self) -> usize {
-        self.p.len()
+        self.n_real
+    }
+    /// nós do modelo físico completo (≈ nós calculados × cópias por simetria)
+    pub fn n_physical(&self) -> usize {
+        (self.n_real as f64 * self.gfac) as usize
+    }
+    /// planos de simetria: bit 1 = y, bit 2 = z
+    pub fn symmetry(&self) -> u8 {
+        self.sym
     }
     pub fn t_end(&self) -> f64 {
         self.t_end
@@ -243,14 +339,14 @@ impl Sim {
     }
     /// id da peça de cada nó (0 = projétil)
     pub fn part_ids(&self) -> Vec<u8> {
-        self.part.clone()
+        self.part[..self.n_real].to_vec()
     }
     /// nós de superfície na configuração de referência
     pub fn surface(&self) -> Vec<bool> {
         self.surface.clone()
     }
     pub fn ref_positions(&self) -> Vec<[f32; 3]> {
-        self.pos0.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect()
+        self.pos0[..self.n_real].iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect()
     }
 
     fn build_grid(&mut self, use_ref: bool, cs_min: f64) {
@@ -320,7 +416,8 @@ impl Sim {
         self.build_grid(true, horizon);
         let g = self.grid;
         let dx = self.cfg.dx;
-        let full: Vec<(u32, Vec<Bond>)> = (0..self.p.len())
+        let nr = self.n_real;
+        let full: Vec<(u32, Vec<Bond>)> = (0..nr)
             .into_par_iter()
             .map(|i| {
                 let c = cell_coords(self.cell_of[i], &g);
@@ -349,7 +446,9 @@ impl Sim {
                                         ((horizon + rr - xi) / dx).clamp(0.0, 1.0)
                                     };
                                     count += 1;
-                                    if j > i {
+                                    // dono único: real–real com j > i; real–fantasma com i ≤ origem do fantasma
+                                    let keep = if j < nr { j > i } else { i <= self.src[j - nr] as usize };
+                                    if keep {
                                         list.push(Bond { j: j as u32, ixi: (1.0 / xi) as f32, w: w as f32, sp: 0.0, acc: 0.0 });
                                     }
                                 }
@@ -365,29 +464,33 @@ impl Sim {
         // nós de superfície: menos ligações que o máximo da peça
         let nparts = self.mats.len();
         let mut maxb = vec![0u32; nparts];
-        for i in 0..self.p.len() {
+        for i in 0..nr {
             let p = self.part[i] as usize;
             maxb[p] = maxb[p].max(self.initial_bonds[i]);
         }
-        for i in 0..self.p.len() {
+        for i in 0..nr {
             self.surface[i] = (self.initial_bonds[i] as f64) < 0.97 * maxb[self.part[i] as usize] as f64;
         }
     }
 
     fn stable_dt(&self) -> f64 {
         let v = self.vol;
-        let n = self.p.len();
-        let mut stiff = vec![0.0f64; n];
-        for i in 0..n {
+        let nr = self.n_real;
+        let mut stiff = vec![0.0f64; nr];
+        for i in 0..nr {
             let c = self.c_bond[self.part[i] as usize];
             for bd in &self.bonds[i] {
                 let k = c * bd.w as f64 * v * bd.ixi as f64;
                 stiff[i] += k;
-                stiff[bd.j as usize] += k;
+                let j = bd.j as usize;
+                let t = if j < nr { j } else { self.src[j - nr] as usize };
+                if t != i {
+                    stiff[t] += k;
+                }
             }
         }
         let mut dt = f64::MAX;
-        for i in 0..n {
+        for i in 0..nr {
             let b = self.part[i] as usize;
             let s = stiff[i] + 12.0 * self.c_contact * v / (0.8 * self.cfg.dx);
             dt = dt.min(DT_SAFETY * (2.0 * self.mats[b].rho / s).sqrt());
@@ -396,7 +499,7 @@ impl Sim {
     }
 
     fn kinetic(&self, proj: Option<bool>) -> f64 {
-        self.p
+        self.p[..self.n_real]
             .iter()
             .enumerate()
             .filter(|(i, _)| proj.map_or(true, |pr| (self.part[*i] < self.n_proj) == pr))
@@ -404,20 +507,46 @@ impl Sim {
             .sum()
     }
 
+    /// Atualiza os fantasmas a partir dos nós reais (posição, velocidade, temperatura espelhadas).
+    fn sync_ghosts(&mut self) {
+        if self.src.is_empty() {
+            return;
+        }
+        let nr = self.n_real;
+        let (real, ghosts) = self.p.split_at_mut(nr);
+        let (src, gmask) = (&self.src, &self.gmask);
+        ghosts.par_iter_mut().with_min_len(512).enumerate().for_each(|(g, q)| {
+            let r = &real[src[g] as usize];
+            let m = gmask[g];
+            let sy = if m & 1 != 0 { -1.0 } else { 1.0 };
+            let sz = if m & 2 != 0 { -1.0 } else { 1.0 };
+            q.x = r.x;
+            q.y = sy * r.y;
+            q.z = sz * r.z;
+            q.vx = r.vx;
+            q.vy = sy * r.vy;
+            q.vz = sz * r.vz;
+            q.temp = r.temp;
+            q.soft = r.soft;
+        });
+    }
+
     /// Um passo explícito. Cada ligação e cada par em contato é calculado **uma vez** por
     /// blocos de nós em paralelo; as forças vão para buffers locais (sem corridas) e são
-    /// somadas na integração.
+    /// somadas na integração. Com simetria, as ligações/contatos com nós-fantasma aplicam a
+    /// força no nó real e a reação espelhada no nó real de origem do fantasma.
     pub fn step(&mut self) {
         let dt = self.dt;
         let vol = self.vol;
         let dx = self.cfg.dx;
         let t0 = Instant::now();
+        self.sync_ghosts();
         self.build_grid(false, dx);
         let g = self.grid;
         let t1 = Instant::now();
-        let n = self.p.len();
+        let nr = self.n_real;
         let nch = self.locals.len();
-        let per = (n + nch - 1) / nch;
+        let per = (nr + nch - 1) / nch;
         let tots: Vec<Tot> = {
             let p = &self.p;
             let part = &self.part;
@@ -425,6 +554,9 @@ impl Sim {
             let mats = &self.mats;
             let c_bond = &self.c_bond;
             let c_ct = self.c_contact;
+            let src = &self.src;
+            let gmask = &self.gmask;
+            let near = &self.near;
             let cell_start = &self.cell_start;
             let cell_items = &self.cell_items;
             let cell_of = &self.cell_of;
@@ -460,6 +592,14 @@ impl Sim {
                             if fi && fixed[j] {
                                 continue;
                             }
+                            // destino da reação: nó real j, ou (fantasma) o real de origem com força espelhada
+                            let (tgt, sy, sz, wgt) = if j < nr {
+                                (j, -1.0, -1.0, 1.0)
+                            } else {
+                                let k = src[j - nr] as usize;
+                                let m = gmask[j - nr];
+                                (k, if m & 1 != 0 { 1.0 } else { -1.0 }, if m & 2 != 0 { 1.0 } else { -1.0 }, if k == i { 0.5 } else { 1.0 })
+                            };
                             let q = &p[j];
                             let (rx, ry, rz) = (q.x - me.x, q.y - me.y, q.z - me.z);
                             let r = (rx * rx + ry * ry + rz * rz).sqrt().max(1e-12);
@@ -469,12 +609,13 @@ impl Sim {
                             let w = bd.w as f64;
                             if s > fail {
                                 let s_el = s - sp;
-                                tot.e_fr += 0.5 * cvv * s_el * s_el * w / ixi;
+                                tot.e_fr += wgt * 0.5 * cvv * s_el * s_el * w / ixi;
                                 bd.ixi = -1.0;
                                 continue;
                             }
                             let sy_t = (sy0 + hard * bd.acc as f64) * (0.5 * (me.soft + q.soft));
                             let mut s_el = s - sp;
+                            let mut dtemp = 0.0;
                             if s_el > sy_t || s_el < -sy_t * comp {
                                 let lim = if s_el > 0.0 { sy_t } else { -sy_t * comp };
                                 let dsp = s_el - lim;
@@ -482,10 +623,9 @@ impl Sim {
                                 bd.acc += dsp.abs() as f32;
                                 s_el = lim;
                                 let de = cvv * lim.abs() * dsp.abs() * w / ixi;
-                                tot.e_pl += de;
-                                let dtemp = heat * de;
+                                tot.e_pl += wgt * de;
+                                dtemp = heat * de;
                                 acc_t += dtemp;
-                                loc[j][3] += dtemp;
                             }
                             let f = cvv * s_el * w;
                             let k = f / r;
@@ -493,17 +633,20 @@ impl Sim {
                             ax += fx;
                             ay += fy;
                             az += fz;
-                            let lj = &mut loc[j];
-                            lj[0] -= fx;
-                            lj[1] -= fy;
-                            lj[2] -= fz;
-                            tot.e_el += 0.5 * cvv * s_el * s_el * w / ixi;
+                            if tgt != i {
+                                let lt = &mut loc[tgt];
+                                lt[0] -= fx;
+                                lt[1] += sy * fy;
+                                lt[2] += sz * fz;
+                                lt[3] += dtemp;
+                            }
+                            tot.e_el += wgt * 0.5 * cvv * s_el * s_el * w / ixi;
                         }
                         loc[i][0] += ax;
                         loc[i][1] += ay;
                         loc[i][2] += az;
                         loc[i][3] += acc_t;
-                        // contato por penalidade: cada par uma vez, só células "à frente" (13) + a própria
+                        // contato por penalidade entre nós reais: cada par uma vez, só células "à frente"
                         let c0 = cell_coords(cell_of[i], &g);
                         for &(ox, oy, oz) in FORWARD.iter() {
                             let qc = [c0[0] + ox, c0[1] + oy, c0[2] + oz];
@@ -514,7 +657,7 @@ impl Sim {
                             let id = ((qc[2] * g.n[1] + qc[1]) * g.n[0] + qc[0]) as usize;
                             for k in cell_start[id]..cell_start[id + 1] {
                                 let j = cell_items[k as usize] as usize;
-                                if (same_cell && j <= i) || (fi && fixed[j]) {
+                                if j >= nr || (same_cell && j <= i) || (fi && fixed[j]) {
                                     continue;
                                 }
                                 let rc = if part[j] == part[i] { 0.8 * dx } else { 0.95 * dx };
@@ -525,8 +668,7 @@ impl Sim {
                                 }
                                 let r = r2.sqrt().max(1e-9);
                                 let s = (r - rc) / rc;
-                                let f = c_ct * s * v2;
-                                let kk = f / r;
+                                let kk = c_ct * s * v2 / r;
                                 let (fx, fy, fz) = (kk * rx, kk * ry, kk * rz);
                                 loc[i][0] += fx;
                                 loc[i][1] += fy;
@@ -535,6 +677,52 @@ impl Sim {
                                 loc[j][1] -= fy;
                                 loc[j][2] -= fz;
                                 tot.e_ct += 0.5 * c_ct * s * s * rc * v2;
+                            }
+                        }
+                        // contato com fantasmas (só nós perto de um plano de simetria): 27 células
+                        if near[i] && !src.is_empty() {
+                            for oz in -1..=1 {
+                                for oy in -1..=1 {
+                                    for ox in -1..=1 {
+                                        let qc = [c0[0] + ox, c0[1] + oy, c0[2] + oz];
+                                        if (0..3).any(|k| qc[k] < 0 || qc[k] >= g.n[k]) {
+                                            continue;
+                                        }
+                                        let id = ((qc[2] * g.n[1] + qc[1]) * g.n[0] + qc[0]) as usize;
+                                        for k in cell_start[id]..cell_start[id + 1] {
+                                            let j = cell_items[k as usize] as usize;
+                                            if j < nr || (fi && fixed[j]) {
+                                                continue;
+                                            }
+                                            let org = src[j - nr] as usize;
+                                            if org < i {
+                                                continue; // o par espelhado é tratado a partir de `org`
+                                            }
+                                            let rc = if part[j] == part[i] { 0.8 * dx } else { 0.95 * dx };
+                                            let (rx, ry, rz) = (p[j].x - me.x, p[j].y - me.y, p[j].z - me.z);
+                                            let r2 = rx * rx + ry * ry + rz * rz;
+                                            if r2 >= rc * rc {
+                                                continue;
+                                            }
+                                            let r = r2.sqrt().max(1e-9);
+                                            let s = (r - rc) / rc;
+                                            let kk = c_ct * s * v2 / r;
+                                            let (fx, fy, fz) = (kk * rx, kk * ry, kk * rz);
+                                            loc[i][0] += fx;
+                                            loc[i][1] += fy;
+                                            loc[i][2] += fz;
+                                            let wgt = if org == i { 0.5 } else {
+                                                let m = gmask[j - nr];
+                                                let (sy, sz) = (if m & 1 != 0 { 1.0 } else { -1.0 }, if m & 2 != 0 { 1.0 } else { -1.0 });
+                                                loc[org][0] -= fx;
+                                                loc[org][1] += sy * fy;
+                                                loc[org][2] += sz * fz;
+                                                1.0
+                                            };
+                                            tot.e_ct += wgt * 0.5 * c_ct * s * s * rc * v2;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -549,7 +737,7 @@ impl Sim {
             let fixed = &self.fixed;
             let mass = &self.mass;
             let mats = &self.mats;
-            self.p.par_iter_mut().enumerate().with_min_len(256).for_each(|(i, q)| {
+            self.p[..nr].par_iter_mut().enumerate().with_min_len(256).for_each(|(i, q)| {
                 let mut f = [0.0f64; 4];
                 for l in locals {
                     let v = &l[i];
@@ -602,7 +790,7 @@ impl Sim {
         }
         let margin = 0.005f64.max(3.0 * self.cfg.dx);
         let (mut np, mut behind, mut front, mut vx) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-        for (i, q) in self.p.iter().enumerate() {
+        for (i, q) in self.p[..self.n_real].iter().enumerate() {
             if self.part[i] >= self.n_proj {
                 continue;
             }
@@ -654,7 +842,8 @@ impl Sim {
     }
 
     pub fn capture(&mut self) {
-        let n = self.p.len();
+        self.sync_ghosts();
+        let n = self.n_real;
         let vol = self.vol;
         // tensões por virial: cada ligação (guardada uma vez) contribui aos dois nós
         let nch = self.locals.len().max(1);
@@ -674,13 +863,24 @@ impl Sim {
                     let hard = mat.hardening / mat.young;
                     for bd in bonds {
                         let j = bd.j as usize;
+                        // parceiro real (ou origem do fantasma) e máscara de espelhamento do tensor
+                        let (t, sy, sz) = if j < n {
+                            (j, 1.0, 1.0)
+                        } else {
+                            let m = self.gmask[j - n];
+                            (self.src[j - n] as usize, if m & 1 != 0 { -1.0 } else { 1.0 }, if m & 2 != 0 { -1.0 } else { 1.0 })
+                        };
                         loc[i][6] += bd.acc as f64;
-                        loc[j][6] += bd.acc as f64;
+                        if t != i {
+                            loc[t][6] += bd.acc as f64;
+                        }
                         if bd.ixi < 0.0 {
                             continue;
                         }
                         loc[i][7] += 1.0;
-                        loc[j][7] += 1.0;
+                        if t != i {
+                            loc[t][7] += 1.0;
+                        }
                         let q = &self.p[j];
                         let (rx, ry, rz) = (q.x - me.x, q.y - me.y, q.z - me.z);
                         let r = (rx * rx + ry * ry + rz * rz).sqrt().max(1e-12);
@@ -692,7 +892,13 @@ impl Sim {
                         let v = [k * rx * rx, k * ry * ry, k * rz * rz, k * rx * ry, k * ry * rz, k * rz * rx];
                         for m in 0..6 {
                             loc[i][m] += v[m];
-                            loc[j][m] += v[m];
+                        }
+                        if t != i {
+                            // tensor espelhado: xy troca com sy, yz com sy·sz, zx com sz
+                            let sgn = [1.0, 1.0, 1.0, sy, sy * sz, sz];
+                            for m in 0..6 {
+                                loc[t][m] += sgn[m] * v[m];
+                            }
                         }
                     }
                 }
@@ -748,25 +954,25 @@ impl Sim {
         let (e_el, e_ct) = (self.cur_e_el, self.cur_e_ct);
         self.frames.push(Frame {
             time: self.time,
-            pos: self.p.iter().map(|q| [q.x as f32, q.y as f32, q.z as f32]).collect(),
-            speed: self.p.iter().map(|q| (q.vx * q.vx + q.vy * q.vy + q.vz * q.vz).sqrt() as f32).collect(),
+            pos: self.p[..n].iter().map(|q| [q.x as f32, q.y as f32, q.z as f32]).collect(),
+            speed: self.p[..n].iter().map(|q| (q.vx * q.vx + q.vy * q.vy + q.vz * q.vz).sqrt() as f32).collect(),
             von_mises: von,
             pressure: press,
             plastic: tens.iter().map(|t| t.1).collect(),
-            temp: self.p.iter().map(|q| q.temp as f32).collect(),
+            temp: self.p[..n].iter().map(|q| q.temp as f32).collect(),
             damage: tens.iter().map(|t| t.2).collect(),
-            ke_proj: ke_p,
-            ke_target: self.kinetic(Some(false)),
+            ke_proj: ke_p * self.gfac,
+            ke_target: self.kinetic(Some(false)) * self.gfac,
             vx_proj: vx_p / np.max(1.0),
-            e_elastic: e_el,
-            e_contact: e_ct,
-            e_plastic: self.e_pl,
-            e_fracture: self.e_fr,
+            e_elastic: e_el * self.gfac,
+            e_contact: e_ct * self.gfac,
+            e_plastic: self.e_pl * self.gfac,
+            e_fracture: self.e_fr * self.gfac,
         });
     }
 
     pub fn outcome(&self) -> Outcome {
-        let n = self.p.len();
+        let n = self.n_real;
         let (mut np, mut behind, mut vx, mut tip) = (0.0f64, 0.0f64, 0.0f64, f64::MIN);
         let (mut nt, mut ejected) = (0.0f64, 0.0f64);
         for i in 0..n {

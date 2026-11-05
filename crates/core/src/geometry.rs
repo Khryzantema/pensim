@@ -12,10 +12,28 @@ pub struct Model {
     pub dir: [f64; 3],
     /// peças [0, n_proj) são o projétil
     pub n_proj: u8,
+    /// planos de simetria ativos: bit 1 = y, bit 2 = z (só os nós y>0 / z>0 são gerados)
+    pub sym: u8,
 }
 
 impl Model {
+    /// Modelo reduzido por simetria (se `cfg.symmetry`): só os nós y > 0 (e z > 0 no impacto normal).
     pub fn build(cfg: &Config) -> Result<Model, String> {
+        let mut m = Self::build_full(cfg)?;
+        if cfg.symmetry {
+            let sym: u8 = 1 | if cfg.obliquity_deg.abs() < 1e-9 { 2 } else { 0 };
+            let keep: Vec<bool> = m.pos.iter().map(|q| q[1] > 0.0 && (sym & 2 == 0 || q[2] > 0.0)).collect();
+            let sel = |v: &Vec<[f64; 3]>| -> Vec<[f64; 3]> { v.iter().zip(&keep).filter(|(_, k)| **k).map(|(q, _)| *q).collect() };
+            m.pos = sel(&m.pos);
+            m.part = m.part.iter().zip(&keep).filter(|(_, k)| **k).map(|(p, _)| *p).collect();
+            m.fixed = m.fixed.iter().zip(&keep).filter(|(_, k)| **k).map(|(f, _)| *f).collect();
+            m.sym = sym;
+        }
+        Ok(m)
+    }
+
+    /// Modelo completo (pré-visualização e comparação).
+    pub fn build_full(cfg: &Config) -> Result<Model, String> {
         let dx = cfg.dx;
         if cfg.design.layers.is_empty() {
             return Err("O alvo precisa de ao menos uma camada.".into());
@@ -35,8 +53,9 @@ impl Model {
         for (li, l) in cfg.design.layers.iter().enumerate() {
             cursor += (l.gap_before / dx).round() * dx;
             let nt = ((l.thickness / dx).round() as usize).max(1);
-            let ny = ((l.width / dx).round() as usize).max(2);
-            let nz = if l.round { ny } else { ((l.height / dx).round() as usize).max(2) };
+            let even = |v: usize| v + v % 2;
+            let ny = even(((l.width / dx).round() as usize).max(2));
+            let nz = if l.round { ny } else { even(((l.height / dx).round() as usize).max(2)) };
             let r = ny as f64 * dx / 2.0;
             for i in 0..nt {
                 let x = cursor + (i as f64 + 0.5) * dx;
@@ -68,7 +87,10 @@ impl Model {
         let len = pr.length();
         let rmax = pr.max_radius();
         let na = ((len / dx).round() as usize).max(2);
-        let nw = (((2.0 * rmax) / dx).round() as usize).max(1) | 1;
+        let nw = {
+            let v = (((2.0 * rmax) / dx).round() as usize).max(2);
+            v + v % 2
+        };
         let alpha = cfg.obliquity();
         let d = [alpha.cos(), 0.0, -alpha.sin()];
         let ev = [alpha.sin(), 0.0, alpha.cos()];
@@ -102,6 +124,6 @@ impl Model {
             part.push(ploc[k].3);
             fixed.push(false);
         }
-        Ok(Model { pos, part, fixed, mats, back_x, dir: d, n_proj: n_proj as u8 })
+        Ok(Model { pos, part, fixed, mats, back_x, dir: d, n_proj: n_proj as u8, sym: 0 })
     }
 }
