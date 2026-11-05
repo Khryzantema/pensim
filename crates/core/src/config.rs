@@ -211,7 +211,7 @@ impl Preset {
             obliquity_deg: 0.0,
             clamp_edges: true,
             time_factor: 1.0,
-            n_frames: 48,
+            n_frames: 100,
         }
     }
 }

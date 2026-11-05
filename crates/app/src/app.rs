@@ -6,6 +6,10 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, S
 use pensim_core::{Ammo, Config, Core, Design, Frame, Layer, Model, Nose, Outcome, OutcomeKind, Preset, AMMO, LIBRARY};
 use std::sync::atomic::AtomicBool;
 
+/// tempos médios do último intervalo [µs]: quadro inteiro, viewport 3D
+static PROF_FRAME_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROF_VIEW_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// layout compacto (tela deitada / baixa)
 static COMPACT: AtomicBool = AtomicBool::new(false);
 fn compact() -> bool {
@@ -15,8 +19,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 const RES_PRESETS: [(&str, f64); 7] = [("Rascunho", 0.0025), ("Rápida", 0.002), ("Média", 0.0015), ("Fina", 0.001), ("Muito fina", 0.0008), ("Extrema", 0.0005), ("Ultra", 0.00025)];
-/// duração (s) da reprodução completa em velocidade 1×
-const PLAY_SECONDS: f32 = 6.0;
+/// taxa de reprodução (quadros/s) em velocidade 1×
+const PLAY_FPS: f32 = 25.0;
 const ACCENT: Color32 = Color32::from_rgb(0, 112, 192);
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -137,6 +141,7 @@ pub struct PenSim {
     ammo_idx: usize,
     ammo_scale: f64,
     show_side: bool,
+    show_fps: bool,
     /// margens extras (pt) somadas à área segura automática: [esq, topo, dir, base]
     extra_inset: [f32; 4],
     ws: Ws,
@@ -215,6 +220,7 @@ impl PenSim {
             ammo_idx,
             ammo_scale: AMMO[ammo_idx].scale,
             show_side: true,
+            show_fps: std::env::var("PENSIM_PROF").is_ok(),
             extra_inset: [0.0, 0.0, 0.0, 0.0],
             ws: Ws::Design,
             sel: Sel::Projectile,
@@ -369,6 +375,14 @@ fn system_insets(ctx: &egui::Context) -> [f32; 4] {
 
 impl eframe::App for PenSim {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let t_frame = std::time::Instant::now();
+        self.ui_inner(ui);
+        PROF_FRAME_US.store(t_frame.elapsed().as_micros() as u64, Ordering::Relaxed);
+    }
+}
+
+impl PenSim {
+    fn ui_inner(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let snap = self.snapshot();
         // A simulação é calculada por inteiro; só depois é reproduzida (ou ao vivo, se escolhido).
@@ -390,8 +404,7 @@ impl eframe::App for PenSim {
             }
             if self.playing {
                 let dt = ctx.input(|i| i.stable_dt).min(0.1);
-                let fps = nf as f32 / PLAY_SECONDS;
-                self.play_pos += dt * fps * self.speed;
+                self.play_pos += dt * PLAY_FPS * self.speed;
                 if self.play_pos >= (nf - 1) as f32 {
                     if self.loop_play {
                         self.play_pos = 0.0;
@@ -475,6 +488,17 @@ impl eframe::App for PenSim {
             });
         }
         egui::CentralPanel::default().show(ui, |ui| self.viewport(ui, &snap));
+        if self.show_fps {
+            let dt = ctx.input(|i| i.stable_dt).max(1e-4);
+            let (fu, vu) = (PROF_FRAME_US.load(Ordering::Relaxed), PROF_VIEW_US.load(Ordering::Relaxed));
+            let txt = format!("{:.0} fps · ui {:.1} ms · 3D {:.1} ms", 1.0 / dt, fu as f32 / 1000.0, vu as f32 / 1000.0);
+            if std::env::var("PENSIM_PROF").is_ok() {
+                eprintln!("{txt}");
+            }
+            egui::Area::new(egui::Id::new("fps")).anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(96.0, -(inset[3] + 44.0))).show(&ctx, |ui| {
+                ui.add(egui::Label::new(RichText::new(txt).monospace().size(11.0).background_color(Color32::from_rgba_unmultiplied(255, 255, 255, 210))).wrap_mode(egui::TextWrapMode::Extend));
+            });
+        }
     }
 }
 
@@ -818,6 +842,7 @@ impl PenSim {
                 }
             });
             egui::CollapsingHeader::new("Ajustes de tela").default_open(false).show(ui, |ui| {
+                ui.checkbox(&mut self.show_fps, "Mostrar FPS e tempos");
                 ui.weak("Se algum botão do topo, lados ou base não responder (barra de status, câmera ou navegação do Android), aumente a margem.");
                 ui.add(egui::Slider::new(&mut self.extra_inset[1], 0.0..=80.0).text("topo"));
                 ui.add(egui::Slider::new(&mut self.extra_inset[3], 0.0..=80.0).text("base"));
@@ -999,7 +1024,11 @@ impl PenSim {
                 ui.selectable_value(&mut self.cfg.horizon_m, h, format!("{h}"));
             }
         });
-        ui.add(egui::Slider::new(&mut self.cfg.n_frames, 16..=120).text("quadros gravados"));
+        let mut secs = (self.cfg.n_frames as f32 / PLAY_FPS).clamp(1.0, 16.0);
+        if ui.add(egui::Slider::new(&mut secs, 1.0..=16.0).text("duração da repetição s")).changed() {
+            self.cfg.n_frames = (secs * PLAY_FPS).round() as usize;
+        }
+        ui.weak(format!("Repetição a {PLAY_FPS:.0} fps em 1× · até {} quadros gravados (mais quadros = mais memória).", self.cfg.n_frames));
         ui.separator();
 
         let n = self.estimate_nodes();
@@ -1223,6 +1252,12 @@ impl PenSim {
     // --------------------------------------------------------- viewport 3D
 
     fn viewport(&mut self, ui: &mut egui::Ui, snap: &Snap) {
+        let t = std::time::Instant::now();
+        self.viewport_inner(ui, snap);
+        PROF_VIEW_US.store(t.elapsed().as_micros() as u64, Ordering::Relaxed);
+    }
+
+    fn viewport_inner(&mut self, ui: &mut egui::Ui, snap: &Snap) {
         if self.target_mode && self.ws == Ws::Design {
             let colors: Vec<Color32> = self.cfg.design.layers.iter().map(|l| mat_color(l.material.name)).collect();
             let proj = self.cfg.design.projectile.profile.clone();
