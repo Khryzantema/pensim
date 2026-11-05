@@ -1,20 +1,29 @@
 use pensim_core::*;
 fn env(k: &str, d: f64) -> f64 { std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d) }
 fn main() {
-    let a = AMMO.iter().find(|a| a.name.contains("75 mm")).unwrap();
+    let name = std::env::var("AMMO").unwrap_or("PzGr 39/42".into());
+    let a = AMMO.iter().find(|a| a.name.contains(&name)).unwrap();
     let nodes = env("NODES", 8.0);
     // escala interna como no app: nós no diâmetro × dx / diâmetro real
     let s = nodes * 1.5e-3 / (a.caliber_mm * 1e-3);
     let mut c = a.config(s);
     c.design.layers[0].thickness = env("PLATE", 140.0) * 1e-3 * s;
+    adjust_rha(&mut c.design.layers[0].material, env("PLATE", 140.0) * 1e-3);
     if env("CORE", 1.0) < 0.5 { c.design.projectile.core = None; }
     c.n_frames = 20;
+    c.obliquity_deg = env("A", 0.0);
     c.sleep_ratio = env("SLEEP", 0.03);
     c.symmetry = env("SYM", 1.0) > 0.5;
     c.noise = env("NOISE", 0.15);
     c.deviatoric_plasticity = env("DEV", 1.0) > 0.5;
     c.rate_gain = env("RG", 1.0);
-    for l in c.design.layers.iter_mut() { l.material.comp_factor = env("COMP", l.material.comp_factor); }
+    for l in c.design.layers.iter_mut() {
+        l.material.comp_factor = env("COMP", l.material.comp_factor);
+        l.material.yield_strength = env("RY", l.material.yield_strength / 1e9) * 1e9;
+        l.material.hardening = env("RH", l.material.hardening / 1e9) * 1e9;
+        l.material.fail_stretch = env("RF", l.material.fail_stretch);
+        l.material.rate_c = env("RC", l.material.rate_c);
+    }
     let py = env("PY", c.design.projectile.material.yield_strength / 1e9) * 1e9;
     c.design.projectile.material.yield_strength = py;
     c.design.projectile.material.fail_stretch = env("PF", c.design.projectile.material.fail_stretch);

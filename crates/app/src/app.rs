@@ -435,6 +435,11 @@ impl PenSim {
     fn scaled_cfg(&self) -> Config {
         let f = self.model_scale();
         let mut c = self.cfg.clone();
+        // RHA: dureza pela espessura real da chapa (chapas grossas são mais macias)
+        let u = self.ammo_scale.max(1e-6);
+        for l in c.design.layers.iter_mut() {
+            pensim_core::adjust_rha(&mut l.material, l.thickness / u);
+        }
         c.design.projectile.scale(f);
         for l in c.design.layers.iter_mut() {
             l.thickness *= f;
@@ -1231,8 +1236,13 @@ impl PenSim {
                 if self.ws != Ws::Target && ui.button("✎ Editar na aba ALVO").clicked() {
                     self.goto(Sel::Layer(i));
                 }
+                let u0 = self.ammo_scale.max(1e-6);
                 let l: &mut Layer = &mut self.cfg.design.layers[i];
                 mat_combo(ui, "lm", &mut l.material);
+                if l.material.name == LIBRARY[0].name {
+                    let bhn = pensim_core::rha_bhn(l.thickness * 1e3 / u0);
+                    ui.weak(format!("Nesta espessura a RHA tem ≈ {bhn:.0} BHN (σy ≈ {:.2} GPa): chapas grossas são temperadas mais macias.", 3.05e-3 * bhn));
+                }
                 // medidas REAIS (o modelo guarda × escala)
                 let u = self.ammo_scale.max(1e-6);
                 let (mut t, mut g, mut w, mut h) = (l.thickness * 1e3 / u, l.gap_before * 1e3 / u, l.width * 1e3 / u, l.height * 1e3 / u);

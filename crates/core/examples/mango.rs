@@ -5,6 +5,7 @@ fn main() {
     let s = env("S", a.scale);
     let mut c = a.config(s);
     c.design.layers[0].thickness = env("PLATE", 300.0) * 1e-3 * s;
+    adjust_rha(&mut c.design.layers[0].material, env("PLATE", 300.0) * 1e-3);
     c.dx = env("DX", 1.5) * 1e-3;
     c.n_frames = 30;
     c.rate_gain = env("RG", 1.0);

@@ -8,6 +8,7 @@ fn main() {
     let mut c = a.config(s);
     let plate = env("PLATE", a.plate_mm);
     c.design.layers[0].thickness = plate * 1e-3 * s;
+    adjust_rha(&mut c.design.layers[0].material, plate * 1e-3);
     let ry = env("RY", c.design.layers[0].material.yield_strength / 1e9);
     c.design.layers[0].material.yield_strength = ry * 1e9;
     c.design.layers[0].material.hardening = env("RH", c.design.layers[0].material.hardening / 1e9) * 1e9;

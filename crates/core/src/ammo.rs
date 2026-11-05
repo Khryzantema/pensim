@@ -349,7 +349,11 @@ impl Ammo {
                     width,
                     height: width,
                     round: false,
-                    material: LIBRARY[self.plate_mat].clone(),
+                    material: {
+                        let mut m = LIBRARY[self.plate_mat].clone();
+                        crate::material::adjust_rha(&mut m, self.plate_mm * 1e-3);
+                        m
+                    },
                 }],
             },
             velocity: self.velocity,

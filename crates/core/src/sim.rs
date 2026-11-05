@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 const TAYLOR_QUINNEY: f64 = 0.9;
 /// fração do limite de estabilidade do passo explícito
 const DT_SAFETY: f64 = 0.65;
+/// 1 / deformação de saturação do encruamento (o ganho máximo é `hardening × HSAT`)
+const INV_HSAT: f64 = 1.0 / 0.4;
 
 /// Ligação de peridinâmica (apenas j > i é guardada; cada ligação é calculada uma vez).
 #[derive(Clone, Copy)]
@@ -1037,7 +1039,9 @@ impl Sim {
                                 bd.ixi = -bd.ixi;
                                 continue;
                             }
-                            let mut sy_t = (sy0 + hard * bd.acc as f64) * (0.5 * (me.soft + q.soft)) * (1.0 + 0.3 * nf * u);
+                            let ea = bd.acc as f64;
+                            // encruamento que satura (como Johnson-Cook, n ≈ 0,3): não dobra a resistência em grandes deformações
+                            let mut sy_t = (sy0 + hard * ea / (1.0 + ea * INV_HSAT)) * (0.5 * (me.soft + q.soft)) * (1.0 + 0.3 * nf * u);
                             let mut s_el = s - sp;
                             let mut dtemp = 0.0;
                             // plastifica só a parte desviadora (s_el − sb); a volumétrica fica elástica
@@ -1451,7 +1455,8 @@ impl Sim {
                         let (rx, ry, rz) = (q.x - me.x, q.y - me.y, q.z - me.z);
                         let r = (rx * rx + ry * ry + rz * rz).sqrt().max(1e-12);
                         let s = r * bd.ixi as f64 - 1.0;
-                        let sy_t = (sy0 + hard * bd.acc as f64) * (0.5 * (me.soft + q.soft));
+                        let ea = bd.acc as f64;
+                        let sy_t = (sy0 + hard * ea / (1.0 + ea * INV_HSAT)) * (0.5 * (me.soft + q.soft));
                         let sb = if self.cfg.deviatoric_plasticity { 0.5 * (self.sbar[i] + self.sbar[t]) as f64 } else { 0.0 };
                         let s_el = sb + (s - bd.sp as f64 - sb).clamp(-sy_t * mat.comp_factor, sy_t);
                         let f = cvv * s_el * bd.w as f64;
@@ -1564,7 +1569,10 @@ impl Sim {
         }
         let v_res = vx / np.max(1.0);
         let behind_frac = behind / np.max(1.0);
-        let kind = if behind_frac > 0.5 && v_res > 0.0 {
+        // perfurou: a maior parte passou, ou o que restou do corpo saiu pela face traseira
+        // (dardos longos se erodem: o que atravessa pode ser bem menos que a metade)
+        let exited = self.sep_time.is_some() && tip > self.back_x + 2.0 * self.cfg.dx && behind_frac > 0.1;
+        let kind = if (behind_frac > 0.5 || exited) && v_res > 0.0 {
             OutcomeKind::Perforation
         } else if behind_frac < 0.05 && (v_res < 0.0 || (self.sep_time.is_some() && tip < 0.5 * self.cfg.dx)) {
             OutcomeKind::Rejected

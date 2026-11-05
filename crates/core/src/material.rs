@@ -44,7 +44,7 @@ pub const LIBRARY: &[Material] = &[
     m("Cerâmica Al2O3", 3900.0, 370e9, 0.25e9, 0.0, 8.5e-4, 8.0, 880.0, 2300.0, 0.0),
     m("Urânio empobrecido", 18950.0, 205e9, 1.10e9, 0.6e9, 0.10, 1.0, 117.0, 1405.0, 0.007),
     m("Enchimento (carga/traçante)", 1650.0, 8e9, 0.06e9, 0.0, 0.05, 3.0, 1000.0, 700.0, 0.0),
-    m("Aço de projétil AP", 7850.0, 205e9, 1.60e9, 1.0e9, 0.06, 1.0, 477.0, 1800.0, 0.012),
+    m("Aço de projétil AP", 7850.0, 205e9, 2.00e9, 1.0e9, 0.06, 1.0, 477.0, 1800.0, 0.012),
     // WC-Co (metal duro): muito rígido e duro, frágil em tração (ruptura transversal ~2 GPa)
     m("Carboneto de tungstênio (WC-Co)", 15500.0, 580e9, 1.5e9, 0.0, 0.008, 2.6, 200.0, 3000.0, 0.0),
     // camisa de bala (gilding metal 95Cu-5Zn, encruado na estampagem)
@@ -61,5 +61,31 @@ impl Material {
     }
     pub fn sound_speed(&self) -> f64 {
         (self.young / self.rho).sqrt()
+    }
+}
+
+/// Dureza Brinell típica de aço de blindagem laminado (RHA) pela espessura (MIL-A-12560:
+/// chapas grossas são temperadas mais macias para não trincarem).
+pub fn rha_bhn(thickness_mm: f64) -> f64 {
+    const T: [(f64, f64); 7] = [(12.7, 360.0), (25.0, 345.0), (50.0, 320.0), (75.0, 295.0), (100.0, 280.0), (150.0, 260.0), (300.0, 240.0)];
+    let t = thickness_mm.max(1.0);
+    if t <= T[0].0 {
+        return T[0].1;
+    }
+    for w in T.windows(2) {
+        if t <= w[1].0 {
+            let f = (t.ln() - w[0].0.ln()) / (w[1].0.ln() - w[0].0.ln());
+            return w[0].1 + f * (w[1].1 - w[0].1);
+        }
+    }
+    T[T.len() - 1].1
+}
+
+/// Ajusta o escoamento da RHA à espessura REAL da chapa (σy ≈ 3,05 MPa × BHN).
+/// Outros materiais ficam como estão.
+pub fn adjust_rha(m: &mut Material, real_thickness_m: f64) {
+    if m.name == LIBRARY[0].name {
+        let bhn = rha_bhn(real_thickness_m * 1e3);
+        m.yield_strength = 3.05e6 * bhn;
     }
 }
