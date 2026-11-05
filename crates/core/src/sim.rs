@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::geometry::Model;
 use crate::material::{Material, T_REF};
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const TAYLOR_QUINNEY: f64 = 0.9;
@@ -151,6 +152,18 @@ pub struct Sim {
     /// tempos acumulados [s]: grade, forças (ligações+contato), integração
     pub prof: [f64; 3],
     exit_found: bool,
+    hg: HGrid,
+    /// nós calculados na região ativa (acordados + vizinhança de ligações)
+    active: Vec<bool>,
+    halo_done: Vec<bool>,
+    /// nós dormindo que receberam força neste passo
+    touched: Vec<AtomicBool>,
+    /// nós acordados (e fantasmas deles), para atualizar a grade
+    awake_items: Vec<u32>,
+    awake_count: usize,
+    all_awake: bool,
+    /// fantasmas do nó real r: [gstart[r], gstart[r+1])
+    gstart: Vec<u32>,
     had_contact: bool,
     compress_frames: bool,
     /// instante em que o corpo principal se separou do alvo
@@ -203,8 +216,88 @@ fn morton_reorder(m: &mut Model, dx: f64) {
     m.fixed = order.iter().map(|&i| m.fixed[i]).collect();
 }
 
+const NIL: u32 = u32::MAX;
+
+/// Grade espacial persistente: hash de células de lado `dx` com listas ligadas. Só os nós que
+/// mudam de célula são re-ligados (os nós dormindo nunca mudam).
+struct HGrid {
+    mask: usize,
+    head: Vec<u32>,
+    next: Vec<u32>,
+    cell: Vec<[i32; 3]>,
+    inv: f64,
+}
+
+impl HGrid {
+    fn new(n: usize, dx: f64) -> HGrid {
+        let buckets = (2 * n).max(1024).next_power_of_two();
+        HGrid { mask: buckets - 1, head: vec![NIL; buckets], next: vec![NIL; n], cell: vec![[0; 3]; n], inv: 1.0 / dx }
+    }
+    #[inline]
+    fn cell_of(&self, x: f64, y: f64, z: f64) -> [i32; 3] {
+        [(x * self.inv).floor() as i32, (y * self.inv).floor() as i32, (z * self.inv).floor() as i32]
+    }
+    #[inline]
+    fn bucket(&self, c: [i32; 3]) -> usize {
+        let h = (c[0] as u32).wrapping_mul(0x9E37_79B1) ^ (c[1] as u32).wrapping_mul(0x85EB_CA77) ^ (c[2] as u32).wrapping_mul(0xC2B2_AE3D);
+        ((h ^ (h >> 15)) as usize) & self.mask
+    }
+    fn insert(&mut self, i: usize, c: [i32; 3]) {
+        let b = self.bucket(c);
+        self.next[i] = self.head[b];
+        self.head[b] = i as u32;
+        self.cell[i] = c;
+    }
+    fn remove(&mut self, i: usize) {
+        let b = self.bucket(self.cell[i]);
+        if self.head[b] == i as u32 {
+            self.head[b] = self.next[i];
+        } else {
+            let mut k = self.head[b];
+            while k != NIL && self.next[k as usize] != i as u32 {
+                k = self.next[k as usize];
+            }
+            if k != NIL {
+                self.next[k as usize] = self.next[i];
+            }
+        }
+    }
+    fn relink(&mut self, i: usize, c: [i32; 3]) {
+        if self.cell[i] != c {
+            self.remove(i);
+            self.insert(i, c);
+        }
+    }
+}
+
+/// Ponteiro compartilhável entre threads (acessos sempre em índices disjuntos).
+struct SyncPtr(*mut [f32; 4]);
+unsafe impl Send for SyncPtr {}
+unsafe impl Sync for SyncPtr {}
+
+/// Todas as 27 células vizinhas.
+const ALL27: [(i32, i32, i32); 27] = {
+    let mut a = [(0, 0, 0); 27];
+    let mut k = 0;
+    let mut z = -1;
+    while z <= 1 {
+        let mut y = -1;
+        while y <= 1 {
+            let mut x = -1;
+            while x <= 1 {
+                a[k] = (x, y, z);
+                k += 1;
+                x += 1;
+            }
+            y += 1;
+        }
+        z += 1;
+    }
+    a
+};
+
 /// Deslocamentos de células "à frente": a própria célula + 13 vizinhas (meia vizinhança).
-const FORWARD: [(i64, i64, i64); 14] = [
+const FORWARD: [(i32, i32, i32); 14] = [
     (0, 0, 0), (1, 0, 0), (-1, 1, 0), (0, 1, 0), (1, 1, 0),
     (-1, -1, 1), (0, -1, 1), (1, -1, 1), (-1, 0, 1), (0, 0, 1), (1, 0, 1),
     (-1, 1, 1), (0, 1, 1), (1, 1, 1),
@@ -334,6 +427,14 @@ impl Sim {
             gfac,
             prof: [0.0; 3],
             exit_found: false,
+            hg: HGrid::new(1, 1.0),
+            active: vec![false; n_real],
+            halo_done: vec![false; n_real],
+            touched: (0..n_real).map(|_| AtomicBool::new(false)).collect(),
+            awake_items: vec![],
+            awake_count: 0,
+            all_awake: false,
+            gstart: vec![],
             had_contact: false,
             compress_frames,
             sep_time: None,
@@ -372,6 +473,23 @@ impl Sim {
                 sim.awake[i] = sim.part[i] < sim.n_proj;
             }
         }
+        // fantasmas de cada nó real são contíguos (criados na mesma ordem)
+        let mut gs = vec![0u32; n_real + 1];
+        for &r in &sim.src {
+            gs[r as usize + 1] += 1;
+        }
+        for r in 0..n_real {
+            gs[r + 1] += gs[r];
+        }
+        sim.gstart = gs;
+        // grade persistente com todos os nós (reais e fantasmas)
+        sim.hg = HGrid::new(n, dx);
+        for i in 0..n {
+            let q = &sim.p[i];
+            let c = sim.hg.cell_of(q.x, q.y, q.z);
+            sim.hg.insert(i, c);
+        }
+        sim.wake_events();
         Ok(sim)
     }
 
@@ -658,6 +776,104 @@ impl Sim {
         self.awake.iter().filter(|&&a| a).count() as f64 / self.n_real.max(1) as f64
     }
 
+    /// Registra nós recém-acordados: entram na lista que atualiza a grade e marcam como ativos
+    /// (calculados) os vizinhos dentro do horizonte, para que ligações com nós dormindo sejam vistas.
+    fn wake_events(&mut self) {
+        let nr = self.n_real;
+        let new: Vec<usize> = (0..nr).filter(|&i| self.awake[i] && !self.halo_done[i]).collect();
+        if new.is_empty() {
+            return;
+        }
+        self.awake_count += new.len();
+        self.all_awake = self.awake_count >= nr;
+        let everything = self.awake_count * 10 >= nr * 6; // acima de 60% acordado: calcula tudo
+        let reach = self.cfg.horizon_m * self.cfg.dx + 1e-9;
+        let rng = self.cfg.horizon_m.ceil() as i32;
+        let mut mark: Vec<usize> = Vec::new();
+        for &i in &new {
+            self.halo_done[i] = true;
+            self.active[i] = true;
+            self.awake_items.push(i as u32);
+            if !self.gstart.is_empty() {
+                for g in self.gstart[i]..self.gstart[i + 1] {
+                    self.awake_items.push((nr as u32) + g);
+                }
+            }
+            if everything {
+                continue;
+            }
+            let c0 = self.hg.cell_of(self.pos0[i][0], self.pos0[i][1], self.pos0[i][2]);
+            for oz in -rng..=rng {
+                for oy in -rng..=rng {
+                    for ox in -rng..=rng {
+                        let tc = [c0[0] + ox, c0[1] + oy, c0[2] + oz];
+                        let mut cur = self.hg.head[self.hg.bucket(tc)];
+                        while cur != NIL {
+                            let j = cur as usize;
+                            cur = self.hg.next[j];
+                            if self.hg.cell[j] != tc || self.part[j] != self.part[i] {
+                                continue;
+                            }
+                            let d2 = (0..3).map(|a| (self.pos0[j][a] - self.pos0[i][a]).powi(2)).sum::<f64>();
+                            if d2 <= reach * reach {
+                                mark.push(if j < nr { j } else { self.src[j - nr] as usize });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if everything {
+            self.active.iter_mut().for_each(|a| *a = true);
+        } else {
+            for m in mark {
+                self.active[m] = true;
+            }
+        }
+    }
+
+    /// Atualiza fantasmas e células da grade apenas dos nós acordados.
+    fn update_awake_grid(&mut self) {
+        let nr = self.n_real;
+        if !self.src.is_empty() {
+            let (real, ghosts) = self.p.split_at_mut(nr);
+            let (src, gmask, awake) = (&self.src, &self.gmask, &self.awake);
+            ghosts.par_iter_mut().with_min_len(512).enumerate().for_each(|(g, q)| {
+                let s = src[g] as usize;
+                if !awake[s] {
+                    return;
+                }
+                let r = &real[s];
+                let m = gmask[g];
+                let sy = if m & 1 != 0 { -1.0 } else { 1.0 };
+                let sz = if m & 2 != 0 { -1.0 } else { 1.0 };
+                q.x = r.x;
+                q.y = sy * r.y;
+                q.z = sz * r.z;
+                q.vx = r.vx;
+                q.vy = sy * r.vy;
+                q.vz = sz * r.vz;
+                q.temp = r.temp;
+                q.soft = r.soft;
+            });
+        }
+        let changed: Vec<(u32, [i32; 3])> = {
+            let (p, hg) = (&self.p, &self.hg);
+            self.awake_items
+                .par_iter()
+                .with_min_len(1024)
+                .filter_map(|&i| {
+                    let q = &p[i as usize];
+                    let c = hg.cell_of(q.x, q.y, q.z);
+                    if c != hg.cell[i as usize] { Some((i, c)) } else { None }
+                })
+                .collect()
+        };
+        for (i, c) in changed {
+            self.hg.relink(i as usize, c);
+        }
+    }
+
     /// Atualiza os fantasmas a partir dos nós reais (posição, velocidade, temperatura espelhadas).
     fn sync_ghosts(&mut self) {
         if self.src.is_empty() {
@@ -691,13 +907,12 @@ impl Sim {
         let vol = self.vol;
         let dx = self.cfg.dx;
         let t0 = Instant::now();
-        self.sync_ghosts();
-        self.build_grid(false, dx);
-        let g = self.grid;
+        self.update_awake_grid();
         let t1 = Instant::now();
         let nr = self.n_real;
         let nch = self.locals.len();
         let per = (nr + nch - 1) / nch;
+        let all_awake = self.all_awake;
         let tots: Vec<Tot> = {
             let p = &self.p;
             let part = &self.part;
@@ -711,22 +926,22 @@ impl Sim {
             let awake = &self.awake;
             let noise = self.cfg.noise;
             let rate_gain = self.cfg.rate_gain;
-            let cell_start = &self.cell_start;
-            let cell_items = &self.cell_items;
-            let cell_of = &self.cell_of;
+            let hg = &self.hg;
+            let active = &self.active;
+            let touched = &self.touched;
             self.bonds
                 .par_chunks_mut(per)
                 .zip(self.locals.par_iter_mut())
                 .enumerate()
                 .map(|(c, (bchunk, loc))| {
-                    for v in loc.iter_mut() {
-                        *v = [0.0; 4];
-                    }
                     let base = c * per;
                     let mut tot = Tot::default();
                     let v2 = vol * vol;
                     for (ii, bonds) in bchunk.iter_mut().enumerate() {
                         let i = base + ii;
+                        if !active[i] {
+                            continue;
+                        }
                         let me = &p[i];
                         let fi = fixed[i];
                         let ai = awake[i];
@@ -795,6 +1010,9 @@ impl Sim {
                             ay += fy;
                             az += fz;
                             if tgt != i {
+                                if !awake[tgt] {
+                                    touched[tgt].store(true, Ordering::Relaxed);
+                                }
                                 let lt = &mut loc[tgt];
                                 lt[0] -= (fx) as f32;
                                 lt[1] += (sy * fy) as f32;
@@ -807,85 +1025,76 @@ impl Sim {
                         loc[i][1] += (ay) as f32;
                         loc[i][2] += (az) as f32;
                         loc[i][3] += (acc_t) as f32;
-                        // contato por penalidade entre nós reais: cada par uma vez, só células "à frente"
-                        let c0 = cell_coords(cell_of[i], &g);
-                        for &(ox, oy, oz) in FORWARD.iter() {
-                            let qc = [c0[0] + ox, c0[1] + oy, c0[2] + oz];
-                            if (0..3).any(|k| qc[k] < 0 || qc[k] >= g.n[k]) {
-                                continue;
-                            }
-                            let same_cell = ox == 0 && oy == 0 && oz == 0;
-                            let id = ((qc[2] * g.n[1] + qc[1]) * g.n[0] + qc[0]) as usize;
-                            for k in cell_start[id]..cell_start[id + 1] {
-                                let j = cell_items[k as usize] as usize;
-                                if j >= nr || (same_cell && j <= i) || (fi && fixed[j]) || (!ai && !awake[j]) {
-                                    continue;
-                                }
-                                let rc = if part[j] == part[i] { 0.8 * dx } else { 0.95 * dx };
-                                let (rx, ry, rz) = (p[j].x - me.x, p[j].y - me.y, p[j].z - me.z);
-                                let r2 = rx * rx + ry * ry + rz * rz;
-                                if r2 >= rc * rc {
-                                    continue;
-                                }
-                                let r = r2.sqrt().max(1e-9);
-                                let s = (r - rc) / rc;
-                                let kk = c_ct * s * v2 / r;
-                                let (fx, fy, fz) = (kk * rx, kk * ry, kk * rz);
-                                loc[i][0] += (fx) as f32;
-                                loc[i][1] += (fy) as f32;
-                                loc[i][2] += (fz) as f32;
-                                loc[j][0] -= (fx) as f32;
-                                loc[j][1] -= (fy) as f32;
-                                loc[j][2] -= (fz) as f32;
-                                tot.e_ct += 0.5 * c_ct * s * s * rc * v2;
-                            }
+                        if !ai && (ax != 0.0 || ay != 0.0 || az != 0.0) {
+                            touched[i].store(true, Ordering::Relaxed);
                         }
-                        // contato com fantasmas (só nós perto de um plano de simetria): 27 células
-                        if near[i] && !src.is_empty() {
-                            for oz in -1..=1 {
-                                for oy in -1..=1 {
-                                    for ox in -1..=1 {
-                                        let qc = [c0[0] + ox, c0[1] + oy, c0[2] + oz];
-                                        if (0..3).any(|k| qc[k] < 0 || qc[k] >= g.n[k]) {
+                        // contato por penalidade. Só nós acordados varrem; um par (acordado, dormindo)
+                        // é tratado pelo acordado, e (acordado, acordado) uma vez só.
+                        if ai {
+                            let c0 = hg.cell[i];
+                            let offs: &[(i32, i32, i32)] = if all_awake && !near[i] { &FORWARD } else { &ALL27 };
+                            for &(ox, oy, oz) in offs {
+                                let tc = [c0[0] + ox, c0[1] + oy, c0[2] + oz];
+                                let same = ox == 0 && oy == 0 && oz == 0;
+                                let fwd = oz > 0 || (oz == 0 && (oy > 0 || (oy == 0 && ox > 0)));
+                                let mut cur = hg.head[hg.bucket(tc)];
+                                while cur != NIL {
+                                    let j = cur as usize;
+                                    cur = hg.next[j];
+                                    if hg.cell[j] != tc || j == i || (fi && fixed[j]) {
+                                        continue;
+                                    }
+                                    let (org, is_ghost) = if j < nr { (j, false) } else { (src[j - nr] as usize, true) };
+                                    if is_ghost && !near[i] {
+                                        continue;
+                                    }
+                                    let aj = awake[org];
+                                    if aj {
+                                        // par entre dois acordados: uma vez só
+                                        if is_ghost {
+                                            if org < i {
+                                                continue;
+                                            }
+                                        } else if !(fwd || (same && j > i)) {
                                             continue;
                                         }
-                                        let id = ((qc[2] * g.n[1] + qc[1]) * g.n[0] + qc[0]) as usize;
-                                        for k in cell_start[id]..cell_start[id + 1] {
-                                            let j = cell_items[k as usize] as usize;
-                                            if j < nr || (fi && fixed[j]) {
-                                                continue;
-                                            }
-                                            let org = src[j - nr] as usize;
-                                            if !ai && !awake[org] {
-                                                continue;
-                                            }
-                                            if org < i {
-                                                continue; // o par espelhado é tratado a partir de `org`
-                                            }
-                                            let rc = if part[j] == part[i] { 0.8 * dx } else { 0.95 * dx };
-                                            let (rx, ry, rz) = (p[j].x - me.x, p[j].y - me.y, p[j].z - me.z);
-                                            let r2 = rx * rx + ry * ry + rz * rz;
-                                            if r2 >= rc * rc {
-                                                continue;
-                                            }
-                                            let r = r2.sqrt().max(1e-9);
-                                            let s = (r - rc) / rc;
-                                            let kk = c_ct * s * v2 / r;
-                                            let (fx, fy, fz) = (kk * rx, kk * ry, kk * rz);
-                                            loc[i][0] += (fx) as f32;
-                                            loc[i][1] += (fy) as f32;
-                                            loc[i][2] += (fz) as f32;
-                                            let wgt = if org == i { 0.5 } else {
-                                                let m = gmask[j - nr];
-                                                let (sy, sz) = (if m & 1 != 0 { 1.0 } else { -1.0 }, if m & 2 != 0 { 1.0 } else { -1.0 });
-                                                loc[org][0] -= (fx) as f32;
-                                                loc[org][1] += (sy * fy) as f32;
-                                                loc[org][2] += (sz * fz) as f32;
-                                                1.0
-                                            };
-                                            tot.e_ct += wgt * 0.5 * c_ct * s * s * rc * v2;
-                                        }
                                     }
+                                    let rc = if part[j] == part[i] { 0.8 * dx } else { 0.95 * dx };
+                                    let (rx, ry, rz) = (p[j].x - me.x, p[j].y - me.y, p[j].z - me.z);
+                                    let r2 = rx * rx + ry * ry + rz * rz;
+                                    if r2 >= rc * rc {
+                                        continue;
+                                    }
+                                    let r = r2.sqrt().max(1e-9);
+                                    let s = (r - rc) / rc;
+                                    let kk = c_ct * s * v2 / r;
+                                    let (fx, fy, fz) = (kk * rx, kk * ry, kk * rz);
+                                    loc[i][0] += fx as f32;
+                                    loc[i][1] += fy as f32;
+                                    loc[i][2] += fz as f32;
+                                    let wgt = if !is_ghost {
+                                        if !aj {
+                                            touched[j].store(true, Ordering::Relaxed);
+                                        }
+                                        let lj = &mut loc[j];
+                                        lj[0] -= fx as f32;
+                                        lj[1] -= fy as f32;
+                                        lj[2] -= fz as f32;
+                                        1.0
+                                    } else if org == i {
+                                        0.5
+                                    } else {
+                                        let m = gmask[j - nr];
+                                        let (sy, sz) = (if m & 1 != 0 { 1.0 } else { -1.0 }, if m & 2 != 0 { 1.0 } else { -1.0 });
+                                        if !aj {
+                                            touched[org].store(true, Ordering::Relaxed);
+                                        }
+                                        loc[org][0] -= fx as f32;
+                                        loc[org][1] += (sy * fy) as f32;
+                                        loc[org][2] += (sz * fz) as f32;
+                                        1.0
+                                    };
+                                    tot.e_ct += wgt * 0.5 * c_ct * s * s * rc * v2;
                                 }
                             }
                         }
@@ -896,20 +1105,28 @@ impl Sim {
         };
         let t2 = Instant::now();
         {
-            let locals = &self.locals;
+            // ponteiros dos buffers locais: cada índice i é acessado por uma única thread
+            let ptrs: Vec<SyncPtr> = self.locals.iter_mut().map(|v| SyncPtr(v.as_mut_ptr())).collect();
             let part = &self.part;
             let fixed = &self.fixed;
             let mass = &self.mass;
             let mats = &self.mats;
+            let touched = &self.touched;
             let sleep_v = self.sleep_v;
             self.p[..nr].par_iter_mut().zip(self.awake.par_iter_mut()).enumerate().with_min_len(256).for_each(|(i, (q, awake))| {
+                let was_touched = touched[i].swap(false, Ordering::Relaxed);
+                if !*awake && !was_touched {
+                    return; // dormindo e sem força: os buffers dele já estão zerados
+                }
                 let mut f = [0.0f64; 4];
-                for l in locals {
-                    let v = &l[i];
+                for pt in &ptrs {
+                    // SAFETY: índice i exclusivo desta thread; o buffer não é usado em outro lugar agora
+                    let v = unsafe { &mut *pt.0.add(i) };
                     f[0] += v[0] as f64;
                     f[1] += v[1] as f64;
                     f[2] += v[2] as f64;
                     f[3] += v[3] as f64;
+                    *v = [0.0; 4];
                 }
                 if !*awake {
                     // dormindo: acorda quando a força o aceleraria ao limiar de velocidade em ~10 passos
@@ -939,6 +1156,8 @@ impl Sim {
                 q.z += q.vz * dt;
             });
         }
+        // nós que acordaram agora: entram na grade dinâmica e acordam a vizinhança de ligações
+        self.wake_events();
         let (mut e_el, mut e_ct) = (0.0, 0.0);
         for t in &tots {
             self.e_pl += t.e_pl;
@@ -978,7 +1197,6 @@ impl Sim {
                 }
             }
         }
-        let g = self.grid;
         let reach2 = (1.3 * self.cfg.dx).powi(2);
         let (mut touching, mut n_main, mut x_main) = (false, 0usize, 0.0f64);
         for i in 0..nr {
@@ -991,19 +1209,17 @@ impl Sim {
                 continue;
             }
             n_main += 1;
-            let c0 = cell_coords(self.cell_of[i], &g);
+            let c0 = self.hg.cell[i];
             let me = &self.p[i];
             for oz in -1..=1 {
                 for oy in -1..=1 {
                     for ox in -1..=1 {
-                        let qc = [c0[0] + ox, c0[1] + oy, c0[2] + oz];
-                        if (0..3).any(|k| qc[k] < 0 || qc[k] >= g.n[k]) {
-                            continue;
-                        }
-                        let id = ((qc[2] * g.n[1] + qc[1]) * g.n[0] + qc[0]) as usize;
-                        for k in self.cell_start[id]..self.cell_start[id + 1] {
-                            let j = self.cell_items[k as usize] as usize;
-                            if self.part[j] < self.n_proj {
+                        let tc = [c0[0] + ox, c0[1] + oy, c0[2] + oz];
+                        let mut cur = self.hg.head[self.hg.bucket(tc)];
+                        while cur != NIL {
+                            let j = cur as usize;
+                            cur = self.hg.next[j];
+                            if self.hg.cell[j] != tc || self.part[j] < self.n_proj {
                                 continue;
                             }
                             let q = &self.p[j];
@@ -1036,7 +1252,7 @@ impl Sim {
             if self.time >= self.next_frame_t {
                 self.capture();
                 self.captured += 1;
-                if self.captured > self.cfg.n_frames * 3 / 2 {
+                if self.captured >= self.cfg.n_frames {
                     self.frame_dt *= 2.0; // evento mais longo que o previsto: espaça mais
                     self.captured = self.cfg.n_frames / 2;
                 }
