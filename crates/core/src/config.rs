@@ -367,6 +367,9 @@ pub struct Config {
     /// EXPERIMENTAL (desligada): plasticidade só na parte desviadora do estiramento. Ainda não
     /// conserva energia em alta velocidade (erro cresce com v) e não reproduz o lábio de entrada
     pub deviatoric_plasticity: bool,
+    /// Peridinâmica "state-based" (Mitchell, Sandia 2011): Poisson real, plasticidade J2 só no
+    /// desvio de forma (a pressão fica elástica). Desligado = modelo "bond-based" antigo.
+    pub state_based: bool,
 }
 
 impl Default for Config {
@@ -431,6 +434,7 @@ impl Preset {
             ignore_memory: false,
             rate_gain: 1.0,
             deviatoric_plasticity: false,
+            state_based: true,
         }
     }
 }

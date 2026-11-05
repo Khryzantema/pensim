@@ -8,6 +8,38 @@ use std::time::{Duration, Instant};
 const TAYLOR_QUINNEY: f64 = 0.9;
 /// fração do limite de estabilidade do passo explícito
 const DT_SAFETY: f64 = 0.65;
+
+/// Parâmetros de dano dúctil de Johnson-Cook (D1, D2, D3): deformação de ruptura
+/// εf = D1 + D2·exp(D3·σ*), σ* = tensão média / von Mises (triaxialidade). None = sem dano dúctil.
+fn jc_damage(m: &crate::material::Material) -> Option<(f64, f64, f64)> {
+    let n = m.name;
+    if m.comp_factor >= 5.0 || n.contains("Enchimento") {
+        None
+    } else if n.contains("Aço doce") {
+        Some((0.05, 2.1, -1.0))
+    } else if n.contains("Aço") || n.contains("RHA") {
+        // 4340 / blindagem (Johnson & Cook 1985)
+        Some((0.05, 3.44, -2.12))
+    } else if n.contains("Alum") {
+        Some((0.05, 1.45, -0.8))
+    } else if n.contains("Cobre") || n.contains("Latão") {
+        Some((0.54, 4.89, -3.03))
+    } else if n.contains("tungst") || n.contains("Urânio") {
+        Some((0.03, 0.6, -1.5))
+    } else if n.contains("Chumbo") {
+        Some((0.5, 3.0, -1.5))
+    } else if n.contains("Titân") || n.contains("Ti-6") {
+        Some((-0.09, 0.27, -0.48))
+    } else {
+        None
+    }
+}
+
+/// Coeficiente de Poisson típico pelo nome do material (o state-based usa o real; o bond-based fixa 1/4).
+fn poisson(m: &crate::material::Material) -> f64 {
+    let n = m.name;
+    if n.contains("Chumbo") { 0.44 } else if n.contains("Concreto") { 0.2 } else if n.contains("Cerâmica") || n.contains("Carboneto") { 0.22 } else if n.contains("Alum") || n.contains("Cobre") || n.contains("Latão") { 0.34 } else if n.contains("Enchimento") { 0.35 } else if n.contains("tungst") { 0.28 } else { 0.3 }
+}
 /// 1 / deformação de saturação do encruamento (o ganho máximo é `hardening × HSAT`)
 const INV_HSAT: f64 = 1.0 / 0.4;
 
@@ -105,8 +137,10 @@ pub struct Sim {
     pub frames: Vec<crate::store::PackedFrame>,
     p: Vec<P>,
     /// buffers locais (fx, fy, fz, dT) por bloco de nós: forças acumuladas sem corridas
-    locals: Vec<Vec<[f32; 6]>>,
+    locals: Vec<Vec<[f32; 8]>>,
     cur_e_el: f64,
+    /// energia elástica volumétrica (state-based)
+    cur_e_vol: f64,
     cur_e_ct: f64,
     pos0: Vec<[f64; 3]>,
     part: Vec<u8>,
@@ -157,6 +191,26 @@ pub struct Sim {
     exit_found: bool,
     /// estiramento médio das ligações de cada nó (≈ dilatação/3), do passo anterior
     sbar: Vec<f32>,
+    /// --- modelo state-based (valores do passo anterior, por nó real)
+    osb: bool,
+    /// dilatação θ, volume ponderado m, fator de escoamento do desvio (1 = elástico),
+    /// norma² do estado de força desviador final, deformação plástica equivalente e sua taxa
+    theta: Vec<f32>,
+    mvol: Vec<f32>,
+    /// m efetivo do passo (ligações vivas, ≥ 50% do inicial)
+    mcur: Vec<f32>,
+    /// parte volumétrica espúria das extensões plásticas (aparece quando ligações rompem); é retirada
+    thp: Vec<f32>,
+    /// dano dúctil acumulado (Johnson-Cook) por nó: 1 = rompe as ligações
+    dmg: Vec<f32>,
+    jcd: Vec<Option<(f64, f64, f64)>>,
+    rsc: Vec<f32>,
+    tdn2: Vec<f32>,
+    epq: Vec<f32>,
+    epr: Vec<f32>,
+    /// módulos volumétrico K e de cisalhamento μ por peça
+    kbulk: Vec<f64>,
+    mu: Vec<f64>,
     hg: HGrid,
     /// nós calculados na região ativa (acordados + vizinhança de ligações)
     active: Vec<bool>,
@@ -280,8 +334,17 @@ impl HGrid {
 }
 
 /// Ponteiro compartilhável entre threads (acessos sempre em índices disjuntos).
-struct SyncPtr(*mut [f32; 6]);
+struct SyncPtr(*mut [f32; 8]);
 unsafe impl Send for SyncPtr {}
+
+struct SyncPtr1(*mut f32);
+unsafe impl Send for SyncPtr1 {}
+unsafe impl Sync for SyncPtr1 {}
+
+/// Ponteiros para os vetores por nó do state-based (cada índice é escrito por uma única thread).
+struct SyncOsb(*mut f32, *mut f32, *mut f32, *mut f32, *mut f32, *mut f32);
+unsafe impl Send for SyncOsb {}
+unsafe impl Sync for SyncOsb {}
 unsafe impl Sync for SyncPtr {}
 
 /// Todas as 27 células vizinhas.
@@ -397,6 +460,7 @@ impl Sim {
             frames: vec![],
             locals: vec![],
             cur_e_el: 0.0,
+            cur_e_vol: 0.0,
             cur_e_ct: 0.0,
             p,
             pos0: model.pos,
@@ -437,6 +501,19 @@ impl Sim {
             prof: [0.0; 3],
             exit_found: false,
             sbar: vec![0.0; n_real],
+            osb: cfg.state_based,
+            theta: vec![0.0; n_real],
+            mvol: vec![0.0; n_real],
+            mcur: vec![0.0; n_real],
+            thp: vec![0.0; n_real],
+            dmg: vec![0.0; n_real],
+            jcd: vec![],
+            rsc: vec![1.0; n_real],
+            tdn2: vec![0.0; n_real],
+            epq: vec![0.0; n_real],
+            epr: vec![0.0; n_real],
+            kbulk: vec![],
+            mu: vec![],
             hg: HGrid::new(1, 1.0),
             active: vec![false; n_real],
             halo_done: vec![false; n_real],
@@ -464,8 +541,30 @@ impl Sim {
         let threads = rayon::current_num_threads().max(1);
         let mem_cap = (48_000_000 / (n_real.max(1) * 16)).max(threads);
         let nch = (threads * 4).min(mem_cap).max(1);
-        sim.locals = (0..nch).map(|_| vec![[0.0; 6]; n_real]).collect();
-        sim.dt = sim.stable_dt();
+        sim.locals = (0..nch).map(|_| vec![[0.0; 8]; n_real]).collect();
+        // módulos por peça (ν do material) e volume ponderado inicial m de cada nó
+        sim.kbulk = sim.mats.iter().map(|m| m.young / (3.0 * (1.0 - 2.0 * poisson(m)))).collect();
+        sim.mu = sim.mats.iter().map(|m| m.young / (2.0 * (1.0 + poisson(m)))).collect();
+        sim.jcd = sim.mats.iter().map(jc_damage).collect();
+        {
+            let nr = sim.n_real;
+            let mut mv = vec![0.0f64; nr];
+            for i in 0..nr {
+                for bd in &sim.bonds[i] {
+                    let xi = 1.0 / (bd.ixi as f64).abs();
+                    let vj = sim.vol * bd.w as f64;
+                    mv[i] += xi * xi * vj;
+                    let j = bd.j as usize;
+                    let t = if j < nr { j } else { sim.src[j - nr] as usize };
+                    if t != i {
+                        mv[t] += xi * xi * vj;
+                    }
+                }
+            }
+            sim.mvol = mv.iter().map(|&v| v as f32).collect();
+            sim.mcur = sim.mvol.clone();
+        }
+        sim.dt = sim.stable_dt() * if sim.osb { std::env::var("OSBDT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.8) } else { 1.0 };
         sim.ke0 = sim.kinetic(Some(true));
         {
             let (mut sx, mut np) = (0.0, 0.0);
@@ -926,6 +1025,172 @@ impl Sim {
         let nch = self.locals.len();
         let per = (nr + nch - 1) / nch;
         let all_awake = self.all_awake;
+        if self.osb {
+            // state-based, passo 1 (estado ATUAL): por nó, as somas
+            //   Sθ = Σ|ξ|e V, S1 = Σ(e−e_p)² V, S2 = Σ(e−e_p)|ξ| V, S3 = Σ|ξ|² V
+            // dão a dilatação θ e a norma do desvio de teste sem outra passada:
+            //   ‖t_d‖² = α²(S1 − 2θ/3·S2 + θ²/9·S3) → retorno ao escoamento no mesmo passo
+            let p = &self.p;
+            let src = &self.src;
+            let awake = &self.awake;
+            let active = &self.active;
+            let (dmg, theta0, rsc0, mvol0, part, kbulk0, mu0) = (&self.dmg, &self.theta, &self.rsc, &self.mvol, &self.part, &self.kbulk, &self.mu);
+            let noise = self.cfg.noise;
+            let gmask = &self.gmask;
+            let nobreak = std::env::var("NOBREAK").is_ok();
+            let efr: f64 = self.bonds.par_chunks_mut(per).zip(self.locals.par_iter_mut()).enumerate().map(|(c, (bchunk, loc))| -> f64 {
+                let base = c * per;
+                let mut efr = 0.0f64;
+                for (ii, bonds) in bchunk.iter_mut().enumerate() {
+                    let i = base + ii;
+                    if !active[i] {
+                        continue;
+                    }
+                    let ai = awake[i];
+                    let me = &p[i];
+                    let mut acc = [0.0f64; 4];
+                    let mut acc4 = 0.0f64;
+                    for bd in bonds.iter_mut() {
+                        let j = bd.j as usize;
+                        let jr = if j < nr { j } else { src[j - nr] as usize };
+                        if !ai && !awake[jr] {
+                            continue;
+                        }
+                        // dano dúctil (Johnson-Cook): rompe ANTES de calcular θ, para o passo ficar consistente
+                        if bd.ixi >= 0.0 {
+                            let u = bd.rnd as f64 * (1.0 / 127.5) - 1.0;
+                            let dthr = if nobreak { 1e30 } else { 1.0 + 0.3 * noise * u };
+                            if dmg[i] as f64 >= dthr || dmg[jr] as f64 >= dthr {
+                                let q = &p[j];
+                                let (rx, ry, rz) = (q.x - me.x, q.y - me.y, q.z - me.z);
+                                let r = (rx * rx + ry * ry + rz * rz).sqrt();
+                                let xi = 1.0 / bd.ixi as f64;
+                                let e = r - xi;
+                                let vj = vol * bd.w as f64;
+                                // energia desviadora perdida (estimada com θ e escoamento do passo anterior)
+                                let (bi, bj) = (part[i] as usize, part[j] as usize);
+                                let wgt = if j >= nr && jr == i { 0.5 } else { 1.0 };
+                                let _ = gmask;
+                                for (k, dp, bm) in [(i, bd.sp as f64, bi), (jr, bd.acc as f64, bj)] {
+                                    let m0 = (mvol0[k] as f64).max(1e-30);
+                                    let al = 15.0 * mu0[bm] / m0;
+                                    let td = rsc0[k] as f64 * al * (e - theta0[k] as f64 * xi / 3.0 - dp);
+                                    efr += wgt * 0.5 * td * td / al * vol * vj;
+                                }
+                                let _ = kbulk0;
+                                bd.ixi = -bd.ixi;
+                                bd.sp = e as f32;
+                                bd.acc = 0.0;
+                            }
+                        }
+                        if bd.ixi < 0.0 {
+                            // rompida: conta no volume só até a extensão da ruptura (trinca abrindo
+                            // não traciona; fechando, ainda comprime) — sem salto de energia na ruptura
+                            let q = &p[j];
+                            let (rx, ry, rz) = (q.x - me.x, q.y - me.y, q.z - me.z);
+                            let r = (rx * rx + ry * ry + rz * rz).sqrt();
+                            let xi = -1.0 / bd.ixi as f64;
+                            let vj = vol * bd.w as f64;
+                            let ec = (r - xi).min(bd.sp as f64);
+                            acc[0] += xi * ec * vj;
+                            if jr != i {
+                                loc[jr][4] += (xi * ec * vj) as f32;
+                            }
+                            continue;
+                        }
+                        let q = &p[j];
+                        let (rx, ry, rz) = (q.x - me.x, q.y - me.y, q.z - me.z);
+                        let r = (rx * rx + ry * ry + rz * rz).sqrt();
+                        let xi = 1.0 / bd.ixi as f64;
+                        let vj = vol * bd.w as f64;
+                        let e = r - xi;
+                        let (ui, uj) = (e - bd.sp as f64, e - bd.acc as f64);
+                        acc[0] += xi * e * vj;
+                        acc[1] += ui * ui * vj;
+                        acc[2] += ui * xi * vj;
+                        acc[3] += xi * xi * vj;
+                        acc4 += bd.sp as f64 * xi * vj;
+                        if jr != i {
+                            let l = &mut loc[jr];
+                            l[3] += (bd.acc as f64 * xi * vj) as f32;
+                            l[4] += (xi * e * vj) as f32;
+                            l[5] += (uj * uj * vj) as f32;
+                            l[6] += (uj * xi * vj) as f32;
+                            l[7] += (xi * xi * vj) as f32;
+                        }
+                    }
+                    let l = &mut loc[i];
+                    l[3] += acc4 as f32;
+                    for k in 0..4 {
+                        l[4 + k] += acc[k] as f32;
+                    }
+                }
+                efr
+            }).sum();
+            self.e_fr += efr;
+            let ptrs: Vec<SyncPtr> = self.locals.iter_mut().map(|v| SyncPtr(v.as_mut_ptr())).collect();
+            let (awake, active, part, mats, mu) = (&self.awake, &self.active, &self.part, &self.mats, &self.mu);
+            let (m0, epq, epr, p) = (&self.mvol, &self.epq, &self.epr, &self.p);
+            let rate_gain = self.cfg.rate_gain;
+            let frag_frac: f64 = std::env::var("FRAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+            let use_thp = std::env::var("THP").map_or(false, |v| v == "1");
+            let osbv = SyncOsb(self.theta.as_mut_ptr(), self.mcur.as_mut_ptr(), self.rsc.as_mut_ptr(), self.tdn2.as_mut_ptr(), self.thp.as_mut_ptr(), std::ptr::null_mut());
+            let osbv = &osbv;
+            (0..nr).into_par_iter().with_min_len(512).for_each(|i| {
+                if !active[i] {
+                    return;
+                }
+                let mut a = [0.0f64; 4];
+                let mut s4 = 0.0f64;
+                for pt in &ptrs {
+                    // SAFETY: índice i exclusivo desta thread
+                    let v = unsafe { &mut *pt.0.add(i) };
+                    s4 += v[3] as f64;
+                    v[3] = 0.0;
+                    for k in 0..4 {
+                        a[k] += v[4 + k] as f64;
+                        v[4 + k] = 0.0;
+                    }
+                }
+                // só nós acordados têm todas as ligações somadas; os demais mantêm o estado
+                if !awake[i] {
+                    return;
+                }
+                // m das ligações vivas, limitado a ≥ 50% do inicial (nó muito danificado não endurece)
+                // m de referência fixo: com o m das ligações vivas, cada ruptura endureceria o nó inteiro
+                // (energia criada); a derivada exata (termo D) mantém as forças conservativas
+                let me = (m0[i] as f64).max(1e-30);
+                let th = 3.0 * a[0] / me;
+                // extensões plásticas só desviadoras: tira a parte volumétrica θp (ligações rompidas)
+                let thp = if a[3] > 0.0 && use_thp { 3.0 * s4 / a[3] } else { 0.0 };
+                let s1 = a[1] + 2.0 * thp / 3.0 * a[2] + thp * thp / 9.0 * a[3];
+                let s2 = a[2] + thp / 3.0 * a[3];
+                let a = [a[0], s1, s2, a[3]];
+                let b = part[i] as usize;
+                let m = &mats[b];
+                let al = 15.0 * mu[b] / me;
+                let n2 = (al * al * (a[1] - 2.0 * th / 3.0 * a[2] + th * th / 9.0 * a[3])).max(0.0);
+                let ep = epq[i] as f64;
+                let rate = epr[i] as f64;
+                let jc = if m.rate_c > 0.0 && rate > 1.0 { 1.0 + m.rate_c * rate.ln() } else { 1.0 };
+                let sy = (m.yield_strength + m.hardening * ep / (1.0 + ep * INV_HSAT)) * rate_gain * p[i].soft.max(0.03) * jc;
+                // escoamento J2 (Mitchell): ψ0 = 2,5 σy² / m; frágeis não escoam
+                // nós muito danificados (fragmentos) ficam elásticos: com poucas ligações o escoamento fica inconsistente
+                let damaged = a[3] < frag_frac * m0[i] as f64;
+                let r = if m.comp_factor >= 5.0 || n2 <= 0.0 || damaged { 1.0 } else { (5.0 * sy * sy / (me * n2)).sqrt().min(1.0) };
+                unsafe {
+                    *osbv.0.add(i) = th as f32;
+                    *osbv.1.add(i) = me as f32;
+                    *osbv.2.add(i) = r as f32;
+                    *osbv.3.add(i) = (r * r * n2) as f32;
+                    // termo de acoplamento da derivada exata da energia desviadora:
+                    // t_k −= α|ξ_k|·D/m, D = Σ(e_d − e_p)|ξ|V = S2 − θ·S3/3
+                    let dsum = a[2] - th * a[3] / 3.0;
+                    let _ = thp;
+                    *osbv.4.add(i) = (al * dsum / me) as f32;
+                }
+            });
+        }
         let tots: Vec<Tot> = {
             let p = &self.p;
             let part = &self.part;
@@ -941,6 +1206,10 @@ impl Sim {
             let rate_gain = self.cfg.rate_gain;
             let dev = self.cfg.deviatoric_plasticity;
             let sbar = &self.sbar;
+            let osb = self.osb;
+            let (theta, mvol, rsc, thp) = (&self.theta, &self.mcur, &self.rsc, &self.thp);
+            let dmg = &self.dmg;
+            let (kbulk, mu) = (&self.kbulk, &self.mu);
             let hg = &self.hg;
             let active = &self.active;
             let touched = &self.touched;
@@ -997,8 +1266,34 @@ impl Sim {
                             let r = (rx * rx + ry * ry + rz * rz).sqrt().max(1e-12);
                             let ixi = (bd.ixi as f64).abs();
                             let s = r * ixi - 1.0;
+                            if broken && osb {
+                                let xi = 1.0 / ixi;
+                                let e = r - xi;
+                                if e < bd.sp as f64 {
+                                    // parte volumétrica da ligação rompida (derivada de min(e, e_ruptura))
+                                    let vj = vol * bd.w as f64;
+                                    let bj = part[j] as usize;
+                                    let t_i = 3.0 * kbulk[b] * theta[i] as f64 * xi / (mvol[i] as f64).max(1e-30) - thp[i] as f64 * xi * rsc[i] as f64;
+                                    let t_j = 3.0 * kbulk[bj] * theta[tgt] as f64 * xi / (mvol[tgt] as f64).max(1e-30) - thp[tgt] as f64 * xi * rsc[tgt] as f64;
+                                    let k = (t_i + t_j) * vol * vj / r;
+                                    let (fx, fy, fz) = (k * rx, k * ry, k * rz);
+                                    ax += fx;
+                                    ay += fy;
+                                    az += fz;
+                                    if tgt != i {
+                                        if !awake[tgt] {
+                                            touched[tgt].store(true, Ordering::Relaxed);
+                                        }
+                                        let lt = &mut loc[tgt];
+                                        lt[0] -= fx as f32;
+                                        lt[1] += (sy * fy) as f32;
+                                        lt[2] += (sz * fz) as f32;
+                                    }
+                                }
+                            }
                             if broken {
-                                let s_el = s - bd.sp as f64;
+                                // state-based: a mola só pega a compressão além da que havia na ruptura (sem salto)
+                                let s_el = if osb { s - (bd.sp as f64 * ixi).min(0.0) } else { s - bd.sp as f64 };
                                 if s_el >= 0.0 {
                                     continue;
                                 }
@@ -1033,10 +1328,73 @@ impl Sim {
                             let sp = bd.sp as f64;
                             let w = bd.w as f64;
                             let u = bd.rnd as f64 * (1.0 / 127.5) - 1.0;
-                            if s > fail * (1.0 + nf * u) {
+                            if !osb && s > fail * (1.0 + nf * u) {
                                 let s_el = s - sp;
                                 tot.e_fr += wgt * 0.5 * cvv * s_el * s_el * w / ixi;
                                 bd.ixi = -bd.ixi;
+                                continue;
+                            }
+                            if osb {
+                                // ---- state-based (LPS + plasticidade J2 de Mitchell), ω = 1
+                                let xi = 1.0 / ixi;
+                                let e = r - xi;
+                                let vj = vol * w;
+                                let bj = part[j] as usize;
+                                let (th_i, m_i, rs_i) = (theta[i] as f64, (mvol[i] as f64).max(1e-30), rsc[i] as f64);
+                                let (th_j, m_j, rs_j) = (theta[tgt] as f64, (mvol[tgt] as f64).max(1e-30), rsc[tgt] as f64);
+                                let (a_i, a_j) = (15.0 * mu[b] / m_i, 15.0 * mu[bj] / m_j);
+                                let (ed_i, ed_j) = (e - th_i * xi / 3.0, e - th_j * xi / 3.0);
+                                let (dp_i, dp_j) = (bd.sp as f64, bd.acc as f64);
+                                let (tr_i, tr_j) = (a_i * (ed_i - dp_i), a_j * (ed_j - dp_j));
+                                // forças com o termo de acoplamento (derivada exata ⇒ conservativas)
+                                let (fc_i, fc_j) = (rs_i * (tr_i - thp[i] as f64 * xi), rs_j * (tr_j - thp[tgt] as f64 * xi));
+                                let (td_i, td_j) = (rs_i * tr_i, rs_j * tr_j);
+                                // ruptura: estiramento crítico (trinca em tração/frágil) ou dano dúctil de Johnson-Cook
+                                let dthr = 1.0 + 0.5 * nf * u;
+                                let _ = (dthr, dmg);
+                                if s > fail * (1.0 + nf * u) {
+                                    // ruptura: a energia elástica desviadora da ligação é perdida
+                                    tot.e_fr += wgt * (0.5 * td_i * td_i / a_i + 0.5 * td_j * td_j / a_j) * vol * vj;
+                                    bd.ixi = -bd.ixi;
+                                    // guarda a extensão na ruptura (limite da contribuição volumétrica)
+                                    bd.sp = e as f32;
+                                    bd.acc = 0.0;
+                                    continue;
+                                }
+                                // retorno ao escoamento: a parte desviadora que passa do limite vira plástica
+                                let (mut dw_i, mut dw_j) = (0.0, 0.0);
+                                if rs_i < 1.0 {
+                                    let nw = ed_i - td_i / a_i;
+                                    dw_i = td_i * (nw - dp_i);
+                                    bd.sp = nw as f32;
+                                }
+                                if rs_j < 1.0 {
+                                    let nw = ed_j - td_j / a_j;
+                                    dw_j = td_j * (nw - dp_j);
+                                    bd.acc = nw as f32;
+                                }
+                                let t_i = 3.0 * kbulk[b] * th_i * xi / m_i + fc_i;
+                                let t_j = 3.0 * kbulk[bj] * th_j * xi / m_j + fc_j;
+                                let k = (t_i + t_j) * vol * vj / r;
+                                let (fx, fy, fz) = (k * rx, k * ry, k * rz);
+                                ax += fx;
+                                ay += fy;
+                                az += fz;
+                                // somas do nó para o próximo passo: θ, m, norma² do desvio, trabalho plástico
+                                let l = &mut loc[i];
+                                l[3] += (dw_i * vj) as f32;
+                                if tgt != i {
+                                    if !awake[tgt] {
+                                        touched[tgt].store(true, Ordering::Relaxed);
+                                    }
+                                    let lt = &mut loc[tgt];
+                                    lt[0] -= fx as f32;
+                                    lt[1] += (sy * fy) as f32;
+                                    lt[2] += (sz * fz) as f32;
+                                    lt[3] += (dw_j * vj) as f32;
+                                }
+                                tot.e_el += wgt * (0.5 * td_i * td_i / a_i + 0.5 * td_j * td_j / a_j) * vol * vj;
+                                tot.e_pl += wgt * (dw_i + dw_j) * vol * vj;
                                 continue;
                             }
                             let ea = bd.acc as f64;
@@ -1186,21 +1544,33 @@ impl Sim {
             let mats = &self.mats;
             let touched = &self.touched;
             let sleep_v = self.sleep_v;
-            self.p[..nr].par_iter_mut().zip(self.awake.par_iter_mut()).zip(self.sbar.par_iter_mut()).enumerate().with_min_len(256).for_each(|(i, ((q, awake), sbar_i))| {
+            let osb = self.osb;
+            let (kbulk, mu) = (&self.kbulk, &self.mu);
+            let rate_gain = self.cfg.rate_gain;
+            let vol = self.vol;
+            let osbv = SyncOsb(self.theta.as_mut_ptr(), self.mvol.as_mut_ptr(), self.rsc.as_mut_ptr(), self.tdn2.as_mut_ptr(), self.epq.as_mut_ptr(), self.epr.as_mut_ptr());
+            let dmgp = SyncPtr1(self.dmg.as_mut_ptr());
+            let dmgp = &dmgp;
+            let (jcd, mcur) = (&self.jcd, &self.mcur);
+            let osbv = &osbv;
+            let e_vol: f64 = self.p[..nr].par_iter_mut().zip(self.awake.par_iter_mut()).zip(self.sbar.par_iter_mut()).enumerate().with_min_len(256).map(|(i, ((q, awake), sbar_i))| -> f64 {
                 let was_touched = touched[i].swap(false, Ordering::Relaxed);
+                // nó que acorda agora teve só parte das ligações somadas: mantém o estado anterior
+                let was_awake = *awake;
                 if !*awake && !was_touched {
-                    return; // dormindo e sem força: os buffers dele já estão zerados
+                    // dormindo e sem força: os buffers dele já estão zerados
+                    return if osb { unsafe { 0.5 * kbulk[part[i] as usize] * (*osbv.0.add(i) as f64).powi(2) * vol } } else { 0.0 };
                 }
-                let mut f = [0.0f64; 6];
+                let mut f = [0.0f64; 8];
                 for pt in &ptrs {
                     // SAFETY: índice i exclusivo desta thread; o buffer não é usado em outro lugar agora
                     let v = unsafe { &mut *pt.0.add(i) };
-                    for k in 0..6 {
+                    for k in 0..8 {
                         f[k] += v[k] as f64;
                     }
-                    *v = [0.0; 6];
+                    *v = [0.0; 8];
                 }
-                if f[5] > 0.0 {
+                if !osb && f[5] > 0.0 {
                     *sbar_i = (f[4] / f[5]) as f32;
                 }
                 if !*awake {
@@ -1208,12 +1578,42 @@ impl Sim {
                     let mm = mass[part[i] as usize];
                     let fthr = sleep_v * mm / (10.0 * dt);
                     if f[0] * f[0] + f[1] * f[1] + f[2] * f[2] <= fthr * fthr {
-                        return;
+                        return if osb { unsafe { 0.5 * kbulk[part[i] as usize] * (*osbv.0.add(i) as f64).powi(2) * vol } } else { 0.0 };
                     }
                     *awake = true;
                 }
-                q.temp += f[3];
-                let m = &mats[part[i] as usize];
+                let b = part[i] as usize;
+                let m = &mats[b];
+                let mut e_v = 0.0;
+                if osb && was_awake {
+                    // SAFETY: índice i exclusivo desta thread
+                    unsafe {
+                        let th = *osbv.0.add(i) as f64;
+                        // trabalho plástico (por volume) → deformação plástica equivalente e calor
+                        let ep_old = *osbv.4.add(i) as f64;
+                        let rate = *osbv.5.add(i) as f64;
+                        let jc = if m.rate_c > 0.0 && rate > 1.0 { 1.0 + m.rate_c * rate.ln() } else { 1.0 };
+                        let sy = (m.yield_strength + m.hardening * ep_old / (1.0 + ep_old * INV_HSAT)) * rate_gain * q.soft.max(0.03) * jc;
+                        let dw = f[3].max(0.0);
+                        let dep = dw / sy.max(1.0);
+                        *osbv.4.add(i) = (ep_old + dep) as f32;
+                        *osbv.5.add(i) = (dep / dt) as f32;
+                        q.temp += TAYLOR_QUINNEY * dw / (m.rho * m.cp);
+                        e_v = 0.5 * kbulk[b] * th * th * vol;
+                        // dano dúctil: Δεp / εf(triaxialidade)
+                        if let (Some((d1, d2, d3)), true) = (jcd[b], dep > 0.0) {
+                            let svm = (mcur[i] as f64 * *osbv.3.add(i) as f64 / 5.0).max(0.0).sqrt().max(1e3);
+                            let tri = (kbulk[b] * th / svm).clamp(-3.0, 3.0);
+                            let ef = (d1 + d2 * (d3 * tri).exp()).clamp(0.02, 10.0);
+                            *dmgp.0.add(i) += (dep / ef) as f32;
+                        }
+                        let _ = mu;
+                    }
+                } else if !osb {
+                    q.temp += f[3];
+                } else {
+                    e_v = unsafe { 0.5 * kbulk[b] * (*osbv.0.add(i) as f64).powi(2) * vol };
+                }
                 let theta = ((q.temp - T_REF) / (m.t_melt - T_REF)).clamp(0.0, 1.0);
                 q.soft = (1.0 - theta).max(0.03);
                 let mm = mass[part[i] as usize];
@@ -1226,7 +1626,7 @@ impl Sim {
                         q.vx = 0.0;
                         q.vy = 0.0;
                         q.vz = 0.0;
-                        return;
+                        return e_v;
                     }
                 }
                 q.vx += f[0] / mm * dt;
@@ -1235,7 +1635,9 @@ impl Sim {
                 q.x += q.vx * dt;
                 q.y += q.vy * dt;
                 q.z += q.vz * dt;
-            });
+                e_v
+            }).sum();
+            self.cur_e_vol = e_vol;
         }
         // nós que acordaram agora: entram na grade dinâmica e acordam a vizinhança de ligações
         self.wake_events();
@@ -1246,7 +1648,7 @@ impl Sim {
             e_el += t.e_el;
             e_ct += t.e_ct;
         }
-        self.cur_e_el = e_el;
+        self.cur_e_el = e_el + self.cur_e_vol;
         self.cur_e_ct = e_ct;
         let t3 = Instant::now();
         self.prof[0] += (t1 - t0).as_secs_f64();
@@ -1508,7 +1910,18 @@ impl Sim {
                     .sqrt()
             })
             .collect();
-        let press: Vec<f32> = tens.iter().map(|(s, _, _)| -(s[0] + s[1] + s[2]) / 3.0).collect();
+        let mut press: Vec<f32> = tens.iter().map(|(s, _, _)| -(s[0] + s[1] + s[2]) / 3.0).collect();
+        let mut von = von;
+        let mut plastic: Vec<f32> = tens.iter().map(|t| t.1).collect();
+        if self.osb {
+            // state-based: pressão = −Kθ; von Mises da norma do desvio (σ_vm² = m·‖t_d‖²/5)
+            for i in 0..n {
+                let b = self.part[i] as usize;
+                press[i] = (-self.kbulk[b] * self.theta[i] as f64) as f32;
+                von[i] = ((self.mvol[i] as f64 * self.tdn2[i] as f64 / 5.0).max(0.0).sqrt()) as f32;
+                plastic[i] = self.epq[i];
+            }
+        }
         let (mut ke_p, mut vx_p, mut np) = (0.0f64, 0.0f64, 0.0f64);
         for i in 0..n {
             if self.part[i] < self.n_proj {
@@ -1537,7 +1950,7 @@ impl Sim {
             speed: self.p[..n].iter().map(|q| (q.vx * q.vx + q.vy * q.vy + q.vz * q.vz).sqrt() as f32).collect(),
             von_mises: von,
             pressure: press,
-            plastic: tens.iter().map(|t| t.1).collect(),
+            plastic,
             temp: self.p[..n].iter().map(|q| q.temp as f32).collect(),
             damage: tens.iter().map(|t| t.2).collect(),
             ke_proj: ke_p * self.gfac,

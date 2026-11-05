@@ -369,6 +369,7 @@ impl Ammo {
             ignore_memory: false,
             rate_gain: 1.0,
             deviatoric_plasticity: false,
+            state_based: true,
         }
     }
 

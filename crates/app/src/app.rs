@@ -475,7 +475,7 @@ impl PenSim {
 
     fn key(&self) -> Key {
         let c = &self.cfg;
-        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, c.time_factor, c.noise, c.jitter, c.sleep_ratio, self.res_nodes], [c.clamp_edges, c.symmetry])
+        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, c.time_factor, c.noise, c.jitter, c.sleep_ratio, self.res_nodes], [c.clamp_edges, c.symmetry && c.state_based])
     }
 
     /// Escala interna (invisível): faz o diâmetro do projétil ter `res_nodes` nós na malha.
@@ -1302,6 +1302,21 @@ impl PenSim {
             kv(ui, "Ângulo do alvo (aba Alvo)", format!("{:.0}°", self.cfg.obliquity_deg));
         });
         card(ui, "Qualidade", |ui| self.quality_section(ui));
+        card(ui, "Modelo físico", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.add(egui::Button::new("Preciso").selected(self.cfg.state_based).corner_radius(14.0)).clicked() {
+                    self.cfg.state_based = true;
+                }
+                if ui.add(egui::Button::new("Rápido").selected(!self.cfg.state_based).corner_radius(14.0)).clicked() {
+                    self.cfg.state_based = false;
+                }
+            });
+            ui.weak(if self.cfg.state_based {
+                "Peridinâmica state-based: Poisson real, metal escoa (plasticidade J2) e rompe por dano dúctil (Johnson-Cook). Mais realista, mais lento."
+            } else {
+                "Peridinâmica bond-based (modelo antigo): bem mais rápido, menos realista em metais."
+            });
+        });
         egui::CollapsingHeader::new(RichText::new("Avançado").strong()).id_salt("adv").show(ui, |ui| {
             ui.label("Horizonte (alcance das ligações, × espaçamento)");
             ui.horizontal(|ui| {
