@@ -293,6 +293,7 @@ impl PenSim {
         crate::install_fonts(&cc.egui_ctx);
         let mut v = egui::Visuals::light();
         v.selection.bg_fill = ACCENT;
+        v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
         v.hyperlink_color = ACCENT;
         cc.egui_ctx.set_visuals(v);
         cc.egui_ctx.global_style_mut(|s| {
@@ -360,7 +361,7 @@ impl PenSim {
         // ganchos de teste visual (captura de telas): PENSIM_WS, PENSIM_SKETCH, PENSIM_DEMO
         if let Ok(w) = std::env::var("PENSIM_WS") {
             me.ws = match w.as_str() {
-                "res" => Ws::Resolution,
+                "res" => Ws::Sim,
                 "sim" => Ws::Sim,
                 "results" => Ws::Results,
                 "target" => Ws::Target,
@@ -677,61 +678,25 @@ impl PenSim {
             egui::Panel::right("safe_right").exact_size(inset[2]).frame(blank).show_separator_line(false).show(ui, |_| {});
         }
         let avail = ui.available_size();
+        let wide = avail.x > avail.y * 1.05;
         let is_compact = avail.y < 520.0;
         COMPACT.store(is_compact, Ordering::Relaxed);
-        // faixa do topo: sempre visível (na tela deitada é fina). Além da marca, ela mantém a
-        // primeira linha de botões fora da barra de status e do recorte da câmera.
-        egui::Panel::top("title")
-            .frame(egui::Frame::NONE.fill(ctx.global_style().visuals.panel_fill).inner_margin(egui::Margin::symmetric(8, 2)))
+        egui::Panel::top("head")
+            .frame(egui::Frame::NONE.fill(Color32::WHITE).inner_margin(egui::Margin::symmetric(8, 4)))
             .show_separator_line(true)
-            .show(ui, |ui| {
-                // linha fina: sem a altura mínima de toque dos botões
-                ui.spacing_mut().interact_size.y = 22.0;
-                ui.horizontal(|ui| {
-                    if let Some(t) = &self.logo_tex {
-                        ui.image((t.id(), Vec2::splat(20.0)));
-                    }
-                    ui.label(RichText::new("PenSim").strong().size(16.0).color(ACCENT));
-                    ui.label(RichText::new("· Simulação de impacto balístico 3D").weak().size(12.0));
-                    ui.label(RichText::new(format!("· {} threads", pensim_core::threads())).weak().size(11.0));
-                });
-            });
-        egui::Panel::top("ribbon").show(ui, |ui| self.ribbon(ui, &ctx, &snap));
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui, &snap));
-
-        if is_compact {
-            // tela deitada: um único painel lateral com abas, que pode ser ocultado (☰)
-            if self.show_side {
-                egui::Panel::right("side").default_size((avail.x * 0.34).clamp(260.0, 340.0)).resizable(true).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.sheet_tab, 0, "Navegador");
-                        ui.selectable_value(&mut self.sheet_tab, 1, "Propriedades");
-                    });
-                    ui.separator();
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        if self.sheet_tab == 0 { self.browser(ui) } else { self.props(ui, &ctx, &snap) }
-                    });
-                });
-            }
-        } else if avail.x > 820.0 {
-            egui::Panel::left("browser").default_size(230.0).resizable(true).show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.browser(ui));
-            });
-            egui::Panel::right("props").default_size(340.0).resizable(true).show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.props(ui, &ctx, &snap));
+            .show(ui, |ui| self.header(ui));
+        if wide {
+            let w = (avail.x * 0.36).clamp(290.0, 420.0);
+            egui::Panel::right("panel").exact_size(w).resizable(false).frame(egui::Frame::NONE.fill(PANEL_BG).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.step_panel(ui, &ctx, &snap));
             });
         } else {
-            let h = avail.y * 0.42;
-            egui::Panel::bottom("sheet").default_size(h).resizable(true).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.sheet_tab, 0, "Navegador");
-                    ui.selectable_value(&mut self.sheet_tab, 1, "Propriedades");
-                });
-                ui.separator();
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    if self.sheet_tab == 0 { self.browser(ui) } else { self.props(ui, &ctx, &snap) }
-                });
+            egui::Panel::bottom("panel").default_size(avail.y * 0.46).min_size(140.0).resizable(true).frame(egui::Frame::NONE.fill(PANEL_BG).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.step_panel(ui, &ctx, &snap));
             });
+        }
+        if self.ws == Ws::Results && snap.frames.len() > 1 && (snap.done || self.live_view) {
+            egui::Panel::bottom("playbar").frame(egui::Frame::NONE.fill(Color32::WHITE).inner_margin(egui::Margin::symmetric(8, 4))).show(ui, |ui| self.playbar(ui, &snap));
         }
         egui::CentralPanel::default().show(ui, |ui| self.viewport(ui, &snap));
         if self.show_fps {
@@ -748,80 +713,100 @@ impl PenSim {
     }
 }
 
-// ---------------------------------------------------------------- ribbon
+// ---------------------------------------------------------------- interface
 
-fn tbtn(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool, enabled: bool, w: f32) -> egui::Response {
-    let (text, size) = if compact() {
-        (format!("{icon} {}", label.replace('\n', " ")), Vec2::new(0.0, 30.0))
-    } else {
-        (format!("{icon}\n{label}"), Vec2::new(w, 48.0))
-    };
-    ui.add_enabled(enabled, egui::Button::new(RichText::new(text).size(12.0)).min_size(size).selected(selected))
-}
+const PANEL_BG: Color32 = Color32::from_rgb(243, 245, 248);
+const GOOD: Color32 = Color32::from_rgb(30, 140, 80);
+const WARN: Color32 = Color32::from_rgb(190, 120, 0);
+const BAD: Color32 = Color32::from_rgb(200, 50, 40);
 
-fn rbtn(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response {
-    tbtn(ui, icon, label, false, true, 62.0)
-}
-
-fn group(ui: &mut egui::Ui, name: &str, add: impl FnOnce(&mut egui::Ui)) {
-    if compact() {
-        ui.horizontal(add);
-        ui.separator();
-    } else {
-        ui.vertical(|ui| {
-            ui.horizontal(add);
-            ui.label(RichText::new(name).small().weak());
+/// Cartão branco com título.
+fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::NONE
+        .fill(Color32::WHITE)
+        .stroke(Stroke::new(1.0, Color32::from_rgb(222, 226, 232)))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if !title.is_empty() {
+                ui.label(RichText::new(title).strong().size(15.0));
+                ui.add_space(2.0);
+            }
+            add(ui);
         });
-        ui.separator();
+    ui.add_space(8.0);
+}
+
+/// Botão grande de ação principal.
+fn primary(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.add_sized([ui.available_width(), 44.0], egui::Button::new(RichText::new(text).strong().size(16.0).color(Color32::WHITE)).fill(ACCENT).corner_radius(8.0))
+}
+
+/// Botão de alternância (chip).
+fn chip(ui: &mut egui::Ui, on: &mut bool, text: &str) {
+    if ui.add(egui::Button::new(text).selected(*on).corner_radius(14.0)).clicked() {
+        *on = !*on;
     }
+}
+
+/// Linha "rótulo ............ valor".
+fn kv(ui: &mut egui::Ui, k: &str, v: String) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().interact_size.y = 18.0;
+        ui.label(RichText::new(k).color(Color32::from_gray(90)));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(v).strong());
+        });
+    });
 }
 
 impl PenSim {
-    fn ribbon(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, snap: &Snap) {
-        if compact() {
-            egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.selectable_label(self.show_side, "☰").on_hover_text("Mostrar/ocultar painéis").clicked() {
-                        self.show_side = !self.show_side;
-                    }
-                    self.tabs(ui);
-                    ui.separator();
-                    self.toolbar(ui, ctx, snap);
-                });
-            });
-        } else {
-            ui.horizontal(|ui| self.tabs(ui));
-            ui.separator();
-            egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| self.toolbar(ui, ctx, snap));
-        }
-    }
-
-    fn tabs(&mut self, ui: &mut egui::Ui) {
-        for (w, l) in [(Ws::Projectile, "PROJÉTIL"), (Ws::Target, "ALVO"), (Ws::Resolution, "RESOLUÇÃO"), (Ws::Sim, "SIMULAÇÃO"), (Ws::Results, "RESULTADOS")] {
-            if ui.selectable_label(self.ws == w, RichText::new(l).strong()).clicked() {
-                self.ws = w;
-                self.peek3d = false;
-                if matches!(w, Ws::Projectile | Ws::Target) {
-                    self.sheet_tab = 1; // abre as propriedades (material, espessura…)
+    fn header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if let Some(t) = &self.logo_tex {
+                ui.image((t.id(), Vec2::splat(26.0)));
+            }
+            let narrow = ui.available_width() < 560.0;
+            if !narrow {
+                ui.label(RichText::new("PenSim").strong().size(17.0).color(ACCENT));
+                ui.add_space(8.0);
+            }
+            let has_res = self.job.is_some() || self.loaded.is_some();
+            for (k, (w, l)) in [(Ws::Projectile, "Munição"), (Ws::Target, "Alvo"), (Ws::Sim, "Simular"), (Ws::Results, "Resultado")].into_iter().enumerate() {
+                let on = self.ws == w;
+                let txt = if narrow { l.to_string() } else { format!("{}  {l}", k + 1) };
+                let enabled = w != Ws::Results || has_res;
+                let b = egui::Button::new(RichText::new(txt).size(14.0).strong().color(if on { Color32::WHITE } else { Color32::from_gray(60) }))
+                    .fill(if on { ACCENT } else { Color32::TRANSPARENT })
+                    .corner_radius(16.0)
+                    .min_size(Vec2::new(0.0, 32.0));
+                if ui.add_enabled(enabled, b).clicked() {
+                    self.ws = w;
+                    self.peek3d = false;
                 }
             }
-        }
-    }
-
-    /// Seleciona um item e abre a aba correspondente (PROJÉTIL, ALVO, RESOLUÇÃO ou SIMULAÇÃO).
-    fn goto(&mut self, sel: Sel) {
-        self.sel = sel;
-        self.sheet_tab = 1;
-        self.peek3d = false;
-        match sel {
-            Sel::Sketch | Sel::Projectile => self.ws = Ws::Projectile,
-            Sel::Layer(i) => {
-                self.ws = Ws::Target;
-                self.sketch.tsel = Some((i, true));
-            }
-            Sel::Conditions => self.ws = Ws::Sim,
-            Sel::Mesh => self.ws = Ws::Resolution,
-        }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button(RichText::new("⋯").size(18.0), |ui| {
+                    ui.set_min_width(260.0);
+                    ui.label(RichText::new("Tela").strong());
+                    ui.checkbox(&mut self.show_fps, "Mostrar FPS e tempos");
+                    ui.weak("Se algum botão perto da borda não responder (barra de status, câmera ou navegação do Android), aumente a margem.");
+                    ui.add(egui::Slider::new(&mut self.extra_inset[1], 0.0..=80.0).text("margem topo"));
+                    ui.add(egui::Slider::new(&mut self.extra_inset[3], 0.0..=80.0).text("margem base"));
+                    ui.add(egui::Slider::new(&mut self.extra_inset[0], 0.0..=80.0).text("margem esquerda"));
+                    ui.add(egui::Slider::new(&mut self.extra_inset[2], 0.0..=80.0).text("margem direita"));
+                    ui.separator();
+                    ui.weak(format!("PenSim · peridinâmica 3D · {} threads", pensim_core::threads()));
+                });
+                let running = self.job.is_some() && !self.snapshot_done();
+                if running && self.ws != Ws::Results {
+                    if ui.add(egui::Button::new(RichText::new("● calculando").color(ACCENT)).frame(false)).clicked() {
+                        self.ws = Ws::Results;
+                    }
+                }
+            });
+        });
     }
 
     fn load_ammo(&mut self, idx: usize, scale: f64) {
@@ -838,570 +823,481 @@ impl PenSim {
             self.cfg.horizon_m = keep.3;
             self.cfg.n_frames = keep.4;
         }
-        self.sel = Sel::Projectile;
+        self.sketch.selected = None;
+        self.sketch.tsel = Some((0, true));
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, snap: &Snap) {
-        ui.horizontal(|ui| match self.ws {
-            Ws::Target => {
-                    let u = self.ammo_scale.max(1e-6);
-                    group(ui, "CAMADA SELECIONADA (mm reais)", |ui| {
-                        let sel = self.sketch.tsel.map(|t| t.0).unwrap_or(0).min(self.cfg.design.layers.len() - 1);
-                        let l = &mut self.cfg.design.layers[sel];
-                        let (mut g, mut t, mut h, mut w) = (l.gap_before * 1e3 / u, l.thickness * 1e3 / u, l.height * 1e3 / u, l.width * 1e3 / u);
-                        ui.label(format!("#{}", sel + 1));
-                        ui.add_enabled(sel > 0, egui::DragValue::new(&mut g).prefix("folga ").suffix(" mm").speed(0.5).range(0.0..=f64::MAX).fixed_decimals(0));
-                        ui.add(egui::DragValue::new(&mut t).prefix("esp. ").suffix(" mm").speed(1.0).range(0.5..=f64::MAX).fixed_decimals(0));
-                        ui.add(egui::DragValue::new(&mut h).prefix("alt. ").suffix(" mm").speed(1.0).range(1.0..=f64::MAX).fixed_decimals(0));
-                        ui.add_enabled(!l.round, egui::DragValue::new(&mut w).prefix("larg. ").suffix(" mm").speed(1.0).range(1.0..=f64::MAX).fixed_decimals(0));
-                        ui.checkbox(&mut l.round, "Disco");
-                        l.gap_before = g * u / 1e3;
-                        l.thickness = t * u / 1e3;
-                        l.height = h * u / 1e3;
-                        l.width = if l.round { h * u / 1e3 } else { w * u / 1e3 };
-                    });
-                    group(ui, "CAMADAS", |ui| {
-                        if tbtn(ui, "+", "Camada", false, true, 62.0).clicked() {
-                            let mut l = self.cfg.design.layers.last().cloned().unwrap_or_else(|| Preset::Rifle762.config().design.layers[0].clone());
-                            l.thickness = 0.008;
-                            l.material = LIBRARY[2].clone();
-                            self.cfg.design.layers.push(l);
-                            self.sketch.tsel = Some((self.cfg.design.layers.len() - 1, true));
-                        }
-                        let i = self.sketch.tsel.map(|t| t.0).unwrap_or(0);
-                        if tbtn(ui, "✕", "Remover", false, self.cfg.design.layers.len() > 1, 62.0).clicked() {
-                            self.cfg.design.layers.remove(i.min(self.cfg.design.layers.len() - 1));
-                            self.sketch.tsel = None;
-                        }
-                    });
-                    group(ui, "ÂNGULO DO ALVO", |ui| {
-                        ui.add(egui::DragValue::new(&mut self.cfg.obliquity_deg).range(0.0..=85.0).suffix(" °").speed(0.5).fixed_decimals(0));
-                        for deg in [0.0, 15.0, 30.0, 45.0, 60.0] {
-                            if ui.selectable_label((self.cfg.obliquity_deg - deg).abs() < 0.5, format!("{deg:.0}°")).clicked() {
-                                self.cfg.obliquity_deg = deg;
-                            }
-                        }
-                    });
-                    group(ui, "GRADE (mm reais)", |ui| {
-                        let u = self.ammo_scale.max(1e-6);
-                        for s in [1.0, 5.0, 10.0, 25.0] {
-                            if ui.selectable_label((self.sketch.snap_mm / u - s).abs() < 1e-6 * s.max(1.0), format!("{s}")).clicked() {
-                                self.sketch.snap_mm = s * u;
-                            }
-                        }
-                    });
-                    group(ui, "VISTA", |ui| {
-                        if tbtn(ui, "▣", if self.peek3d { "Voltar ao\ndesenho" } else { "Ver em\n3D" }, self.peek3d, true, 70.0).clicked() {
-                            self.peek3d = !self.peek3d;
-                        }
-                    });
-            }
-            Ws::Projectile => {
-                    group(ui, "BIBLIOTECA DE MUNIÇÕES", |ui| {
-                        let name = AMMO[self.ammo_idx].name;
-                        egui::ComboBox::from_id_salt("ammo").width(if compact() { 190.0 } else { 270.0 }).selected_text(name).show_ui(ui, |ui| {
-                            let mut last = "";
-                            for (i, a) in AMMO.iter().enumerate() {
-                                if a.group != last {
-                                    ui.label(RichText::new(a.group).strong().color(ACCENT));
-                                    last = a.group;
-                                }
-                                if ui.selectable_label(i == self.ammo_idx, a.name).clicked() {
-                                    self.load_ammo(i, 1.0);
-                                }
-                            }
-                        });
-                    });
-                    group(ui, "FERRAMENTAS DE ESBOÇO", |ui| {
-                        for (t, i, l) in [(Tool::Move, "✥", "Mover"), (Tool::Add, "+", "Ponto"), (Tool::Delete, "✕", "Excluir")] {
-                            if tbtn(ui, i, l, self.sketch.tool == t, true, 62.0).clicked() {
-                                self.sketch.tool = t;
-                            }
-                        }
-                    });
-                    let sel = self.sketch.selected;
-                    let u = self.ammo_scale.max(1e-6);
-                    group(ui, "PONTO SELECIONADO", |ui| {
-                        let prof = &mut self.cfg.design.projectile.profile;
-                        match sel {
-                            Some(i) if i < prof.len() => {
-                                let n = prof.len();
-                                let lo = if i == 0 { 0.0 } else { prof[i - 1][0] * 1e3 / u + 0.05 };
-                                let hi = if i + 1 == n { 400.0 / u } else { prof[i + 1][0] * 1e3 / u - 0.05 };
-                                let (mut a, mut r) = (prof[i][0] * 1e3 / u, prof[i][1] * 1e3 / u);
-                                ui.add_enabled(i != 0, egui::DragValue::new(&mut a).prefix("a ").suffix(" mm").speed(0.1).range(lo..=hi.max(lo)).fixed_decimals(1));
-                                ui.add(egui::DragValue::new(&mut r).prefix("r ").suffix(" mm").speed(0.1).range(0.0..=40.0 / u).fixed_decimals(1));
-                                prof[i] = [a * u / 1e3, r * u / 1e3];
-                            }
-                            _ => {
-                                ui.weak("toque num ponto");
-                            }
-                        }
-                    });
-                    group(ui, "GRADE (mm reais)", |ui| {
-                        let u = self.ammo_scale.max(1e-6);
-                        for s in [0.5, 1.0, 2.0, 5.0] {
-                            if ui.selectable_label((self.sketch.snap_mm / u - s).abs() < 1e-6 * s.max(1.0), format!("{s}")).clicked() {
-                                self.sketch.snap_mm = s * u;
-                            }
-                        }
-                    });
-                    group(ui, "PONTA", |ui| {
-                        for n in Nose::ALL {
-                            if tbtn(ui, "◗", n.label(), false, true, 62.0).clicked() {
-                                let p = &mut self.cfg.design.projectile;
-                                let d = (p.max_radius() * 2.0).max(0.004);
-                                let l = p.length().max(0.01);
-                                p.profile = n.profile(d, l);
-                            }
-                        }
-                    });
-                    group(ui, "VISTA", |ui| {
-                        if tbtn(ui, "▣", if self.peek3d { "Voltar ao\ndesenho" } else { "Ver em\n3D" }, self.peek3d, true, 70.0).clicked() {
-                            self.peek3d = !self.peek3d;
-                        }
-                    });
-            }
-            Ws::Resolution => {
-                group(ui, "QUALIDADE DA MALHA (nós no diâmetro)", |ui| {
-                    for (l, n) in RES_PRESETS {
-                        let on = (self.res_nodes - n).abs() < 0.5;
-                        if tbtn(ui, &format!("{n:.0} nós"), l, on, true, 70.0).clicked() {
-                            self.res_nodes = n;
-                        }
-                    }
-                });
-                group(ui, "AJUSTE FINO", |ui| {
-                    ui.add(egui::DragValue::new(&mut self.res_nodes).range(3.0..=48.0).speed(0.2).suffix(" nós").fixed_decimals(0));
-                });
-                group(ui, "EXECUTAR", |ui| {
-                    if tbtn(ui, "▶", "Simular", false, true, 62.0).clicked() {
-                        self.start(ctx);
-                    }
-                });
-            }
-            Ws::Sim => {
-                group(ui, "IMPACTO", |ui| {
-                    ui.add(egui::DragValue::new(&mut self.cfg.velocity).range(100.0..=3000.0).suffix(" m/s").speed(5.0));
-                    ui.add(egui::DragValue::new(&mut self.cfg.obliquity_deg).range(0.0..=85.0).suffix(" °").speed(0.5));
-                });
-                group(ui, "EXECUTAR", |ui| {
-                    if tbtn(ui, "▶", "Simular", false, true, 62.0).clicked() {
-                        self.start(ctx);
-                    }
-                    self.pause_btn(ui, snap);
-                });
-                group(ui, "ANÁLISE", |ui| {
-                    if tbtn(ui, "◎", "Limite\nbalístico", false, true, 62.0).clicked() {
-                        self.ws = Ws::Results;
-                        self.res_tab = ResTab::Limit;
-                    }
-                });
-            }
-            Ws::Results => {
-                group(ui, "CONTORNO", |ui| {
-                    egui::ComboBox::from_id_salt("field").width(if compact() { 170.0 } else { 210.0 }).selected_text(self.field.label()).show_ui(ui, |ui| {
-                        for f in Field::ALL {
-                            ui.selectable_value(&mut self.field, f, f.label());
-                        }
-                    });
-                    ui.checkbox(&mut self.bands, "Bandas");
-                });
-                group(ui, "VISTA", |ui| {
-                    if tbtn(ui, "◧", if self.section { "Corte\nligado" } else { "Corte\ndesl." }, self.section, true, 62.0).clicked() {
-                        self.section = !self.section;
-                    }
-                    if tbtn(ui, "◩", "Corte\ncolorido", self.cut_colored, true, 62.0).clicked() {
-                        self.cut_colored = !self.cut_colored;
-                    }
-                    if tbtn(ui, "●", "Nós\nredondos", self.round_nodes, true, 62.0).clicked() {
-                        self.round_nodes = !self.round_nodes;
-                    }
-                    if tbtn(ui, "∴", "Ocultar\nsoltas", self.hide_loose, true, 62.0).clicked() {
-                        self.hide_loose = !self.hide_loose;
-                    }
-                    if tbtn(ui, "◌", "Contorno", self.outline, true, 62.0).clicked() {
-                        self.outline = !self.outline;
-                    }
-                    if tbtn(ui, "◁", "Ocultar\nprojétil", self.hide_proj, true, 70.0).clicked() {
-                        self.hide_proj = !self.hide_proj;
-                    }
-                    if tbtn(ui, "▯", "Ocultar\nalvo", self.hide_target, true, 62.0).clicked() {
-                        self.hide_target = !self.hide_target;
-                    }
-                });
-                group(ui, "EXECUÇÃO", |ui| {
-                    self.pause_btn(ui, snap);
-                    ui.checkbox(&mut self.live_view, "Ao vivo");
-                });
-                group(ui, "REPETIÇÃO", |ui| {
-                    let nf = snap.frames.len();
-                    let can = snap.done && nf > 1;
-                    if tbtn(ui, if self.playing { "||" } else { "▶" }, if self.playing { "Pausar" } else { "Reproduzir" }, false, can, 70.0).clicked() {
-                        if self.playing {
-                            self.playing = false;
-                        } else {
-                            if self.play_pos >= (nf - 1) as f32 {
-                                self.play_pos = 0.0;
-                            }
-                            self.playing = true;
-                        }
-                    }
-                    if tbtn(ui, "|◀", "Início", false, can, 56.0).clicked() {
-                        self.play_pos = 0.0;
-                        self.view_idx = 0;
-                    }
-                    for sp in [0.1f32, 0.25, 0.5, 1.0, 2.0, 4.0] {
-                        if ui.selectable_label((self.speed - sp).abs() < 1e-6, format!("{sp}×")).clicked() {
-                            self.speed = sp;
-                        }
-                    }
-                    ui.checkbox(&mut self.loop_play, "Laço");
-                });
-            }
-        });
+    fn snapshot_done(&self) -> bool {
+        self.job.as_ref().map_or(true, |j| j.shared.lock().unwrap().done)
     }
 
-    fn pause_btn(&mut self, ui: &mut egui::Ui, snap: &Snap) {
-        if self.job.is_some() && !snap.done && tbtn(ui, "✕", "Cancelar", false, true, 62.0).clicked() {
-            self.cancel_job();
-            return;
-        }
-        if let Some(j) = &self.job {
-            if !snap.done {
-                let paused = j.paused.load(Ordering::SeqCst);
-                if rbtn(ui, if paused { "▶" } else { "||" }, if paused { "Continuar" } else { "Pausar" }).clicked() {
-                    j.paused.store(!paused, Ordering::SeqCst);
-                }
-            }
+    fn step_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, snap: &Snap) {
+        ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+        match self.ws {
+            Ws::Projectile => self.step_ammo(ui),
+            Ws::Target => self.step_target(ui),
+            Ws::Sim | Ws::Resolution => self.step_sim(ui, ctx),
+            Ws::Results => self.step_results(ui, ctx, snap),
         }
     }
 
-    // ------------------------------------------------------------ navegador
-
-    fn browser(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("NAVEGADOR").small().weak());
-        let mut pick = |this: &mut PenSim, ui: &mut egui::Ui, sel: Sel, text: String| {
-            if ui.selectable_label(this.sel == sel, text).clicked() {
-                this.goto(sel);
-            }
-        };
-        egui::CollapsingHeader::new("Documento").default_open(true).show(ui, |ui| {
-            ui.weak("▫ Origem (planos XY · XZ · YZ)");
-            ui.weak("  X = direção de voo · Z = vertical");
-            egui::CollapsingHeader::new("Projétil").default_open(true).show(ui, |ui| {
-                pick(self, ui, Sel::Sketch, "✎ Esboço 1 · perfil".into());
-                let m = self.cfg.design.projectile.material.name;
-                pick(self, ui, Sel::Projectile, format!("⟳ Revolução 1 · {m}"));
-            });
-            egui::CollapsingHeader::new("Alvo").default_open(true).show(ui, |ui| {
-                for i in 0..self.cfg.design.layers.len() {
-                    let l = &self.cfg.design.layers[i];
-                    let t = format!("▭ Extrusão {} · {} · {:.0} mm", i + 1, l.material.name, l.thickness * 1e3);
-                    pick(self, ui, Sel::Layer(i), t);
-                }
-            });
-            egui::CollapsingHeader::new("Ajustes de tela").default_open(false).show(ui, |ui| {
-                ui.checkbox(&mut self.show_fps, "Mostrar FPS e tempos");
-                ui.weak("Se algum botão do topo, lados ou base não responder (barra de status, câmera ou navegação do Android), aumente a margem.");
-                ui.add(egui::Slider::new(&mut self.extra_inset[1], 0.0..=80.0).text("topo"));
-                ui.add(egui::Slider::new(&mut self.extra_inset[3], 0.0..=80.0).text("base"));
-                ui.add(egui::Slider::new(&mut self.extra_inset[0], 0.0..=80.0).text("esquerda"));
-                ui.add(egui::Slider::new(&mut self.extra_inset[2], 0.0..=80.0).text("direita"));
-            });
-            egui::CollapsingHeader::new("Análise").default_open(true).show(ui, |ui| {
-                pick(self, ui, Sel::Conditions, "⚙ Condições de impacto".into());
-                pick(self, ui, Sel::Mesh, "▦ Malha (nós)".into());
-            });
-        });
+    fn next_btn(&mut self, ui: &mut egui::Ui, to: Ws, text: &str) {
+        if ui.add_sized([ui.available_width(), 38.0], egui::Button::new(RichText::new(text).strong()).corner_radius(8.0)).clicked() {
+            self.ws = to;
+            self.peek3d = false;
+        }
     }
 
-    // --------------------------------------------------------- propriedades
+    // ------------------------------------------------------------ 1 · munição
 
-    fn props(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, snap: &Snap) {
-        if self.ws == Ws::Results {
+    fn step_ammo(&mut self, ui: &mut egui::Ui) {
+        let u = self.ammo_scale.max(1e-6);
+        card(ui, "Munição", |ui| {
+            let name = AMMO[self.ammo_idx].name;
+            egui::ComboBox::from_id_salt("ammo").width(ui.available_width() - 8.0).selected_text(name).show_ui(ui, |ui| {
+                let mut last = "";
+                for (i, a) in AMMO.iter().enumerate() {
+                    if a.group != last {
+                        ui.label(RichText::new(a.group).strong().color(ACCENT));
+                        last = a.group;
+                    }
+                    if ui.selectable_label(i == self.ammo_idx, a.name).clicked() {
+                        self.load_ammo(i, 1.0);
+                    }
+                }
+            });
+            let am: &Ammo = &AMMO[self.ammo_idx];
+            ui.add_space(4.0);
+            kv(ui, "Calibre × comprimento", format!("{:.1} × {:.0} mm", am.caliber_mm, am.length_mm));
+            kv(ui, "Massa", if am.mass_g >= 1000.0 { format!("{:.2} kg", am.mass_g / 1e3) } else { format!("{:.1} g", am.mass_g) });
+            kv(ui, "Velocidade de boca", format!("{:.0} m/s", am.velocity));
+            ui.add_space(2.0);
+            ui.label(RichText::new(am.note).size(12.5).color(Color32::from_gray(90)));
+        });
+        card(ui, "Peças e materiais", |ui| {
+            let mats = self.cfg.design.materials();
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.res_tab, ResTab::Summary, "Resumo");
-                ui.selectable_value(&mut self.res_tab, ResTab::Charts, "Gráficos");
-                ui.selectable_value(&mut self.res_tab, ResTab::Limit, "Limite");
-                ui.selectable_value(&mut self.res_tab, ResTab::Files, "Arquivos");
+                ui.colored_label(mat_color(mats[0].name), "■");
+                ui.label("Corpo");
             });
-            ui.separator();
-            match self.res_tab {
-                ResTab::Summary => self.ui_summary(ui, snap),
-                ResTab::Charts => self.ui_charts(ui, snap),
-                ResTab::Limit => self.ui_limit(ui, ctx),
-                ResTab::Files => self.ui_files(ui, snap),
-            }
-            return;
-        }
-        if self.ws == Ws::Resolution {
-            self.resolution_panel(ui, ctx);
-            return;
-        }
-        ui.label(RichText::new("PROPRIEDADES").small().weak());
-        match self.sel {
-            Sel::Sketch => {
-                ui.heading("Esboço 1 · perfil");
-                ui.label("Contorno externo do projétil no plano a–r, revolvido em torno do eixo. A ponta fica em a = 0.");
-                ui.weak("Edite na aba PROJÉTIL: arraste os pontos ou use as setas.");
-                let p = &self.cfg.design.projectile;
-                ui.label(format!("Pontos: {} · L = {:.1} mm · ⌀ = {:.1} mm (reais)", p.profile.len(), p.length() * 1e3 / self.ammo_scale.max(1e-6), p.max_radius() * 2e3 / self.ammo_scale.max(1e-6)));
-                ui.separator();
-                ui.label("Gerar perfil paramétrico:");
-                let (mut d, mut l) = (p.max_radius() * 2e3, p.length() * 1e3);
-                ui.add(egui::Slider::new(&mut d, 3.0..=30.0).text("⌀ mm"));
-                ui.add(egui::Slider::new(&mut l, 5.0..=150.0).text("L mm"));
-                ui.horizontal_wrapped(|ui| {
-                    for n in Nose::ALL {
-                        if ui.button(n.label()).clicked() {
-                            self.cfg.design.projectile.profile = n.profile(d / 1e3, l / 1e3);
-                        }
-                    }
-                });
-            }
-            Sel::Projectile => {
-                let am: &Ammo = &AMMO[self.ammo_idx];
-                ui.heading("Revolução 1 · projétil");
-                ui.label(RichText::new(am.name).strong());
-                ui.weak(am.note);
-                egui::Grid::new("ammoinfo").num_columns(2).show(ui, |ui| {
-                    ui.label("Real");
-                    ui.label(format!("⌀ {:.1} × {:.0} mm · {:.1} g · {:.0} m/s", am.caliber_mm, am.length_mm, am.mass_g, am.velocity));
-                    ui.end_row();
-                    ui.label("Modelo");
-                    ui.label(format!("{:.1} g", am.mass_g));
-                    ui.end_row();
-                });
-                ui.weak("Montada peça por peça a partir de cortes técnicos (medidas aproximadas, massa conferida com a real). Peças mais finas que um nó são engrossadas até um nó.");
-                ui.separator();
-                ui.label("Material do corpo:");
-                mat_combo(ui, "pm", &mut self.cfg.design.projectile.material);
-                let pr = &mut self.cfg.design.projectile;
-                match pr.core.as_mut() {
-                    Some(c) => {
-                        ui.label("Material do núcleo / enchimento:");
-                        mat_combo(ui, "pc", &mut c.material);
-                        if ui.button("✕ Remover núcleo").clicked() {
-                            pr.core = None;
-                        }
-                    }
-                    None => {
-                        if ui.button("+ Adicionar núcleo").clicked() {
-                            let (l, r) = (pr.length(), pr.max_radius());
-                            pr.core = Some(Core { profile: vec![[0.1 * l, 0.55 * r], [0.8 * l, 0.55 * r]], material: LIBRARY[11].clone() });
-                        }
-                    }
-                }
-                // peças internas da munição (camisa, capuz, para-brisa, carga…)
-                let pr = &mut self.cfg.design.projectile;
-                if !pr.regions.is_empty() {
-                    ui.separator();
-                    ui.label(RichText::new("Peças").strong());
-                    let mut remove = None;
-                    for (k, g) in pr.regions.iter_mut().enumerate() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(&g.name);
-                            match &mut g.fill {
-                                pensim_core::Fill::Void => {
-                                    ui.weak("(vazio)");
-                                }
-                                pensim_core::Fill::Body => {
-                                    ui.weak("(material do corpo)");
-                                }
-                                pensim_core::Fill::Mat(m) => {
-                                    ui.colored_label(mat_color(m.name), "■");
-                                }
-                            }
-                            if ui.small_button("✕").on_hover_text("Remover peça").clicked() {
-                                remove = Some(k);
-                            }
-                        });
-                        if let pensim_core::Fill::Mat(m) = &mut g.fill {
-                            mat_combo(ui, &format!("rg{k}"), m);
-                        }
-                    }
-                    if let Some(k) = remove {
-                        pr.regions.remove(k);
-                    }
-                }
-                let p = &self.cfg.design.projectile;
-                ui.label(format!("L = {:.1} mm · ⌀ = {:.1} mm (reais)", p.length() * 1e3 / self.ammo_scale.max(1e-6), p.max_radius() * 2e3 / self.ammo_scale.max(1e-6)));
-            }
-            Sel::Layer(i) => {
-                let n = self.cfg.design.layers.len();
-                if i >= n {
-                    self.sel = Sel::Layer(0);
-                    return;
-                }
-                ui.heading(format!("Extrusão {}", i + 1));
-                if self.ws != Ws::Target && ui.button("✎ Editar na aba ALVO").clicked() {
-                    self.goto(Sel::Layer(i));
-                }
-                let u0 = self.ammo_scale.max(1e-6);
-                let l: &mut Layer = &mut self.cfg.design.layers[i];
-                mat_combo(ui, "lm", &mut l.material);
-                if l.material.name == LIBRARY[0].name {
-                    let bhn = pensim_core::rha_bhn(l.thickness * 1e3 / u0);
-                    ui.weak(format!("Nesta espessura a RHA tem ≈ {bhn:.0} BHN (σy ≈ {:.2} GPa): chapas grossas são temperadas mais macias.", 3.05e-3 * bhn));
-                }
-                // medidas REAIS (o modelo guarda × escala)
-                let u = self.ammo_scale.max(1e-6);
-                let (mut t, mut g, mut w, mut h) = (l.thickness * 1e3 / u, l.gap_before * 1e3 / u, l.width * 1e3 / u, l.height * 1e3 / u);
-                ui.add(egui::Slider::new(&mut t, 2.0..=1500.0).logarithmic(true).clamping(egui::SliderClamping::Never).text("espessura real mm"));
-                ui.add(egui::Slider::new(&mut g, 0.0..=300.0).clamping(egui::SliderClamping::Never).text("folga antes mm"));
-                ui.add(egui::Slider::new(&mut w, 20.0..=2000.0).logarithmic(true).clamping(egui::SliderClamping::Never).text(if l.round { "diâmetro real mm" } else { "largura real mm" }));
-                if !l.round {
-                    ui.add(egui::Slider::new(&mut h, 20.0..=2000.0).logarithmic(true).clamping(egui::SliderClamping::Never).text("altura real mm"));
-                }
-                ui.checkbox(&mut l.round, "Seção circular (disco)");
-                // sem limite superior; só evita valores nulos/negativos digitados
-                l.thickness = t.max(0.5) * u / 1e3;
-                l.gap_before = g.max(0.0) * u / 1e3;
-                l.width = w.max(1.0) * u / 1e3;
-                l.height = h.max(1.0) * u / 1e3;
+            mat_combo(ui, "pm", &mut self.cfg.design.projectile.material);
+            let pr = &mut self.cfg.design.projectile;
+            if let Some(c) = pr.core.as_mut() {
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(i > 0, egui::Button::new("▲ Subir")).clicked() {
-                        self.cfg.design.layers.swap(i, i - 1);
-                        self.sel = Sel::Layer(i - 1);
-                    }
-                    if ui.add_enabled(i + 1 < n, egui::Button::new("▼ Descer")).clicked() {
-                        self.cfg.design.layers.swap(i, i + 1);
-                        self.sel = Sel::Layer(i + 1);
-                    }
-                    if ui.add_enabled(n > 1, egui::Button::new("✕ Remover")).clicked() {
-                        self.cfg.design.layers.remove(i);
-                        self.sel = Sel::Layer(0);
-                    }
+                    ui.colored_label(mat_color(c.material.name), "■");
+                    ui.label("Núcleo");
                 });
+                mat_combo(ui, "pc", &mut c.material);
             }
-            Sel::Conditions => {
-                ui.heading("Condições de impacto");
-                ui.add(egui::Slider::new(&mut self.cfg.velocity, 100.0..=3000.0).text("velocidade m/s"));
-                ui.add(egui::Slider::new(&mut self.cfg.obliquity_deg, 0.0..=85.0).text("obliquidade °"));
-                ui.add(egui::Slider::new(&mut self.cfg.time_factor, 0.5..=3.0).text("tempo final ×"));
-                ui.checkbox(&mut self.cfg.clamp_edges, "Engastar bordas do alvo (apoio fixo)");
-                ui.separator();
-                ui.label(RichText::new("Realismo e velocidade").strong());
-                let mut noise = (self.cfg.noise * 100.0) as f32;
-                if ui.add(egui::Slider::new(&mut noise, 0.0..=40.0).text("ruído do material %")).on_hover_text("Variação aleatória da resistência/ruptura por ligação. 0 = material ideal (fratura 'perfeita').").changed() {
-                    self.cfg.noise = noise as f64 / 100.0;
+            let mut remove = None;
+            for (k, g) in pr.regions.iter_mut().enumerate() {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    match &g.fill {
+                        pensim_core::Fill::Mat(m) => {
+                            ui.colored_label(mat_color(m.name), "■");
+                        }
+                        _ => {
+                            ui.colored_label(Color32::from_gray(200), "□");
+                        }
+                    }
+                    ui.label(&g.name);
+                    match &g.fill {
+                        pensim_core::Fill::Void => {
+                            ui.weak("vazio");
+                        }
+                        pensim_core::Fill::Body => {
+                            ui.weak("material do corpo");
+                        }
+                        _ => {}
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✕").on_hover_text("Remover peça").clicked() {
+                            remove = Some(k);
+                        }
+                    });
+                });
+                if let pensim_core::Fill::Mat(m) = &mut g.fill {
+                    mat_combo(ui, &format!("rg{k}"), m);
                 }
-                let mut jit = (self.cfg.jitter * 100.0) as f32;
-                if ui.add(egui::Slider::new(&mut jit, 0.0..=15.0).text("jitter dos nós %")).on_hover_text("Perturba a posição dos nós (em % do espaçamento) para quebrar o padrão de malha regular.").changed() {
-                    self.cfg.jitter = jit as f64 / 100.0;
+            }
+            if let Some(k) = remove {
+                pr.regions.remove(k);
+            }
+            if pr.core.is_none() && pr.regions.is_empty() && ui.button("+ Adicionar núcleo").clicked() {
+                let (l, r) = (pr.length(), pr.max_radius());
+                pr.core = Some(Core { profile: vec![[0.1 * l, 0.55 * r], [0.8 * l, 0.55 * r]], material: LIBRARY[11].clone() });
+            }
+        });
+        card(ui, "Editar o perfil", |ui| {
+            ui.label(RichText::new("Arraste os pontos no desenho. As setas movem só na horizontal ou só na vertical.").size(12.5).color(Color32::from_gray(90)));
+            ui.horizontal_wrapped(|ui| {
+                for (t, l) in [(Tool::Move, "✥ Mover"), (Tool::Add, "+ Ponto"), (Tool::Delete, "✕ Excluir")] {
+                    if ui.add(egui::Button::new(l).selected(self.sketch.tool == t).corner_radius(14.0)).clicked() {
+                        self.sketch.tool = t;
+                    }
                 }
-                ui.checkbox(&mut self.cfg.symmetry, "Simetria (2–4× mais rápido)");
-                if self.cfg.symmetry {
-                    ui.weak("Com simetria, o padrão de fratura se repete espelhado nos quadrantes (o ruído varia dentro de cada um). Desligue para obter fraturas totalmente assimétricas, a um custo maior.");
+            });
+            let prof = &mut self.cfg.design.projectile.profile;
+            if let Some(i) = self.sketch.selected.filter(|&i| i < prof.len()) {
+                let n = prof.len();
+                let lo = if i == 0 { 0.0 } else { prof[i - 1][0] * 1e3 / u + 0.05 };
+                let hi = if i + 1 == n { f64::MAX } else { prof[i + 1][0] * 1e3 / u - 0.05 };
+                let (mut a, mut r) = (prof[i][0] * 1e3 / u, prof[i][1] * 1e3 / u);
+                ui.horizontal(|ui| {
+                    ui.label(format!("Ponto {}:", i + 1));
+                    ui.add_enabled(i != 0, egui::DragValue::new(&mut a).prefix("dist. ").suffix(" mm").speed(0.1).range(lo..=hi.max(lo)).fixed_decimals(1));
+                    ui.add(egui::DragValue::new(&mut r).prefix("raio ").suffix(" mm").speed(0.1).range(0.0..=f64::MAX).fixed_decimals(1));
+                });
+                prof[i] = [a * u / 1e3, r * u / 1e3];
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Grade:");
+                for s in [0.5, 1.0, 2.0, 5.0, 10.0] {
+                    if ui.selectable_label((self.sketch.snap_mm / u - s).abs() < 1e-6 * s.max(1.0), format!("{s} mm")).clicked() {
+                        self.sketch.snap_mm = s * u;
+                    }
                 }
-                let mut sl = (self.cfg.sleep_ratio * 100.0) as f32;
-                if ui.add(egui::Slider::new(&mut sl, 0.0..=8.0).text("região ativa %")).on_hover_text("Nós em repouso longe do impacto não são calculados até serem atingidos por ondas acima de X% da velocidade de impacto. 0 = calcula tudo. Acelera muito alvos grossos.").changed() {
-                    self.cfg.sleep_ratio = sl as f64 / 100.0;
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Trocar a ponta:");
+                for nz in Nose::ALL {
+                    if ui.button(nz.label()).clicked() {
+                        let p = &mut self.cfg.design.projectile;
+                        let d = (p.max_radius() * 2.0).max(1e-4);
+                        let l = p.length().max(1e-4);
+                        p.profile = nz.profile(d, l);
+                    }
                 }
-                ui.weak("Obliquidade no plano X–Z, medida a partir da normal da placa.");
-            }
-            Sel::Mesh => {
-                self.resolution_panel(ui, ctx);
-                return;
-            }
-        }
-        {
-            ui.separator();
-            let stale = self.started_key.as_ref() != Some(&self.key());
-            if ui.add_sized([ui.available_width(), 42.0], egui::Button::new(RichText::new("▶ Simular").strong().color(Color32::WHITE)).fill(ACCENT)).clicked() {
-                self.start(ctx);
-            }
-            if stale && self.started_key.is_some() {
-                ui.colored_label(Color32::from_rgb(190, 120, 0), "Modelo alterado desde a última simulação.");
-            }
-        }
+            });
+            let p = &self.cfg.design.projectile;
+            ui.weak(format!("Comprimento {:.1} mm · diâmetro {:.1} mm", p.length() * 1e3 / u, p.max_radius() * 2e3 / u));
+        });
+        self.next_btn(ui, Ws::Target, "Próximo: alvo  →");
     }
 
-    fn resolution_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.heading("Qualidade da malha");
-        ui.label("Escolha quantos nós cabem no diâmetro do projétil. Mais nós = fratura e geometria mais fiéis, mas o custo cresce rápido. Todos os valores continuam em medidas reais.");
-        ui.add_space(4.0);
-        ui.label("Predefinições:");
-        ui.horizontal_wrapped(|ui| {
-            for (l, n) in RES_PRESETS {
-                ui.selectable_value(&mut self.res_nodes, n, format!("{l} · {n:.0}"));
-            }
-        });
-        ui.add(egui::Slider::new(&mut self.res_nodes, 3.0..=48.0).logarithmic(true).text("nós no diâmetro"));
-        ui.label("Horizonte (× espaçamento): 2 = rápido · 3 = mais preciso");
-        ui.horizontal(|ui| {
-            for h in [2.0, 2.5, 3.0] {
-                ui.selectable_value(&mut self.cfg.horizon_m, h, format!("{h}"));
-            }
-        });
-        let mut secs = (self.cfg.n_frames as f32 / PLAY_FPS).clamp(1.0, 16.0);
-        if ui.add(egui::Slider::new(&mut secs, 1.0..=16.0).text("duração da repetição s")).changed() {
-            self.cfg.n_frames = (secs * PLAY_FPS).round() as usize;
-        }
-        ui.weak(format!("Repetição a {PLAY_FPS:.0} fps em 1× · até {} quadros gravados (mais quadros = mais memória).", self.cfg.n_frames));
-        ui.separator();
+    // ------------------------------------------------------------ 2 · alvo
 
-        let n = self.estimate_nodes();
-        let sc = self.scaled_cfg();
-        let bonds = sc.bonds_per_node();
-        let mem = sc.estimate_memory_mb();
-        let free = pensim_core::usable_memory_mb();
-        let base = Preset::Rifle762.config();
-        let base_n = 30000.0_f64;
-        let rel = (n / base_n) * (self.cfg.horizon_m / base.horizon_m).powi(3) * (self.res_nodes / 8.0);
-        let across_d = self.res_nodes;
-        let thin = sc.design.layers.iter().map(|l| l.thickness).fold(f64::MAX, f64::min);
-        let across_t = thin / sc.dx;
-        egui::Grid::new("resgrid").num_columns(2).striped(true).show(ui, |ui| {
-            ui.label("Nós estimados");
-            ui.label(format!("≈ {:.0}", n));
-            ui.end_row();
-            ui.label("Ligações por nó");
-            ui.label(format!("≈ {:.0}", bonds));
-            ui.end_row();
-            ui.label("Memória estimada / utilizável");
-            ui.label(match free {
-                Some(f) => format!("≈ {:.0} MB / {:.0} MB", mem, f),
-                None => format!("≈ {:.0} MB", mem),
+    fn step_target(&mut self, ui: &mut egui::Ui) {
+        let u = self.ammo_scale.max(1e-6);
+        card(ui, "Ângulo do alvo", |ui| {
+            ui.add(egui::Slider::new(&mut self.cfg.obliquity_deg, 0.0..=85.0).suffix(" °").fixed_decimals(0));
+            ui.horizontal_wrapped(|ui| {
+                for deg in [0.0, 30.0, 45.0, 60.0, 75.0] {
+                    if ui.selectable_label((self.cfg.obliquity_deg - deg).abs() < 0.5, format!("{deg:.0}°")).clicked() {
+                        self.cfg.obliquity_deg = deg;
+                    }
+                }
             });
-            ui.end_row();
-            ui.label("Nós no diâmetro do projétil");
-            ui.label(format!("{:.1}", across_d));
-            ui.end_row();
-            ui.label("Nós na camada mais fina");
-            ui.label(format!("{:.1}", across_t));
-            ui.end_row();
-            ui.label("Custo relativo");
-            ui.label(format!("× {:.1} (vs. padrão ≈ 1,0)", rel));
-            ui.end_row();
+            ui.weak("Medido a partir da perpendicular da chapa (0° = tiro de frente).");
         });
-        let warn = Color32::from_rgb(190, 120, 0);
-        let bad = Color32::from_rgb(200, 50, 40);
-        if across_d < 4.0 {
-            ui.colored_label(warn, "Projétil com menos de 4 nós de diâmetro: geometria grosseira. Aumente a qualidade.");
+        let n = self.cfg.design.layers.len();
+        let sel = self.sketch.tsel.map(|t| t.0).unwrap_or(0).min(n.saturating_sub(1));
+        let mut action: Option<(usize, i32)> = None; // (camada, -1 subir · +1 descer · 0 remover)
+        for i in 0..n {
+            let open = i == sel;
+            let l = &self.cfg.design.layers[i];
+            let title = format!("Camada {} · {} · {:.0} mm", i + 1, l.material.name, l.thickness * 1e3 / u);
+            egui::Frame::NONE
+                .fill(Color32::WHITE)
+                .stroke(Stroke::new(if open { 2.0 } else { 1.0 }, if open { ACCENT } else { Color32::from_rgb(222, 226, 232) }))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let hdr = ui.add(egui::Label::new(RichText::new(&title).strong()).sense(Sense::click()));
+                    if hdr.clicked() {
+                        self.sketch.tsel = Some((i, true));
+                    }
+                    if !open {
+                        return;
+                    }
+                    let l: &mut Layer = &mut self.cfg.design.layers[i];
+                    mat_combo(ui, &format!("lm{i}"), &mut l.material);
+                    if l.material.name == LIBRARY[0].name {
+                        let bhn = pensim_core::rha_bhn(l.thickness * 1e3 / u);
+                        ui.weak(format!("Nesta espessura: ≈ {bhn:.0} BHN (chapas grossas são mais macias)."));
+                    }
+                    let (mut t, mut g, mut w, mut h) = (l.thickness * 1e3 / u, l.gap_before * 1e3 / u, l.width * 1e3 / u, l.height * 1e3 / u);
+                    egui::Grid::new(format!("lg{i}")).num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        ui.label("Espessura");
+                        ui.add(egui::DragValue::new(&mut t).suffix(" mm").speed(1.0).range(0.5..=f64::MAX).fixed_decimals(0));
+                        ui.end_row();
+                        ui.label(if l.round { "Diâmetro" } else { "Largura" });
+                        ui.add(egui::DragValue::new(&mut w).suffix(" mm").speed(2.0).range(1.0..=f64::MAX).fixed_decimals(0));
+                        ui.end_row();
+                        if !l.round {
+                            ui.label("Altura");
+                            ui.add(egui::DragValue::new(&mut h).suffix(" mm").speed(2.0).range(1.0..=f64::MAX).fixed_decimals(0));
+                            ui.end_row();
+                        }
+                        if i > 0 {
+                            ui.label("Espaço antes");
+                            ui.add(egui::DragValue::new(&mut g).suffix(" mm").speed(0.5).range(0.0..=f64::MAX).fixed_decimals(0));
+                            ui.end_row();
+                        }
+                    });
+                    ui.checkbox(&mut l.round, "Disco (seção circular)");
+                    l.thickness = t.max(0.5) * u / 1e3;
+                    l.gap_before = g.max(0.0) * u / 1e3;
+                    l.width = w.max(1.0) * u / 1e3;
+                    l.height = if l.round { l.width } else { h.max(1.0) * u / 1e3 };
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(i > 0, egui::Button::new("▲")).on_hover_text("Mover para a frente").clicked() {
+                            action = Some((i, -1));
+                        }
+                        if ui.add_enabled(i + 1 < n, egui::Button::new("▼")).on_hover_text("Mover para trás").clicked() {
+                            action = Some((i, 1));
+                        }
+                        if ui.add_enabled(n > 1, egui::Button::new("✕ Remover")).clicked() {
+                            action = Some((i, 0));
+                        }
+                    });
+                });
+            ui.add_space(6.0);
         }
-        if across_t < 3.0 {
-            ui.colored_label(warn, "Camada com menos de 3 nós de espessura: perfuração pouco confiável.");
+        if let Some((i, d)) = action {
+            match d {
+                0 => {
+                    self.cfg.design.layers.remove(i);
+                    self.sketch.tsel = Some((i.saturating_sub(1), true));
+                }
+                -1 => {
+                    self.cfg.design.layers.swap(i, i - 1);
+                    self.sketch.tsel = Some((i - 1, true));
+                }
+                _ => {
+                    self.cfg.design.layers.swap(i, i + 1);
+                    self.sketch.tsel = Some((i + 1, true));
+                }
+            }
         }
-        if free.map_or(false, |f| mem > 0.85 * f) {
-            ui.colored_label(bad, "Não cabe na memória livre: a simulação será recusada. Diminua a qualidade da malha.");
-        } else if mem > 1500.0 || n > 120_000.0 {
-            ui.colored_label(bad, "Muito pesado: pode levar muito tempo e fechar o app por falta de memória. Você decide.");
-        } else if mem > 600.0 || n > 50_000.0 {
-            ui.colored_label(warn, "Pesado para celular: a simulação pode levar vários minutos.");
-        } else {
-            ui.colored_label(Color32::from_rgb(30, 140, 80), "Adequado para celular.");
+        if ui.add_sized([ui.available_width(), 34.0], egui::Button::new("+ Adicionar camada").corner_radius(8.0)).clicked() {
+            let mut l = self.cfg.design.layers.last().cloned().unwrap_or_else(|| Preset::Rifle762.config().design.layers[0].clone());
+            l.thickness = 0.008 * u;
+            l.gap_before = 0.0;
+            l.material = LIBRARY[2].clone();
+            self.cfg.design.layers.push(l);
+            self.sketch.tsel = Some((self.cfg.design.layers.len() - 1, true));
         }
-        ui.weak("A simulação roda internamente em tamanho conveniente; tempos, energias e penetração são convertidos de volta para valores reais.");
-        ui.weak("O viewport mostra a malha atual: ajuste e veja os nós mudarem antes de simular.");
-        ui.separator();
-        ui.checkbox(&mut self.faces, "Mostrar faces (superfície contínua que segue os nós)");
-        ui.weak("Só no resultado da simulação. Troca as bolinhas por uma malha de faces sombreada; se a malha for grande demais, volta sozinha para os nós.");
-        ui.separator();
-        if ui.add_sized([ui.available_width(), 42.0], egui::Button::new(RichText::new("▶ Simular com esta resolução").strong().color(Color32::WHITE)).fill(ACCENT)).clicked() {
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Grade do desenho:");
+            for s in [1.0, 5.0, 10.0, 25.0] {
+                if ui.selectable_label((self.sketch.snap_mm / u - s).abs() < 1e-6 * s.max(1.0), format!("{s} mm")).clicked() {
+                    self.sketch.snap_mm = s * u;
+                }
+            }
+        });
+        ui.add_space(6.0);
+        self.next_btn(ui, Ws::Sim, "Próximo: simular  →");
+    }
+
+    // ------------------------------------------------------------ 3 · simular
+
+    fn step_sim(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        card(ui, "Impacto", |ui| {
+            ui.add(egui::Slider::new(&mut self.cfg.velocity, 100.0..=3000.0).suffix(" m/s").text("velocidade").fixed_decimals(0));
+            let vb = AMMO[self.ammo_idx].velocity;
+            if (self.cfg.velocity - vb).abs() > 0.5 && ui.small_button(format!("usar a de boca ({vb:.0} m/s)")).clicked() {
+                self.cfg.velocity = vb;
+            }
+            ui.add(egui::Slider::new(&mut self.cfg.obliquity_deg, 0.0..=85.0).suffix(" °").text("ângulo do alvo").fixed_decimals(0));
+        });
+        card(ui, "Qualidade", |ui| self.quality_section(ui));
+        egui::CollapsingHeader::new(RichText::new("Avançado").strong()).id_salt("adv").show(ui, |ui| {
+            ui.label("Horizonte (alcance das ligações, × espaçamento)");
+            ui.horizontal(|ui| {
+                for (h, l) in [(2.0, "2 · rápido"), (2.5, "2,5"), (3.0, "3 · preciso")] {
+                    ui.selectable_value(&mut self.cfg.horizon_m, h, l);
+                }
+            });
+            let mut secs = (self.cfg.n_frames as f32 / PLAY_FPS).clamp(1.0, 16.0);
+            if ui.add(egui::Slider::new(&mut secs, 1.0..=16.0).text("duração da repetição s")).changed() {
+                self.cfg.n_frames = (secs * PLAY_FPS).round() as usize;
+            }
+            ui.add(egui::Slider::new(&mut self.cfg.time_factor, 0.5..=3.0).text("tempo máximo ×"));
+            let mut noise = (self.cfg.noise * 100.0) as f32;
+            if ui.add(egui::Slider::new(&mut noise, 0.0..=40.0).text("variação do material %")).on_hover_text("Variação aleatória de resistência por ligação; 0 = material ideal").changed() {
+                self.cfg.noise = noise as f64 / 100.0;
+            }
+            let mut jit = (self.cfg.jitter * 100.0) as f32;
+            if ui.add(egui::Slider::new(&mut jit, 0.0..=15.0).text("irregularidade da malha %")).changed() {
+                self.cfg.jitter = jit as f64 / 100.0;
+            }
+            let mut sl = (self.cfg.sleep_ratio * 100.0) as f32;
+            if ui.add(egui::Slider::new(&mut sl, 0.0..=8.0).text("região ativa %")).on_hover_text("Nós parados longe do impacto só entram no cálculo quando atingidos por ondas acima de X% da velocidade de impacto. 0 = calcula tudo.").changed() {
+                self.cfg.sleep_ratio = sl as f64 / 100.0;
+            }
+            ui.checkbox(&mut self.cfg.symmetry, "Simetria (2–4× mais rápido)");
+            ui.checkbox(&mut self.cfg.clamp_edges, "Bordas do alvo presas");
+        });
+        ui.add_space(6.0);
+        let stale = self.started_key.is_some() && self.started_key.as_ref() != Some(&self.key());
+        if primary(ui, "▶  Simular").clicked() {
             self.start(ctx);
         }
+        if stale {
+            ui.colored_label(WARN, "O modelo mudou desde a última simulação.");
+        }
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new(RichText::new("Limite balístico (V50)").strong()).id_salt("v50").show(ui, |ui| self.ui_limit(ui, ctx));
+    }
+
+    fn quality_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Nós no diâmetro do projétil: mais nós = mais detalhe, mas bem mais lento.").size(12.5).color(Color32::from_gray(90)));
+        ui.horizontal_wrapped(|ui| {
+            for (l, n) in RES_PRESETS {
+                if ui.add(egui::Button::new(format!("{l} · {n:.0}")).selected((self.res_nodes - n).abs() < 0.5).corner_radius(14.0)).clicked() {
+                    self.res_nodes = n;
+                }
+            }
+        });
+        ui.add(egui::Slider::new(&mut self.res_nodes, 3.0..=48.0).logarithmic(true).text("nós").fixed_decimals(0));
+        let n = self.estimate_nodes();
+        let sc = self.scaled_cfg();
+        let mem = sc.estimate_memory_mb();
+        let free = pensim_core::usable_memory_mb();
+        let thin = sc.design.layers.iter().map(|l| l.thickness).fold(f64::MAX, f64::min) / sc.dx;
+        kv(ui, "Nós", format!("≈ {}", fmt_count(n)));
+        kv(ui, "Memória", match free {
+            Some(f) => format!("≈ {:.0} de {:.0} MB", mem, f),
+            None => format!("≈ {:.0} MB", mem),
+        });
+        kv(ui, "Nós na camada mais fina", format!("{thin:.0}"));
+        let (txt, col) = if free.map_or(false, |f| mem > 0.85 * f) {
+            ("Não cabe na memória livre: diminua a qualidade.", BAD)
+        } else if mem > 1500.0 || n > 120_000.0 {
+            ("Muito pesado: pode demorar muito ou faltar memória.", BAD)
+        } else if mem > 600.0 || n > 50_000.0 {
+            ("Pesado para celular: pode levar vários minutos.", WARN)
+        } else {
+            ("Leve: adequado para celular.", GOOD)
+        };
+        ui.colored_label(col, txt);
+        if self.res_nodes < 4.0 {
+            ui.colored_label(WARN, "Menos de 4 nós no diâmetro: geometria grosseira.");
+        }
+        if thin < 3.0 {
+            ui.colored_label(WARN, "Camada com menos de 3 nós de espessura: resultado pouco confiável.");
+        }
+    }
+
+    // ------------------------------------------------------------ 4 · resultado
+
+    fn step_results(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, snap: &Snap) {
+        if let Some(e) = &snap.error {
+            card(ui, "Não foi possível simular", |ui| self.memory_override(ui, e));
+            return;
+        }
+        if self.job.is_some() && !snap.done {
+            card(ui, "Calculando…", |ui| {
+                let p = snap.progress.clamp(0.0, 1.0) as f32;
+                let el = self.started_at.elapsed().as_secs_f64();
+                let eta = if p > 0.03 { format!(" · faltam ~{}", fmt_secs(el * (1.0 - p as f64) / p as f64)) } else { String::new() };
+                ui.add(egui::ProgressBar::new(p).text(format!("{:.0}%", p * 100.0)));
+                ui.weak(format!("{} decorridos{eta} · {} nós", fmt_secs(el), fmt_count(snap.n as f64)));
+                ui.horizontal(|ui| {
+                    if let Some(j) = &self.job {
+                        let paused = j.paused.load(Ordering::SeqCst);
+                        if ui.button(if paused { "▶ Continuar" } else { "|| Pausar" }).clicked() {
+                            j.paused.store(!paused, Ordering::SeqCst);
+                        }
+                    }
+                    if ui.button("✕ Cancelar").clicked() {
+                        self.cancel_job();
+                    }
+                    ui.checkbox(&mut self.live_view, "Ver ao vivo");
+                });
+                ui.weak("A reprodução começa sozinha quando terminar.");
+            });
+        }
+        if let Some(o) = snap.live.clone() {
+            if snap.done {
+                let (txt, col) = match o.kind {
+                    OutcomeKind::Perforation => ("Perfurou", BAD),
+                    OutcomeKind::PartialPenetration => ("Ficou cravado", WARN),
+                    OutcomeKind::Rejected => (if o.penetration <= 1e-9 { "Ricocheteou / não penetrou" } else { "Parou (não perfurou)" }, GOOD),
+                };
+                card(ui, "", |ui| {
+                    ui.label(RichText::new(txt).size(22.0).strong().color(col));
+                    let rs = self.started_scale.max(1e-6);
+                    let v0 = self.started_cfg.as_ref().map_or(self.cfg.velocity, |c| c.velocity);
+                    kv(ui, "Velocidade de impacto", format!("{v0:.0} m/s"));
+                    kv(ui, "Velocidade residual", format!("{:.0} m/s", o.v_residual));
+                    kv(ui, "Penetração máxima", format!("{:.0} mm", o.penetration * 1e3 / rs));
+                    kv(ui, "Energia absorvida", format!("{:.0} %", o.energy_absorbed_pct));
+                    egui::CollapsingHeader::new("Detalhes").id_salt("det").show(ui, |ui| self.ui_summary(ui, snap));
+                });
+            }
+        } else if self.job.is_none() && self.loaded.is_none() {
+            card(ui, "", |ui| {
+                ui.label("Nenhuma simulação ainda.");
+            });
+            self.next_btn(ui, Ws::Sim, "Ir para simular");
+        }
+        card(ui, "Visualização", |ui| {
+            egui::ComboBox::from_id_salt("field").width(ui.available_width() - 8.0).selected_text(self.field.label()).show_ui(ui, |ui| {
+                for f in Field::ALL {
+                    ui.selectable_value(&mut self.field, f, f.label());
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                chip(ui, &mut self.section, "◧ Corte");
+                chip(ui, &mut self.faces, "◆ Faces");
+                chip(ui, &mut self.bands, "▤ Faixas de cor");
+                chip(ui, &mut self.cut_colored, "Corte colorido");
+                chip(ui, &mut self.outline, "Contorno");
+                chip(ui, &mut self.round_nodes, "Nós redondos");
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Ocultar:");
+                chip(ui, &mut self.hide_proj, "projétil");
+                chip(ui, &mut self.hide_target, "alvo");
+                chip(ui, &mut self.hide_loose, "fragmentos");
+            });
+        });
+        egui::CollapsingHeader::new(RichText::new("Gráficos").strong()).id_salt("charts").show(ui, |ui| self.ui_charts(ui, snap));
+        egui::CollapsingHeader::new(RichText::new("Salvar e abrir").strong()).id_salt("files").default_open(self.res_tab == ResTab::Files).show(ui, |ui| self.ui_files(ui, snap));
+        ui.add_space(6.0);
+        if snap.done && ui.add_sized([ui.available_width(), 36.0], egui::Button::new("↺ Simular de novo").corner_radius(8.0)).clicked() {
+            self.start(ctx);
+        }
+    }
+
+    fn playbar(&mut self, ui: &mut egui::Ui, s: &Snap) {
+        let nf = s.frames.len();
+        ui.horizontal(|ui| {
+            let can = s.done;
+            if ui.add_enabled(can, egui::Button::new(RichText::new(if self.playing { "⏸" } else { "▶" }).size(18.0)).min_size(Vec2::new(40.0, 34.0))).clicked() {
+                if self.playing {
+                    self.playing = false;
+                } else {
+                    if self.play_pos >= (nf - 1) as f32 {
+                        self.play_pos = 0.0;
+                    }
+                    self.playing = true;
+                }
+            }
+            let t = s.frames[self.view_idx.min(nf - 1)].time * 1e6 / self.started_scale.max(1e-6);
+            ui.monospace(format!("{t:6.0} µs"));
+            egui::ComboBox::from_id_salt("speed").width(58.0).selected_text(format!("{}×", self.speed)).show_ui(ui, |ui| {
+                for sp in [0.1f32, 0.25, 0.5, 1.0, 2.0, 4.0] {
+                    ui.selectable_value(&mut self.speed, sp, format!("{sp}×"));
+                }
+            });
+            if ui.selectable_label(self.loop_play, "⟲").on_hover_text("Repetir em laço").clicked() {
+                self.loop_play = !self.loop_play;
+            }
+            let mut i = self.view_idx;
+            let w = (ui.available_width() - 8.0).max(60.0);
+            ui.spacing_mut().slider_width = w;
+            if ui.add(egui::Slider::new(&mut i, 0..=nf - 1).show_value(false)).changed() {
+                self.view_idx = i;
+                self.play_pos = i as f32;
+                self.playing = false;
+            }
+        });
     }
 
     fn progress_card(&mut self, ui: &mut egui::Ui, painter: &egui::Painter, rect: Rect, s: &Snap) {
@@ -1651,65 +1547,6 @@ impl PenSim {
         }
     }
 
-    // ------------------------------------------------------------ status
-
-    fn status_bar(&mut self, ui: &mut egui::Ui, s: &Snap) {
-        if self.ws == Ws::Results && self.job.is_some() && !s.done && s.error.is_none() {
-            ui.horizontal(|ui| {
-                let p = s.progress.clamp(0.0, 1.0) as f32;
-                ui.add(egui::ProgressBar::new(p).desired_width((ui.available_width() - 130.0).max(80.0)).text(format!("calculando… {:.0}%", p * 100.0)));
-                ui.label(if self.running(s) { "● em execução" } else { "pausado" });
-                if ui.button("✕ Cancelar").clicked() {
-                    self.cancel_job();
-                }
-            });
-        } else if self.ws == Ws::Results && s.frames.len() > 1 {
-            ui.horizontal(|ui| {
-                let nf = s.frames.len();
-                if ui.button(if self.playing { "||" } else { "▶" }).clicked() {
-                    if self.playing {
-                        self.playing = false;
-                    } else {
-                        if self.play_pos >= (nf - 1) as f32 {
-                            self.play_pos = 0.0;
-                        }
-                        self.playing = true;
-                    }
-                }
-                let t = s.frames[self.view_idx.min(nf - 1)].time * 1e6 / self.started_scale.max(1e-6);
-                ui.monospace(format!("t = {t:7.1} µs · {}×", self.speed));
-                let mut i = self.view_idx;
-                let w = (ui.available_width() - 20.0).max(80.0);
-                if ui.add_sized([w, 26.0], egui::Slider::new(&mut i, 0..=nf - 1).show_value(false)).changed() {
-                    self.view_idx = i;
-                    self.play_pos = i as f32;
-                    self.playing = false;
-                }
-            });
-        } else {
-            // linha do tempo de recursos (estilo Fusion)
-            let mut go: Option<Sel> = None;
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("LINHA DO TEMPO").small().weak());
-                let cur = self.sel;
-                let mut chip = |ui: &mut egui::Ui, sel: Sel, t: String| {
-                    if ui.add(egui::Button::new(RichText::new(t).small()).selected(cur == sel)).clicked() {
-                        go = Some(sel);
-                    }
-                };
-                chip(ui, Sel::Sketch, "✎ Esboço 1".into());
-                chip(ui, Sel::Projectile, "⟳ Revolução 1".into());
-                for i in 0..self.cfg.design.layers.len() {
-                    chip(ui, Sel::Layer(i), format!("▭ Extrusão {}", i + 1));
-                }
-                chip(ui, Sel::Conditions, "⚙ Impacto".into());
-            });
-            if let Some(s) = go {
-                self.goto(s);
-            }
-        }
-    }
-
     // --------------------------------------------------------- viewport 3D
 
     fn viewport(&mut self, ui: &mut egui::Ui, snap: &Snap) {
@@ -1719,6 +1556,21 @@ impl PenSim {
     }
 
     fn viewport_inner(&mut self, ui: &mut egui::Ui, snap: &Snap) {
+        if matches!(self.ws, Ws::Projectile | Ws::Target) {
+            // alterna entre o desenho 2D e a malha 3D
+            let r = ui.max_rect();
+            let ctx = ui.ctx().clone();
+            egui::Area::new(egui::Id::new("view2d3d")).order(egui::Order::Foreground).fixed_pos(r.left_top() + Vec2::new(8.0, if self.peek3d { 40.0 } else { 26.0 })).show(&ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("Desenho 2D").strong()).selected(!self.peek3d).corner_radius(14.0)).clicked() {
+                        self.peek3d = false;
+                    }
+                    if ui.add(egui::Button::new(RichText::new("Malha 3D").strong()).selected(self.peek3d).corner_radius(14.0)).clicked() {
+                        self.peek3d = true;
+                    }
+                });
+            });
+        }
         if self.ws == Ws::Target && !self.peek3d {
             let colors: Vec<Color32> = self.cfg.design.layers.iter().map(|l| mat_color(l.material.name)).collect();
             let proj = self.cfg.design.projectile.profile.clone();
@@ -1943,7 +1795,7 @@ impl PenSim {
                     view3d::outline(&painter, &view, dx, &ext_pos, &idx, &|i| if parts[i % n] >= np { 0 } else if f.damage[i % n] >= 0.6 { 2 } else { 1 }, Color32::from_rgb(20, 24, 36));
                 }
             }
-            painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, format!("t = {:.0} µs (tempo real equivalente)", f.time * 1e6 / self.started_scale.max(1e-6)), FontId::monospace(15.0), Color32::from_gray(30));
+            painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, format!("t = {:.0} µs", f.time * 1e6 / self.started_scale.max(1e-6)), FontId::monospace(15.0), Color32::from_gray(30));
         } else {
             let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
             let idx: Vec<u32> = if self.section { p.idx.iter().cloned().filter(|&i| in_section(p.pos[i as usize][1])).collect() } else { p.idx.clone() };
@@ -2004,6 +1856,14 @@ fn mat_combo(ui: &mut egui::Ui, id: &str, m: &mut pensim_core::Material) {
         }
     });
     ui.weak(format!("ρ={:.0} kg/m³ · E={:.0} GPa · σy={:.3} GPa", m.rho, m.young / 1e9, m.yield_strength / 1e9));
+}
+
+fn fmt_count(n: f64) -> String {
+    if n >= 1e6 { format!("{:.1} mi", n / 1e6) } else if n >= 1e4 { format!("{:.0} mil", n / 1e3) } else { format!("{n:.0}") }
+}
+
+fn fmt_secs(s: f64) -> String {
+    if s >= 3600.0 { format!("{:.0} h {:.0} min", (s / 3600.0).floor(), (s % 3600.0) / 60.0) } else if s >= 90.0 { format!("{:.0} min", s / 60.0) } else { format!("{s:.0} s") }
 }
 
 fn fmt_v(v: f32) -> String {

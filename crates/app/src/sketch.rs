@@ -285,7 +285,7 @@ pub fn show(ui: &mut egui::Ui, ed: &mut SketchEditor, profile: &mut Vec<[f64; 2]
         let (off, al) = if pp.x + 190.0 > rect.right() { (egui::Vec2::new(-10.0, 12.0), Align2::RIGHT_TOP) } else { (egui::Vec2::new(10.0, 12.0), Align2::LEFT_TOP) };
         painter.text(pp + off, al, format!("a = {:.1}  r = {:.1} mm", profile[i][0] * 1e3 / unit, profile[i][1] * 1e3 / unit), FontId::proportional(12.0), Color32::from_rgb(40, 60, 100));
     }
-    painter.text(Pos2::new(rect.left() + 8.0, rect.top() + 6.0), Align2::LEFT_TOP, "ESBOÇO · plano a–r (a = distância da ponta)", FontId::proportional(12.0), Color32::from_rgb(90, 100, 120));
+    painter.text(Pos2::new(rect.left() + 8.0, rect.top() + 6.0), Align2::LEFT_TOP, "Perfil do projétil (corte) · a ponta fica à direita", FontId::proportional(12.0), Color32::from_rgb(90, 100, 120));
     changed
 }
 
@@ -525,6 +525,6 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
         let (off, al) = if pp.x + 230.0 > rect.right() { (egui::Vec2::new(-10.0, 14.0), Align2::RIGHT_TOP) } else { (egui::Vec2::new(10.0, 14.0), Align2::LEFT_TOP) };
         painter.text(pp + off, al, txt, FontId::proportional(12.0), Color32::from_rgb(40, 60, 100));
     }
-    painter.text(Pos2::new(rect.left() + 8.0, rect.top() + 6.0), Align2::LEFT_TOP, "ALVO · vista lateral (x = espessura, vertical = altura)", FontId::proportional(12.0), Color32::from_rgb(90, 100, 120));
+    painter.text(Pos2::new(rect.left() + 8.0, rect.top() + 6.0), Align2::LEFT_TOP, "Alvo visto de lado · o projétil vem da esquerda", FontId::proportional(12.0), Color32::from_rgb(90, 100, 120));
     changed
 }
