@@ -17,6 +17,7 @@ fn main() {
     let o = s.outcome();
     let f = &s.frames.last().unwrap().unpack();
     let vm = f.von_mises.iter().cloned().fold(0.0f32, f32::max);
+    println!("t_sim={:.1}µs t_end={:.1}µs sep={:?}", s.time*1e6, s.t_end()*1e6, s.separation_time().map(|t| t*1e6));
     println!("acordados no fim: {:.0}%", 100.0 * s.awake_fraction());
     println!("fases ms/passo: grade {:.2} forças {:.2} integração {:.2}", 1e3*s.prof[0]/s.step_count as f64, 1e3*s.prof[1]/s.step_count as f64, 1e3*s.prof[2]/s.step_count as f64);
     println!("sym={} máscara={} nós calc={} físicos={} dt={:.3e} passos={} setup={setup:.2}s run={run:.2}s ({:.2} ms/passo) {:?} vres={:.1} abs={:.1}% ej={:.1}% err={:.2}% vm_max={:.2}GPa Eplast={:.3}J",

@@ -465,7 +465,12 @@ impl PenSim {
         let pdx = pcfg.dx as f32;
         match Model::build_full(&pcfg) {
             Ok(m) => {
-                let pos: Vec<[f32; 3]> = m.pos.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
+                // mesmo referencial do resultado: projétil na horizontal, alvo inclinado
+                let (sa, ca) = (self.cfg.obliquity_deg.to_radians().sin() as f32, self.cfg.obliquity_deg.to_radians().cos() as f32);
+                let pos: Vec<[f32; 3]> = m.pos.iter().map(|p| {
+                    let (x, z) = (p[0] as f32, p[2] as f32);
+                    [ca * x - sa * z, p[1] as f32, -(sa * x + ca * z)]
+                }).collect();
                 let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
                 for p in &pos {
                     for k in 0..3 {
@@ -1733,7 +1738,7 @@ impl PenSim {
             // a simulação usa o projétil inclinado; na tela giramos tudo para o projétil voar na
             // horizontal e o ALVO aparecer inclinado: R(α) leva d=(cosα,0,−senα) em (1,0,0)
             let (sa, ca) = (self.started_obl.to_radians().sin() as f32, self.started_obl.to_radians().cos() as f32);
-            let turn = |q: [f32; 3]| [ca * q[0] - sa * q[2], q[1], sa * q[0] + ca * q[2]];
+            let turn = |q: [f32; 3]| [ca * q[0] - sa * q[2], q[1], -(sa * q[0] + ca * q[2])];
             for &m in &masks {
                 ext_pos.extend(f.pos.iter().map(|&q| turn(flip(q, m))));
             }
@@ -1784,7 +1789,7 @@ impl PenSim {
                             1
                         };
                         let (sa, ca) = (self.started_obl.to_radians().sin() as f32, self.started_obl.to_radians().cos() as f32);
-                        let turn2 = |q: [f32; 3]| [ca * q[0] - sa * q[2], q[1], sa * q[0] + ca * q[2]];
+                        let turn2 = |q: [f32; 3]| [ca * q[0] - sa * q[2], q[1], -(sa * q[0] + ca * q[2])];
                         let m = crate::mesh::build(n, &masks, &f.pos, &snap.ref_pos, &snap.parts, np8, dx, self.started_obl.to_radians() as f32, 400_000, &flip, &turn2, &vis).map(Arc::new);
                         self.mesh_cache = Some((key, m.clone()));
                         m
@@ -1800,6 +1805,7 @@ impl PenSim {
                 let m = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
                 [v[0] / m, v[1] / m, v[2] / m]
             };
+            let (sa_l, ca_l) = (self.started_obl.to_radians().sin() as f32, self.started_obl.to_radians().cos() as f32);
             let cut_normal_y = if keep_pos { -1.0f32 } else { 1.0 };
             let section_on = self.section;
             let normals = snap.normals.clone();
@@ -1813,6 +1819,7 @@ impl PenSim {
                 } else {
                     [nv[0], if m & 1 != 0 { -nv[1] } else { nv[1] }, if m & 2 != 0 { -nv[2] } else { nv[2] }]
                 };
+                let nn = if nv == [0.0; 3] { nn } else { [ca_l * nn[0] - sa_l * nn[2], nn[1], -(sa_l * nn[0] + ca_l * nn[2])] };
                 let dif = (nn[0] * ld[0] + nn[1] * ld[1] + nn[2] * ld[2]).max(0.0);
                 // brilho (Blinn) com o vetor de meia-via entre luz e câmera
                 let h = [ld[0] + ce[0], ld[1] + ce[1], ld[2] + ce[2]];

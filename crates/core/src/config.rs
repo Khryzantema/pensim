@@ -230,7 +230,7 @@ impl Preset {
             time_factor: 1.0,
             n_frames: 100,
             symmetry: true,
-            sleep_ratio: 0.03,
+            sleep_ratio: 0.05,
             noise: 0.15,
             jitter: 0.05,
             ignore_memory: false,

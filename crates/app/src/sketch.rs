@@ -300,7 +300,7 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
     // o ALVO é que gira (o projétil voa sempre na horizontal): R(α) aplicada ao plano x–z da placa
     let al = angle_deg.to_radians();
     let (sn, cs) = (al.sin(), al.cos());
-    let rot = |x: f64, y: f64| (cs * x - sn * y, sn * x + cs * y);
+    let rot = |x: f64, y: f64| (cs * x - sn * y, -(sn * x + cs * y));
     let (mut rxmin, mut rxmax, mut rymax) = (-(plen + 8.0), total + 14.0, 10.0f64);
     for (i, l) in layers.iter().enumerate() {
         let h = l.height * 1e3 / 2.0;
@@ -326,10 +326,10 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
     };
     let fromr = |p: Pos2| {
         let (a, b) = from(p);
-        (cs * a + sn * b, -sn * a + cs * b)
+        (cs * a - sn * b, -sn * a - cs * b)
     };
-    let ax = egui::Vec2::new(cs as f32, -sn as f32); // eixo x da placa na tela
-    let ay = egui::Vec2::new(-sn as f32, -cs as f32); // eixo "para cima" da placa na tela
+    let ax = egui::Vec2::new(cs as f32, sn as f32); // eixo x da placa na tela
+    let ay = egui::Vec2::new(-sn as f32, cs as f32); // eixo "para cima" da placa na tela
 
     let minor = Stroke::new(1.0, Color32::from_rgb(232, 236, 242));
     let major = Stroke::new(1.0, Color32::from_rgb(205, 212, 224));

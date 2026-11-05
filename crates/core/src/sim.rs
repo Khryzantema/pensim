@@ -173,6 +173,7 @@ pub struct Sim {
     /// direção de voo inicial (unitária) e último instante de contato
     dir: [f64; 3],
     last_touch: f64,
+    rest_since: Option<f64>,
     /// intervalo entre quadros [s] (dobra se gravar quadros demais)
     frame_dt: f64,
     captured: usize,
@@ -446,6 +447,7 @@ impl Sim {
             sep_time: None,
             dir: model.dir,
             last_touch: 0.0,
+            rest_since: None,
             // o evento real dura ~1/3 do tempo máximo (a simulação termina na separação + 25%)
             frame_dt: cfg.t_end() / (3.0 * cfg.n_frames.max(1) as f64),
             captured: 0,
@@ -1239,10 +1241,13 @@ impl Sim {
         let any_main = (0..nr).any(|i| self.part[i] < self.n_proj && strict(i));
         let is_main = |i: usize| self.part[i] < self.n_proj && (!any_main || strict(i));
         let (mut x_min, mut x_max, mut vx_main) = (f64::MAX, f64::MIN, 0.0f64);
+        let (mut vy_main, mut vz_main) = (0.0f64, 0.0f64);
         for i in 0..nr {
             if is_main(i) {
                 x_main += self.p[i].x;
                 vx_main += self.p[i].vx;
+                vy_main += self.p[i].vy;
+                vz_main += self.p[i].vz;
                 n_main += 1;
                 x_min = x_min.min(self.p[i].x);
                 x_max = x_max.max(self.p[i].x);
@@ -1303,6 +1308,22 @@ impl Sim {
             self.exit_found = true;
             self.sep_time = Some(self.time);
             self.t_end = self.t_end.min(self.time * 1.25);
+        }
+        // projétil parado (cravado, ou rebatido e encostado no alvo sem se soltar): o evento acabou;
+        // o que sobra é o alvo vibrando. Exige ficar parado por um tempo para não parar numa pausa curta.
+        if self.had_contact && n_main > 0 && !self.exit_found {
+            let nm = n_main as f64;
+            let sp = ((vx_main / nm).powi(2) + (vy_main / nm).powi(2) + (vz_main / nm).powi(2)).sqrt();
+            let v0 = self.cfg.velocity.max(1.0);
+            if sp > 0.08 * v0 {
+                self.rest_since = None;
+            } else if sp < 0.04 * v0 {
+                let t0 = *self.rest_since.get_or_insert(self.time);
+                if self.time - t0 > (0.08 * self.time).max(0.04 * self.t_end) {
+                    self.exit_found = true;
+                    self.t_end = self.t_end.min(self.time * 1.1);
+                }
+            }
         }
     }
 
