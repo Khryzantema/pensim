@@ -35,6 +35,20 @@ impl Default for SketchEditor {
 }
 
 /// Posições (centro da alça) das setas horizontal e vertical de um ponto, afastadas dele.
+/// Setas ao longo dos eixos do alvo girado (x da placa e vertical da placa na tela).
+fn gizmo_handles_rot(p: Pos2, rect: egui::Rect, ax: egui::Vec2, ay: egui::Vec2) -> (Pos2, Pos2) {
+    let mut hh = p + ax * 52.0;
+    if !rect.shrink(26.0).contains(hh) {
+        hh = p - ax * 52.0;
+    }
+    let mut hv = p + ay * 52.0;
+    if !rect.shrink(26.0).contains(hv) {
+        hv = p - ay * 52.0;
+    }
+    (hh, hv)
+}
+
+#[allow(dead_code)]
 fn gizmo_handles(p: Pos2, rect: egui::Rect) -> (Pos2, Pos2) {
     let hx = if p.x + 78.0 > rect.right() { -52.0 } else { 52.0 };
     let vy = if p.y - 78.0 < rect.top() { 52.0 } else { -52.0 };
@@ -42,7 +56,12 @@ fn gizmo_handles(p: Pos2, rect: egui::Rect) -> (Pos2, Pos2) {
 }
 
 fn arrow(painter: &egui::Painter, c: Pos2, horizontal: bool, col: Color32, active: bool) {
-    let (d, n) = if horizontal { (egui::Vec2::new(1.0, 0.0), egui::Vec2::new(0.0, 1.0)) } else { (egui::Vec2::new(0.0, 1.0), egui::Vec2::new(1.0, 0.0)) };
+    let d = if horizontal { egui::Vec2::new(1.0, 0.0) } else { egui::Vec2::new(0.0, 1.0) };
+    arrow_dir(painter, c, d, col, active);
+}
+
+fn arrow_dir(painter: &egui::Painter, c: Pos2, d: egui::Vec2, col: Color32, active: bool) {
+    let n = egui::Vec2::new(-d.y, d.x);
     let half = 20.0;
     painter.circle_filled(c, 19.0, Color32::from_rgba_unmultiplied(255, 255, 255, 215));
     painter.circle_stroke(c, 19.0, Stroke::new(if active { 3.0 } else { 1.5 }, col));
@@ -278,13 +297,39 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
     let spans = layer_spans(layers);
     let total = spans.last().map_or(10.0, |s| s.1);
     let plen = proj.last().map_or(0.0, |p| p[0]) * 1e3;
-    let hmax = layers.iter().map(|l| l.height * 1e3).fold(20.0, f64::max);
-    let xmin = -(plen + 8.0);
-    let xmax = total + 14.0;
+    // o ALVO é que gira (o projétil voa sempre na horizontal): R(α) aplicada ao plano x–z da placa
+    let al = angle_deg.to_radians();
+    let (sn, cs) = (al.sin(), al.cos());
+    let rot = |x: f64, y: f64| (cs * x - sn * y, sn * x + cs * y);
+    let (mut rxmin, mut rxmax, mut rymax) = (-(plen + 8.0), total + 14.0, 10.0f64);
+    for (i, l) in layers.iter().enumerate() {
+        let h = l.height * 1e3 / 2.0;
+        for &x in &[spans[i].0, spans[i].1] {
+            for &y in &[h, -h] {
+                let (a, b) = rot(x, y);
+                rxmin = rxmin.min(a - 4.0);
+                rxmax = rxmax.max(a + 14.0);
+                rymax = rymax.max(b.abs());
+            }
+        }
+    }
+    let (xmin, xmax) = (rxmin, rxmax);
+    let hmax = 2.0 * rymax;
     let scale = (((rect.width() - 60.0) as f64 / (xmax - xmin)).min((rect.height() - 60.0) as f64 / (hmax + 10.0))) as f32;
     let origin = Pos2::new(rect.left() + 30.0 - xmin as f32 * scale, rect.center().y);
     let to = |x: f64, y: f64| Pos2::new(origin.x + x as f32 * scale, origin.y - y as f32 * scale);
     let from = |p: Pos2| ((p.x - origin.x) as f64 / scale as f64, (origin.y - p.y) as f64 / scale as f64);
+    // coordenadas do alvo (x = espessura, y = lateral) → tela, e o inverso
+    let tor = |x: f64, y: f64| {
+        let (a, b) = rot(x, y);
+        to(a, b)
+    };
+    let fromr = |p: Pos2| {
+        let (a, b) = from(p);
+        (cs * a + sn * b, -sn * a + cs * b)
+    };
+    let ax = egui::Vec2::new(cs as f32, -sn as f32); // eixo x da placa na tela
+    let ay = egui::Vec2::new(-sn as f32, -cs as f32); // eixo "para cima" da placa na tela
 
     let minor = Stroke::new(1.0, Color32::from_rgb(232, 236, 242));
     let major = Stroke::new(1.0, Color32::from_rgb(205, 212, 224));
@@ -308,9 +353,8 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
 
     // projétil de referência na direção de impacto (ângulo medido a partir da normal da placa)
     if proj.len() >= 2 {
-        let al = angle_deg.to_radians();
-        let d = (al.cos(), -al.sin()); // direção de voo no plano x–z (desce quando α > 0)
-        let v = (al.sin(), al.cos());
+        let d = (1.0f64, 0.0f64); // projétil sempre na horizontal; quem inclina é o alvo
+        let v = (0.0f64, 1.0f64);
         let tip = (-0.6 - 0.0, 0.0);
         let world = |a: f64, r: f64| to(tip.0 - d.0 * a + v.0 * r, tip.1 - d.1 * a + v.1 * r);
         let mut poly: Vec<Pos2> = proj.iter().map(|p| world(p[0] * 1e3, p[1] * 1e3)).collect();
@@ -329,11 +373,10 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
     for (i, l) in layers.iter().enumerate() {
         let (x0, x1) = spans[i];
         let h = l.height * 1e3 / 2.0;
-        let r = egui::Rect::from_min_max(to(x0, h), to(x1, -h));
         let c = colors.get(i).copied().unwrap_or(Color32::GRAY);
-        painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 200));
-        painter.rect_stroke(r, 0.0, Stroke::new(2.0, Color32::from_rgb(30, 60, 120)), egui::StrokeKind::Inside);
-        painter.text(r.center(), Align2::CENTER_CENTER, format!("{}", i + 1), FontId::proportional(14.0), Color32::from_gray(30));
+        let quad = vec![tor(x0, h), tor(x1, h), tor(x1, -h), tor(x0, -h)];
+        painter.add(egui::Shape::convex_polygon(quad, Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 200), Stroke::new(2.0, Color32::from_rgb(30, 60, 120))));
+        painter.text(tor((x0 + x1) / 2.0, 0.0), Align2::CENTER_CENTER, format!("{}", i + 1), FontId::proportional(14.0), Color32::from_gray(30));
     }
 
     let snap = ed.snap_mm.max(0.1);
@@ -341,7 +384,7 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
     let corner = |ls: &Vec<Layer>, i: usize, back: bool| -> Pos2 {
         let sp = layer_spans(ls);
         let x = if back { sp[i].1 } else { sp[i].0 };
-        to(x, ls[i].height * 1e3 / 2.0)
+        tor(x, ls[i].height * 1e3 / 2.0)
     };
     let mut changed = false;
     let hit = |ls: &Vec<Layer>, p: Pos2| -> Option<(usize, bool)> {
@@ -362,7 +405,7 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
     let red = Color32::from_rgb(210, 60, 50);
     let green = Color32::from_rgb(40, 150, 70);
 
-    let handles = ed.tsel.map(|(i, b)| gizmo_handles(corner(layers, i, b), rect));
+    let handles = ed.tsel.map(|(i, b)| gizmo_handles_rot(corner(layers, i, b), rect, ax, ay));
     if resp.drag_started() {
         if let Some(p) = resp.interact_pointer_pos() {
             ed.gizmo = None;
@@ -371,9 +414,9 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
                 let sp = layer_spans(layers);
                 let locked_h = !back && i == 0;
                 if !locked_h && hh.distance(p) < 26.0 {
-                    ed.gizmo = Some((Axis::Horizontal, if back { sp[i].1 } else { sp[i].0 }, p.x));
+                    ed.gizmo = Some((Axis::Horizontal, if back { sp[i].1 } else { sp[i].0 }, p.x * ax.x + p.y * ax.y));
                 } else if hv.distance(p) < 26.0 {
-                    ed.gizmo = Some((Axis::Vertical, layers[i].height * 1e3 / 2.0, p.y));
+                    ed.gizmo = Some((Axis::Vertical, layers[i].height * 1e3 / 2.0, p.x * ay.x + p.y * ay.y));
                 }
             }
             if ed.gizmo.is_none() {
@@ -418,11 +461,11 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
     };
     if let (Some((axis, start, p0)), Some(p), Some((i, back))) = (ed.gizmo, resp.interact_pointer_pos(), ed.tsel) {
         changed |= match axis {
-            Axis::Horizontal => apply_x(layers, i, back, start + (p.x - p0) as f64 / scale as f64),
-            Axis::Vertical => apply_y(layers, i, start - (p.y - p0) as f64 / scale as f64),
+            Axis::Horizontal => apply_x(layers, i, back, start + ((p.x * ax.x + p.y * ax.y) - p0) as f64 / scale as f64),
+            Axis::Vertical => apply_y(layers, i, start + ((p.x * ay.x + p.y * ay.y) - p0) as f64 / scale as f64),
         };
     } else if let (Some((i, back)), Some(p)) = (ed.tdrag, resp.interact_pointer_pos()) {
-        let (x, y) = from(p);
+        let (x, y) = fromr(p);
         changed |= apply_x(layers, i, back, x);
         changed |= apply_y(layers, i, y);
     }
@@ -434,7 +477,7 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
         if let Some(p) = resp.interact_pointer_pos() {
             ed.tsel = hit(layers, p).or_else(|| {
                 ed.tsel.filter(|&(i, b)| {
-                    let (hh, hv) = gizmo_handles(corner(layers, i, b), rect);
+                    let (hh, hv) = gizmo_handles_rot(corner(layers, i, b), rect, ax, ay);
                     hh.distance(p) < 26.0 || hv.distance(p) < 26.0
                 })
             });
@@ -453,13 +496,13 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
     }
     if let Some((i, back)) = ed.tsel {
         let pp = corner(layers, i, back);
-        let (hh, hv) = gizmo_handles(pp, rect);
+        let (hh, hv) = gizmo_handles_rot(pp, rect, ax, ay);
         let dim = Stroke::new(1.0, Color32::from_rgba_unmultiplied(90, 100, 120, 120));
         painter.line_segment([pp, hh], dim);
         painter.line_segment([pp, hv], dim);
         let locked = !back && i == 0;
-        arrow(&painter, hh, true, if locked { Color32::GRAY } else { red }, matches!(ed.gizmo, Some((Axis::Horizontal, _, _))));
-        arrow(&painter, hv, false, green, matches!(ed.gizmo, Some((Axis::Vertical, _, _))));
+        arrow_dir(&painter, hh, ax, if locked { Color32::GRAY } else { red }, matches!(ed.gizmo, Some((Axis::Horizontal, _, _))));
+        arrow_dir(&painter, hv, ay, green, matches!(ed.gizmo, Some((Axis::Vertical, _, _))));
         let sp = layer_spans(layers);
         let txt = if back { format!("espessura {:.0} mm · altura {:.0} mm (reais)", layers[i].thickness * 1e3 / unit, layers[i].height * 1e3 / unit) } else { format!("folga {:.0} mm · altura {:.0} mm (reais)", layers[i].gap_before * 1e3 / unit, layers[i].height * 1e3 / unit) };
         let _ = sp;

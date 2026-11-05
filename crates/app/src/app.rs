@@ -167,6 +167,8 @@ fn mb(bytes: u64) -> f64 {
     bytes as f64 / 1e6
 }
 
+type MeshKey = (u64, usize, bool, bool, u32, bool, bool, bool, u32, u64);
+
 struct Snap {
     frames: Vec<Arc<PackedFrame>>,
     back_x: f64,
@@ -199,6 +201,7 @@ pub struct PenSim {
     started_cfg: Option<Config>,
     /// escala do modelo usada na simulação em exibição (para converter resultados em valores reais)
     started_scale: f64,
+    started_obl: f64,
     saves: Vec<SaveEntry>,
     saves_dirty: bool,
     save_msg: String,
@@ -216,6 +219,8 @@ pub struct PenSim {
     outline: bool,
     /// desenha os nós como esferas suaves em vez de quadrados
     round_nodes: bool,
+    faces: bool,
+    mesh_cache: Option<(MeshKey, Option<Arc<crate::mesh::SurfMesh>>)>,
     disc_tex: Option<egui::TextureHandle>,
     /// margens extras (pt) somadas à área segura automática: [esq, topo, dir, base]
     extra_inset: [f32; 4],
@@ -300,6 +305,7 @@ impl PenSim {
             loaded: None,
             started_cfg: None,
             started_scale: 1.0,
+            started_obl: 0.0,
             saves: vec![],
             saves_dirty: true,
             save_msg: String::new(),
@@ -312,6 +318,8 @@ impl PenSim {
             hide_target: false,
             outline: true,
             round_nodes: true,
+            faces: false,
+            mesh_cache: None,
             disc_tex: Some(view3d::disc_texture(&cc.egui_ctx)),
             extra_inset: [0.0, 0.0, 0.0, 0.0],
             ws: Ws::Projectile,
@@ -509,6 +517,7 @@ impl PenSim {
         jcfg.ignore_memory = force;
         self.started_cfg = Some(self.cfg.clone());
         self.started_scale = self.model_scale();
+        self.started_obl = self.cfg.obliquity_deg;
         self.job = Some(Job::spawn(jcfg, ctx.clone()));
         self.ws = Ws::Results;
         self.field = Field::VonMises;
@@ -851,7 +860,7 @@ impl PenSim {
                         }
                     });
                     group(ui, "ÂNGULO DO ALVO", |ui| {
-                        ui.add(egui::DragValue::new(&mut self.cfg.obliquity_deg).range(0.0..=75.0).suffix(" °").speed(0.5).fixed_decimals(0));
+                        ui.add(egui::DragValue::new(&mut self.cfg.obliquity_deg).range(0.0..=85.0).suffix(" °").speed(0.5).fixed_decimals(0));
                         for deg in [0.0, 15.0, 30.0, 45.0, 60.0] {
                             if ui.selectable_label((self.cfg.obliquity_deg - deg).abs() < 0.5, format!("{deg:.0}°")).clicked() {
                                 self.cfg.obliquity_deg = deg;
@@ -959,7 +968,7 @@ impl PenSim {
             Ws::Sim => {
                 group(ui, "IMPACTO", |ui| {
                     ui.add(egui::DragValue::new(&mut self.cfg.velocity).range(100.0..=3000.0).suffix(" m/s").speed(5.0));
-                    ui.add(egui::DragValue::new(&mut self.cfg.obliquity_deg).range(0.0..=70.0).suffix(" °").speed(0.5));
+                    ui.add(egui::DragValue::new(&mut self.cfg.obliquity_deg).range(0.0..=85.0).suffix(" °").speed(0.5));
                 });
                 group(ui, "EXECUTAR", |ui| {
                     if tbtn(ui, "▶", "Simular", false, true, 62.0).clicked() {
@@ -1216,7 +1225,7 @@ impl PenSim {
             Sel::Conditions => {
                 ui.heading("Condições de impacto");
                 ui.add(egui::Slider::new(&mut self.cfg.velocity, 100.0..=3000.0).text("velocidade m/s"));
-                ui.add(egui::Slider::new(&mut self.cfg.obliquity_deg, 0.0..=70.0).text("obliquidade °"));
+                ui.add(egui::Slider::new(&mut self.cfg.obliquity_deg, 0.0..=85.0).text("obliquidade °"));
                 ui.add(egui::Slider::new(&mut self.cfg.time_factor, 0.5..=3.0).text("tempo final ×"));
                 ui.checkbox(&mut self.cfg.clamp_edges, "Engastar bordas do alvo (apoio fixo)");
                 ui.separator();
@@ -1334,6 +1343,9 @@ impl PenSim {
         ui.weak("A simulação roda internamente em tamanho conveniente; tempos, energias e penetração são convertidos de volta para valores reais.");
         ui.weak("O viewport mostra a malha atual: ajuste e veja os nós mudarem antes de simular.");
         ui.separator();
+        ui.checkbox(&mut self.faces, "Mostrar faces (superfície contínua que segue os nós)");
+        ui.weak("Só no resultado da simulação. Troca as bolinhas por uma malha de faces sombreada; se a malha for grande demais, volta sozinha para os nós.");
+        ui.separator();
         if ui.add_sized([ui.available_width(), 42.0], egui::Button::new(RichText::new("▶ Simular com esta resolução").strong().color(Color32::WHITE)).fill(ACCENT)).clicked() {
             self.start(ctx);
         }
@@ -1421,6 +1433,7 @@ impl PenSim {
         self.cfg.dx = d.dx;
         self.started_cfg = Some(self.cfg.clone());
         self.started_scale = d.scale;
+        self.started_obl = d.obliquity_deg;
         self.range = [(0.0, 0.0); 7];
         self.view_idx = 0;
         self.autoplayed = false;
@@ -1717,8 +1730,12 @@ impl PenSim {
             };
             let flip = |q: [f32; 3], m: u8| [q[0], if m & 1 != 0 { -q[1] } else { q[1] }, if m & 2 != 0 { -q[2] } else { q[2] }];
             let mut ext_pos: Vec<[f32; 3]> = Vec::with_capacity(n * masks.len());
+            // a simulação usa o projétil inclinado; na tela giramos tudo para o projétil voar na
+            // horizontal e o ALVO aparecer inclinado: R(α) leva d=(cosα,0,−senα) em (1,0,0)
+            let (sa, ca) = (self.started_obl.to_radians().sin() as f32, self.started_obl.to_radians().cos() as f32);
+            let turn = |q: [f32; 3]| [ca * q[0] - sa * q[2], q[1], sa * q[0] + ca * q[2]];
             for &m in &masks {
-                ext_pos.extend(f.pos.iter().map(|&q| flip(q, m)));
+                ext_pos.extend(f.pos.iter().map(|&q| turn(flip(q, m))));
             }
             let mut idx: Vec<u32> = Vec::new();
             // nós que entram só por estarem na face do corte (sem cor de contorno, se desligado)
@@ -1745,6 +1762,37 @@ impl PenSim {
                     }
                 }
             }
+            // malha de faces que segue os nós (opcional; cache por quadro)
+            let faces_mesh: Option<Arc<crate::mesh::SurfMesh>> = if self.faces {
+                let key: MeshKey = (self.job_id, self.view_idx, self.section, keep_pos, cut.to_bits(), self.hide_loose, self.hide_proj, self.hide_target, dx.to_bits(), self.started_obl.to_bits());
+                match &self.mesh_cache {
+                    Some((k, m)) if *k == key => m.clone(),
+                    _ => {
+                        let np8 = self.cfg.design.n_proj_parts() as u8;
+                        let (hl, hp, ht, sec) = (self.hide_loose, self.hide_proj, self.hide_target, self.section);
+                        let vis = |mi: usize, i: usize| -> u8 {
+                            if hl && f.damage[i] >= 0.9 {
+                                return 0;
+                            }
+                            let is_p = snap.parts[i] < np8;
+                            if (is_p && hp) || (!is_p && ht) {
+                                return 0;
+                            }
+                            if sec && !in_section(flip(snap.ref_pos[i], masks[mi])[1]) {
+                                return 2;
+                            }
+                            1
+                        };
+                        let (sa, ca) = (self.started_obl.to_radians().sin() as f32, self.started_obl.to_radians().cos() as f32);
+                        let turn2 = |q: [f32; 3]| [ca * q[0] - sa * q[2], q[1], sa * q[0] + ca * q[2]];
+                        let m = crate::mesh::build(n, &masks, &f.pos, &snap.ref_pos, &snap.parts, np8, dx, self.started_obl.to_radians() as f32, 400_000, &flip, &turn2, &vis).map(Arc::new);
+                        self.mesh_cache = Some((key, m.clone()));
+                        m
+                    }
+                }
+            } else {
+                None
+            };
             // iluminação: luz direcional (cima-esquerda da câmera) + difusa + brilho suave
             let (cr, cu, ce) = self.cam.basis();
             let ld = {
@@ -1792,23 +1840,37 @@ impl PenSim {
                 let bands = self.bands;
                 let mat_cols: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
                 let part_of = snap.parts.clone();
-                view3d::render(&painter, &view, dx, &ext_pos, &idx, false, Some(&light), round_id, &|i| {
-                    if plain[i] {
-                        mat_cols[(part_of[i % n] as usize).min(mat_cols.len() - 1)]
-                    } else {
-                        rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands)
-                    }
-                });
+                if let Some(sm) = &faces_mesh {
+                    view3d::render_surf(&painter, &view, sm, ld, &|e, cut| {
+                        if cut && !self.cut_colored {
+                            mat_cols[(part_of[e % n] as usize).min(mat_cols.len() - 1)]
+                        } else {
+                            rainbow((data[e % n] * sc_f - lo) / (hi - lo), bands)
+                        }
+                    });
+                } else {
+                    view3d::render(&painter, &view, dx, &ext_pos, &idx, false, Some(&light), round_id, &|i| {
+                        if plain[i] {
+                            mat_cols[(part_of[i % n] as usize).min(mat_cols.len() - 1)]
+                        } else {
+                            rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands)
+                        }
+                    });
+                }
                 legend(&painter, rect, self.field, lo, hi);
-                if self.outline {
+                if self.outline && faces_mesh.is_none() {
                     let (parts, np) = (snap.parts.clone(), self.cfg.design.n_proj_parts() as u8);
                     view3d::outline(&painter, &view, dx, &ext_pos, &idx, &|i| if parts[i % n] >= np { 0 } else if f.damage[i % n] >= 0.6 { 2 } else { 1 }, Color32::from_rgb(20, 24, 36));
                 }
             } else {
                 let parts = snap.parts.clone();
                 let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
-                view3d::render(&painter, &view, dx, &ext_pos, &idx, true, Some(&light), round_id, &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
-                if self.outline {
+                if let Some(sm) = &faces_mesh {
+                    view3d::render_surf(&painter, &view, sm, ld, &|e, _| mats[(parts[e % n] as usize).min(mats.len() - 1)]);
+                } else {
+                    view3d::render(&painter, &view, dx, &ext_pos, &idx, true, Some(&light), round_id, &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
+                }
+                if self.outline && faces_mesh.is_none() {
                     let np = self.cfg.design.n_proj_parts() as u8;
                     view3d::outline(&painter, &view, dx, &ext_pos, &idx, &|i| if parts[i % n] >= np { 0 } else if f.damage[i % n] >= 0.6 { 2 } else { 1 }, Color32::from_rgb(20, 24, 36));
                 }

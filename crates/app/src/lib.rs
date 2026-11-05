@@ -1,4 +1,5 @@
 mod app;
+mod mesh;
 #[cfg(target_os = "android")]
 pub(crate) static ANDROID_APP: std::sync::OnceLock<android_activity::AndroidApp> = std::sync::OnceLock::new();
 
