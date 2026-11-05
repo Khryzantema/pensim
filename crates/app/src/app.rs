@@ -753,7 +753,11 @@ impl PenSim {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.step_panel(ui, &ctx, &snap));
             });
         } else {
-            egui::Panel::bottom("panel").default_size(avail.y * 0.46).min_size(140.0).resizable(true).frame(egui::Frame::NONE.fill(PANEL_BG).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
+            // em pé, o painel não pode comer a vista: no resultado ele começa menor, tem teto de 45%
+            // da altura e id próprio (o tamanho de um passo não vaza para o outro)
+            let res = self.ws == Ws::Results;
+            let ph = if res { avail.y * 0.30 } else { avail.y * 0.46 };
+            egui::Panel::bottom(if res { "panel_res" } else { "panel" }).default_size(ph).min_size(60.0).max_size(avail.y * 0.55).resizable(true).frame(egui::Frame::NONE.fill(PANEL_BG).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.step_panel(ui, &ctx, &snap));
             });
         }
@@ -1502,7 +1506,9 @@ impl PenSim {
             stat(ui, "Vel. residual", format!("{:.0} m/s", o.v_residual));
             stat(ui, "Penetração", format!("{:.0} mm", o.penetration * 1e3 / rs));
             stat(ui, "Energia absorvida", format!("{:.0} %", o.energy_absorbed_pct));
-            stat(ui, "Impacto", format!("{v0:.0} m/s"));
+            if ui.available_width() > 420.0 {
+                stat(ui, "Impacto", format!("{v0:.0} m/s"));
+            }
             if ui.add(egui::Button::new(if self.res_more { "▾ menos" } else { "▴ detalhes" }).corner_radius(12.0)).clicked() {
                 self.res_more = !self.res_more;
             }
