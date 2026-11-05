@@ -221,6 +221,8 @@ pub struct PenSim {
     /// desenha os nós como esferas suaves em vez de quadrados
     round_nodes: bool,
     faces: bool,
+    /// barra de resultado aberta com todos os detalhes
+    res_more: bool,
     /// projétil desenhado à mão (substitui o da biblioteca)
     pdraw: Option<Drawing>,
     ped: DrawEditor,
@@ -335,6 +337,7 @@ impl PenSim {
             outline: true,
             round_nodes: true,
             faces: false,
+            res_more: false,
             pdraw: None,
             ped: DrawEditor::new(Paint::Mat(LIBRARY[11].clone()), 0.5),
             tdraws: vec![],
@@ -734,6 +737,9 @@ impl PenSim {
             .frame(egui::Frame::NONE.fill(Color32::WHITE).inner_margin(egui::Margin::symmetric(8, 4)))
             .show_separator_line(true)
             .show(ui, |ui| self.header(ui));
+        if self.ws == Ws::Results && (snap.live.is_some() || snap.error.is_some()) {
+            egui::Panel::bottom("resbar").frame(egui::Frame::NONE.fill(Color32::from_rgb(250, 251, 253)).inner_margin(egui::Margin::symmetric(10, 6))).show_separator_line(true).show(ui, |ui| self.result_bar(ui, &snap));
+        }
         if wide {
             let w = (avail.x * 0.36).clamp(290.0, 420.0);
             egui::Panel::right("panel").exact_size(w).resizable(false).frame(egui::Frame::NONE.fill(PANEL_BG).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
@@ -1095,10 +1101,58 @@ impl PenSim {
         self.next_btn(ui, Ws::Target, "Próximo: alvo  →");
     }
 
+    fn objects_section(&mut self, ui: &mut egui::Ui) {
+        // objetos desenhados
+        let mut remove_obj = None;
+        let ntd = self.tdraws.len();
+        for k in 0..ntd {
+            let editing = self.tedit == Some(k);
+            egui::Frame::NONE
+                .fill(Color32::WHITE)
+                .stroke(Stroke::new(if editing { 2.0 } else { 1.0 }, if editing { ACCENT } else { Color32::from_rgb(222, 226, 232) }))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&self.tdraws[k].name).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("✕").on_hover_text("Remover objeto").clicked() {
+                                remove_obj = Some(k);
+                            }
+                            if ui.button(if editing { "✓ Pronto" } else { "✎ Editar" }).clicked() {
+                                self.tedit = if editing { None } else { Some(k) };
+                                self.ted = DrawEditor::new(self.ted.paint.clone(), self.ted.snap_mm);
+                                self.ted.current = None;
+                                self.peek3d = false;
+                            }
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Largura (profundidade)");
+                        ui.add(egui::DragValue::new(&mut self.tdraws[k].width_mm).suffix(" mm").speed(1.0).range(1.0..=f64::MAX).fixed_decimals(0));
+                    });
+                    if editing {
+                        ui.label(RichText::new("Desenhe o objeto visto de lado (o projétil vem da esquerda, pela linha de tiro). Feche os contornos e encha com o balde.").size(12.5).color(Color32::from_gray(90)));
+                        draw_tools(ui, &mut self.tdraws[k], &mut self.ted, draw::Mode::Target);
+                    }
+                });
+            ui.add_space(6.0);
+        }
+        if let Some(k) = remove_obj {
+            self.tdraws.remove(k);
+            self.tedit = None;
+        }
+    }
+
     // ------------------------------------------------------------ 2 · alvo
 
     fn step_target(&mut self, ui: &mut egui::Ui) {
         let u = self.ammo_scale.max(1e-6);
+        if self.tedit.is_some() {
+            // editando um objeto: o cartão dele vem primeiro
+            self.objects_section(ui);
+        }
         card(ui, "Ângulo do alvo", |ui| {
             ui.add(egui::Slider::new(&mut self.cfg.obliquity_deg, 0.0..=85.0).suffix(" °").fixed_decimals(0));
             ui.horizontal_wrapped(|ui| {
@@ -1191,46 +1245,8 @@ impl PenSim {
                 }
             }
         }
-        // objetos desenhados
-        let mut remove_obj = None;
-        let ntd = self.tdraws.len();
-        for k in 0..ntd {
-            let editing = self.tedit == Some(k);
-            egui::Frame::NONE
-                .fill(Color32::WHITE)
-                .stroke(Stroke::new(if editing { 2.0 } else { 1.0 }, if editing { ACCENT } else { Color32::from_rgb(222, 226, 232) }))
-                .corner_radius(8.0)
-                .inner_margin(egui::Margin::same(10))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&self.tdraws[k].name).strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("✕").on_hover_text("Remover objeto").clicked() {
-                                remove_obj = Some(k);
-                            }
-                            if ui.button(if editing { "✓ Pronto" } else { "✎ Editar" }).clicked() {
-                                self.tedit = if editing { None } else { Some(k) };
-                                self.ted = DrawEditor::new(self.ted.paint.clone(), self.ted.snap_mm);
-                                self.ted.current = None;
-                                self.peek3d = false;
-                            }
-                        });
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Largura (profundidade)");
-                        ui.add(egui::DragValue::new(&mut self.tdraws[k].width_mm).suffix(" mm").speed(1.0).range(1.0..=f64::MAX).fixed_decimals(0));
-                    });
-                    if editing {
-                        ui.label(RichText::new("Desenhe o objeto visto de lado (o projétil vem da esquerda, pela linha de tiro). Feche os contornos e encha com o balde.").size(12.5).color(Color32::from_gray(90)));
-                        draw_tools(ui, &mut self.tdraws[k], &mut self.ted, draw::Mode::Target);
-                    }
-                });
-            ui.add_space(6.0);
-        }
-        if let Some(k) = remove_obj {
-            self.tdraws.remove(k);
-            self.tedit = None;
+        if self.tedit.is_none() {
+            self.objects_section(ui);
         }
         if ui.add_sized([ui.available_width(), 34.0], egui::Button::new("✎ + Novo objeto (desenhar)").corner_radius(8.0)).clicked() {
             let name = format!("Objeto {}", self.tdraws.len() + 1);
@@ -1379,24 +1395,8 @@ impl PenSim {
                 ui.weak("A reprodução começa sozinha quando terminar.");
             });
         }
-        if let Some(o) = snap.live.clone() {
-            if snap.done {
-                let (txt, col) = match o.kind {
-                    OutcomeKind::Perforation => ("Perfurou", BAD),
-                    OutcomeKind::PartialPenetration => ("Ficou cravado", WARN),
-                    OutcomeKind::Rejected => (if o.penetration <= 1e-9 { "Ricocheteou / não penetrou" } else { "Parou (não perfurou)" }, GOOD),
-                };
-                card(ui, "", |ui| {
-                    ui.label(RichText::new(txt).size(22.0).strong().color(col));
-                    let rs = self.started_scale.max(1e-6);
-                    let v0 = self.started_cfg.as_ref().map_or(self.cfg.velocity, |c| c.velocity);
-                    kv(ui, "Velocidade de impacto", format!("{v0:.0} m/s"));
-                    kv(ui, "Velocidade residual", format!("{:.0} m/s", o.v_residual));
-                    kv(ui, "Penetração máxima", format!("{:.0} mm", o.penetration * 1e3 / rs));
-                    kv(ui, "Energia absorvida", format!("{:.0} %", o.energy_absorbed_pct));
-                    egui::CollapsingHeader::new("Detalhes").id_salt("det").show(ui, |ui| self.ui_summary(ui, snap));
-                });
-            }
+        if snap.live.is_some() {
+            // o resultado fica na barra da base da tela
         } else if self.job.is_none() && self.loaded.is_none() {
             card(ui, "", |ui| {
                 ui.label("Nenhuma simulação ainda.");
@@ -1429,6 +1429,67 @@ impl PenSim {
         ui.add_space(6.0);
         if snap.done && ui.add_sized([ui.available_width(), 36.0], egui::Button::new("↺ Simular de novo").corner_radius(8.0)).clicked() {
             self.start(ctx);
+        }
+    }
+
+    /// Barra de resultado (base da tela): números principais sempre à vista.
+    fn result_bar(&mut self, ui: &mut egui::Ui, s: &Snap) {
+        if let Some(e) = &s.error {
+            ui.colored_label(BAD, e);
+            return;
+        }
+        let Some(o) = s.live.clone() else { return };
+        let rs = self.started_scale.max(1e-6);
+        let v0 = self.started_cfg.as_ref().map_or(self.cfg.velocity, |c| c.velocity);
+        let (txt, col) = if !s.done {
+            ("Calculando…", Color32::from_gray(110))
+        } else {
+            match o.kind {
+                OutcomeKind::Perforation => ("Perfurou", BAD),
+                OutcomeKind::PartialPenetration => ("Ficou cravado", WARN),
+                OutcomeKind::Rejected => (if o.penetration <= 1e-9 { "Ricocheteou" } else { "Parou" }, GOOD),
+            }
+        };
+        let stat = |ui: &mut egui::Ui, k: &str, v: String| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new(k).size(11.0).color(Color32::from_gray(110)));
+                ui.label(RichText::new(v).size(15.0).strong());
+            });
+            ui.add_space(6.0);
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(txt).size(17.0).strong().color(col));
+            ui.add_space(8.0);
+            stat(ui, "Vel. residual", format!("{:.0} m/s", o.v_residual));
+            stat(ui, "Penetração", format!("{:.0} mm", o.penetration * 1e3 / rs));
+            stat(ui, "Energia absorvida", format!("{:.0} %", o.energy_absorbed_pct));
+            stat(ui, "Impacto", format!("{v0:.0} m/s"));
+            if ui.add(egui::Button::new(if self.res_more { "▾ menos" } else { "▴ detalhes" }).corner_radius(12.0)).clicked() {
+                self.res_more = !self.res_more;
+            }
+        });
+        if self.res_more {
+            ui.separator();
+            egui::Grid::new("resbar_more").num_columns(4).spacing([16.0, 4.0]).show(ui, |ui| {
+                let mut n = 0;
+                let mut row = |ui: &mut egui::Ui, k: &str, v: String| {
+                    ui.label(RichText::new(k).color(Color32::from_gray(100)));
+                    ui.label(RichText::new(v).strong());
+                    n += 1;
+                    if n % 2 == 0 {
+                        ui.end_row();
+                    }
+                };
+                row(ui, "Projétil atrás do alvo", format!("{:.0} %", o.proj_behind_pct));
+                row(ui, "Alvo ejetado (tampão)", format!("{:.1} %", o.target_ejected_pct));
+                row(ui, "Duração simulada", format!("{:.0} µs", s.t_end * 1e6 / rs));
+                row(ui, "Erro de energia", format!("{:+.2} %", o.energy_error_pct));
+                row(ui, "Nós", fmt_count(s.n as f64));
+                row(ui, "Passos", format!("{}", s.steps));
+                row(ui, "Tempo de cálculo", fmt_secs(s.wall));
+                row(ui, "Quadros", format!("{}", s.frames.len()));
+            });
         }
     }
 
@@ -2098,17 +2159,18 @@ fn paint_combo(ui: &mut egui::Ui, id: &str, p: &mut Paint) -> bool {
 /// Ferramentas do editor de desenho livre (painel). Devolve `true` se o desenho mudou.
 fn draw_tools(ui: &mut egui::Ui, d: &mut Drawing, ed: &mut DrawEditor, mode: draw::Mode) -> bool {
     let mut changed = false;
-    ui.horizontal_wrapped(|ui| {
-        for (t, l) in [(DTool::Line, "✎ Linha"), (DTool::Point, "• Ponto"), (DTool::Move, "✥ Mover"), (DTool::Split, "✂ Dividir"), (DTool::Fillet, "◠ Arredondar"), (DTool::Erase, "⌫ Apagar"), (DTool::Bucket, "▧ Balde")] {
-            if ui.add(egui::Button::new(l).selected(ed.tool == t).corner_radius(14.0)).clicked() {
-                if t != DTool::Fillet {
-                    ed.fillet = None;
-                }
-                ed.tool = t;
-                ed.msg.clear();
-            }
-        }
-    });
+    let tname = match ed.tool {
+        DTool::Line => "Desenhar",
+        DTool::Connect => "Ligar pontos",
+        DTool::Point => "Ponto",
+        DTool::Move => "Mover",
+        DTool::Split => "Dividir linha",
+        DTool::Fillet => "Arredondar",
+        DTool::Erase => "Apagar",
+        DTool::Bucket => "Balde",
+    };
+    ui.label(RichText::new(format!("Ferramenta: {tname}")).strong().color(ACCENT));
+    ui.weak("Escolha a ferramenta na barra sobre o desenho.");
     match ed.tool {
         DTool::Bucket => {
             ui.horizontal(|ui| {
@@ -2139,20 +2201,10 @@ fn draw_tools(ui: &mut egui::Ui, d: &mut Drawing, ed: &mut DrawEditor, mode: dra
                 }
             }
         }
-        DTool::Line => {
-            if ed.current.is_some() && ui.button("Soltar (parar de ligar ao último ponto)").clicked() {
-                ed.current = None;
-            }
-        }
         _ => {}
     }
-    ui.horizontal_wrapped(|ui| {
-        if ui.add_enabled(!ed.undo.is_empty(), egui::Button::new("↶ Desfazer")).clicked() {
-            changed |= ed.undo(d);
-        }
-        if ui.button("Ajustar vista").clicked() {
-            ed.fit = true;
-        }
+    ui.horizontal(|ui| {
+        ui.label("Zoom:");
         if ui.button(" − ").clicked() {
             if let Some(v) = ed.view.as_mut() {
                 v[2] /= 1.3;

@@ -3,7 +3,7 @@
 //! Usado para criar projéteis (perfil no plano a–r, revolvido no eixo) e objetos do alvo
 //! (vista lateral x–z, extrudada na largura). Coordenadas em milímetros reais.
 //! Regra das peças: o contorno preenchido mais interno (menor área) que contém o ponto vale.
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
+use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use pensim_core::{point_in_poly, poly_area, Fill, Material, Projectile, Region, TargetObject};
 
 #[derive(Clone, PartialEq, Debug)]
@@ -59,6 +59,22 @@ pub enum DTool {
     Erase,
     Bucket,
     Fillet,
+    Connect,
+}
+
+/// O que está sendo arrastado.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Grab {
+    None,
+    Pan,
+    Point(usize),
+    PointH(usize),
+    PointV(usize),
+    FilletStart,
+    FilletEnd,
+    FilletMid,
+    FilletMidH,
+    FilletMidV,
 }
 
 /// Arredondamento de um canto: o canto `p` entre as linhas p–a e p–b vira uma curva de Bézier
@@ -115,15 +131,14 @@ pub struct DrawEditor {
     pub fit: bool,
     pub msg: String,
     pub fillet: Option<Fillet>,
-    drag: Option<usize>,
-    /// alça do arredondamento em arraste: 1 = início, 2 = fim, 3 = meio
-    fdrag: u8,
-    panning: bool,
+    grab: Grab,
+    /// posição do dedo e valor (u, v) no início do arraste
+    g0: (Pos2, [f64; 2]),
 }
 
 impl DrawEditor {
     pub fn new(paint: Paint, snap_mm: f64) -> Self {
-        DrawEditor { tool: DTool::Line, current: Some(0), selected: None, paint, undo: vec![], snap_mm, view: None, fit: true, msg: String::new(), fillet: None, drag: None, fdrag: 0, panning: false }
+        DrawEditor { tool: DTool::Line, current: Some(0), selected: None, paint, undo: vec![], snap_mm, view: None, fit: true, msg: String::new(), fillet: None, grab: Grab::None, g0: (Pos2::ZERO, [0.0; 2]) }
     }
     pub fn push(&mut self, d: &Drawing) {
         self.undo.push(d.clone());
@@ -501,6 +516,33 @@ pub fn triangulate(poly: &[[f64; 2]]) -> Vec<[usize; 3]> {
     out
 }
 
+/// Setas de arraste horizontal e vertical, afastadas do ponto para o dedo não cobri-lo.
+fn gizmo(p: Pos2, rect: Rect) -> (Pos2, Pos2) {
+    let hx = if p.x + 84.0 > rect.right() { -58.0 } else { 58.0 };
+    let vy = if p.y - 84.0 < rect.top() { 58.0 } else { -58.0 };
+    (Pos2::new(p.x + hx, p.y), Pos2::new(p.x, p.y + vy))
+}
+
+fn arrow_glyph(painter: &egui::Painter, c: Pos2, d: Vec2, col: Color32, active: bool) {
+    let n = Vec2::new(-d.y, d.x);
+    painter.circle_filled(c, 17.0, Color32::from_rgba_unmultiplied(255, 255, 255, 225));
+    painter.circle_stroke(c, 17.0, Stroke::new(if active { 3.0 } else { 1.5 }, col));
+    painter.line_segment([c - d * 11.0, c + d * 11.0], Stroke::new(2.5, col));
+    for sg in [-1.0f32, 1.0] {
+        let tip = c + d * 13.0 * sg;
+        let b = tip - d * 7.0 * sg;
+        painter.add(egui::Shape::convex_polygon(vec![tip, b + n * 5.0, b - n * 5.0], col, Stroke::NONE));
+    }
+}
+
+fn draw_gizmo(painter: &egui::Painter, p: Pos2, h: Pos2, v: Pos2, ah: bool, av: bool) {
+    let dim = Stroke::new(1.0, Color32::from_rgba_unmultiplied(90, 100, 120, 130));
+    painter.line_segment([p, h], dim);
+    painter.line_segment([p, v], dim);
+    arrow_glyph(painter, h, Vec2::new(1.0, 0.0), Color32::from_rgb(210, 60, 50), ah);
+    arrow_glyph(painter, v, Vec2::new(0.0, 1.0), Color32::from_rgb(40, 150, 70), av);
+}
+
 fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     let ab = b - a;
     let t = ((p - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
@@ -537,8 +579,9 @@ pub fn show(
             b[2] = c - minh * 0.5;
             b[3] = c + minh * 0.5;
         }
-        let s = ((rect.width() as f64 - 60.0) / (b[1] - b[0])).min((rect.height() as f64 - 70.0) / (b[3] - b[2])).max(0.05);
-        ed.view = Some([0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]), s]);
+        // espaço livre: dica no topo e faixa de ferramentas na base
+        let s = ((rect.width() as f64 - 60.0) / (b[1] - b[0])).min((rect.height() as f64 - 140.0) / (b[3] - b[2])).max(0.05);
+        ed.view = Some([0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]) - 10.0 / s, s]);
         ed.fit = false;
     }
     let [mut cu, mut cv, mut s] = ed.view.unwrap();
@@ -661,10 +704,15 @@ pub fn show(
             ed.msg.clear();
             let hp = hit_point(d, p);
             let he = if hp.is_none() { hit_edge(d, p) } else { None };
+            // toque nas setas do ponto selecionado não troca a seleção
+            let gizmo_hit = ed.selected.filter(|&i| i < d.pts.len()).map_or(false, |i| {
+                let (h, v) = gizmo(to(d.pts[i][0], d.pts[i][1]), rect);
+                h.distance(p) < 24.0 || v.distance(p) < 24.0
+            });
             match ed.tool {
                 DTool::Line => match (hp, ed.current) {
                     (Some(i), None) => ed.current = Some(i),
-                    (Some(i), Some(cur)) if cur == i => ed.current = None,
+                    (Some(i), Some(cur)) if cur == i => {}
                     (Some(i), Some(cur)) => {
                         push(ed, d);
                         d.add_edge(cur, i);
@@ -681,6 +729,17 @@ pub fn show(
                         changed = true;
                     }
                 },
+                DTool::Connect => match (hp, ed.current) {
+                    (Some(i), None) => ed.current = Some(i),
+                    (Some(i), Some(cur)) if cur == i => ed.current = None,
+                    (Some(i), Some(cur)) => {
+                        push(ed, d);
+                        d.add_edge(cur, i);
+                        ed.current = None;
+                        changed = true;
+                    }
+                    (None, _) => ed.current = None,
+                },
                 DTool::Point => match hp {
                     Some(i) => ed.selected = Some(i),
                     None => {
@@ -690,7 +749,11 @@ pub fn show(
                         changed = true;
                     }
                 },
-                DTool::Move => ed.selected = hp,
+                DTool::Move => {
+                    if hp.is_some() || !gizmo_hit {
+                        ed.selected = hp;
+                    }
+                }
                 DTool::Split => {
                     if let Some(k) = he {
                         push(ed, d);
@@ -738,69 +801,115 @@ pub fn show(
             }
         }
     }
-    // alças do arredondamento (posições na tela)
+    // alças do arredondamento e setas do ponto selecionado (posições na tela)
     let fh = ed.fillet.as_ref().filter(|f| f.p < d.pts.len() && f.a < d.pts.len() && f.b < d.pts.len()).map(|f| {
         let (s0, e0) = f.ends(d);
-        (to(s0[0], s0[1]), to(e0[0], e0[1]), to(f.q[0], f.q[1]))
+        let hq = to(f.q[0], f.q[1]);
+        let (gh, gv) = gizmo(hq, rect);
+        (to(s0[0], s0[1]), to(e0[0], e0[1]), hq, gh, gv)
     });
+    let sel = ed.selected.filter(|&i| i > 0 && i < d.pts.len() && matches!(ed.tool, DTool::Move | DTool::Point));
+    let pg = sel.map(|i| gizmo(to(d.pts[i][0], d.pts[i][1]), rect));
     if resp.drag_started() {
-        let pp = resp.interact_pointer_pos();
-        if let (Some((hs, he, hq)), Some(p)) = (fh, pp) {
-            ed.fdrag = if hq.distance(p) < 24.0 { 3 } else if hs.distance(p) < 24.0 { 1 } else if he.distance(p) < 24.0 { 2 } else { 0 };
-        }
-    }
-    if ed.fdrag != 0 {
-        if let (Some(f), Some(p)) = (ed.fillet.as_mut(), resp.interact_pointer_pos()) {
-            let (u, v) = from(p);
-            let pc = d.pts[f.p];
-            match ed.fdrag {
-                3 => f.q = [u, v],
-                k => {
-                    // projeta o dedo sobre a linha do canto até a outra ponta
-                    let other = d.pts[if k == 1 { f.a } else { f.b }];
-                    let dir = sub(other, pc);
-                    let l = len(dir).max(1e-12);
-                    let t = ((u - pc[0]) * dir[0] + (v - pc[1]) * dir[1]) / l;
-                    let t = t.clamp(0.0, 0.95 * l);
-                    if k == 1 {
-                        f.d1 = t;
-                    } else {
-                        f.d2 = t;
+        if let Some(p) = resp.interact_pointer_pos() {
+            let near = |q: Pos2| q.distance(p) < 24.0;
+            ed.grab = Grab::Pan;
+            if let Some((hs, he, _hq, gh, gv)) = fh {
+                ed.grab = if near(gh) { Grab::FilletMidH } else if near(gv) { Grab::FilletMidV } else if near(hs) { Grab::FilletStart } else if near(he) { Grab::FilletEnd } else { Grab::Pan };
+            }
+            if ed.grab == Grab::Pan {
+                if let (Some(i), Some((gh, gv))) = (sel, pg) {
+                    if near(gh) {
+                        ed.grab = Grab::PointH(i);
+                    } else if near(gv) {
+                        ed.grab = Grab::PointV(i);
                     }
                 }
             }
-        }
-        if resp.drag_stopped() {
-            ed.fdrag = 0;
-        }
-    } else if resp.drag_started() {
-        let hp = resp.interact_pointer_pos().and_then(|p| hit_point(d, p));
-        match (ed.tool, hp) {
-            (DTool::Move, Some(i)) if i != 0 => {
-                ed.push(d);
-                ed.drag = Some(i);
-                ed.selected = Some(i);
+            // pontos só se movem pelas setas (arrastar o ponto direto move a vista), para evitar acidentes
+            if ed.grab == Grab::Pan && ed.tool == DTool::Move && hit_point(d, p) == Some(0) {
+                ed.msg = "O ponto de origem fica fixo.".into();
             }
-            (DTool::Move, Some(0)) => ed.msg = "O ponto de origem fica fixo.".into(),
-            _ => ed.panning = true,
+            let v0 = match ed.grab {
+                Grab::Point(i) | Grab::PointH(i) | Grab::PointV(i) => d.pts[i],
+                Grab::FilletMid | Grab::FilletMidH | Grab::FilletMidV => ed.fillet.as_ref().map_or([0.0; 2], |f| f.q),
+                _ => [0.0; 2],
+            };
+            if matches!(ed.grab, Grab::Point(_) | Grab::PointH(_) | Grab::PointV(_)) {
+                ed.push(d);
+            }
+            ed.g0 = (p, v0);
         }
     }
-    if resp.dragged() && ed.fdrag == 0 {
-        if let (Some(i), Some(p)) = (ed.drag, resp.interact_pointer_pos()) {
-            let q = snap(p);
-            if d.pts[i] != q {
-                d.pts[i] = q;
-                changed = true;
+    if resp.dragged() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            let (p0, v0) = ed.g0;
+            let g = snap_mm.max(0.01);
+            let sn = |x: f64| (x / g).round() * g;
+            let du = sx * (p.x - p0.x) as f64 / s;
+            let dv = -((p.y - p0.y) as f64) / s;
+            let vmin = if mode == Mode::Projectile { 0.0 } else { f64::MIN };
+            match ed.grab {
+                Grab::Pan => {
+                    let dl = resp.drag_delta();
+                    cu -= sx * dl.x as f64 / s;
+                    cv += dl.y as f64 / s;
+                }
+                Grab::Point(i) => {
+                    let q = snap(p);
+                    if d.pts[i] != q {
+                        d.pts[i] = q;
+                        changed = true;
+                    }
+                }
+                Grab::PointH(i) => {
+                    let q = [sn(v0[0] + du), d.pts[i][1]];
+                    if d.pts[i] != q {
+                        d.pts[i] = q;
+                        changed = true;
+                    }
+                }
+                Grab::PointV(i) => {
+                    let q = [d.pts[i][0], sn(v0[1] + dv).max(vmin)];
+                    if d.pts[i] != q {
+                        d.pts[i] = q;
+                        changed = true;
+                    }
+                }
+                Grab::FilletMid | Grab::FilletMidH | Grab::FilletMidV => {
+                    if let Some(f) = ed.fillet.as_mut() {
+                        f.q = match ed.grab {
+                            Grab::FilletMidH => [v0[0] + du, v0[1]],
+                            Grab::FilletMidV => [v0[0], v0[1] + dv],
+                            _ => {
+                                let (u, v) = from(p);
+                                [u, v]
+                            }
+                        };
+                    }
+                }
+                Grab::FilletStart | Grab::FilletEnd => {
+                    if let Some(f) = ed.fillet.as_mut() {
+                        // projeta o dedo sobre a linha do canto até a outra ponta
+                        let (u, v) = from(p);
+                        let pc = d.pts[f.p];
+                        let other = d.pts[if ed.grab == Grab::FilletStart { f.a } else { f.b }];
+                        let dir = sub(other, pc);
+                        let l = len(dir).max(1e-12);
+                        let t = (((u - pc[0]) * dir[0] + (v - pc[1]) * dir[1]) / l).clamp(0.0, 0.95 * l);
+                        if ed.grab == Grab::FilletStart {
+                            f.d1 = t;
+                        } else {
+                            f.d2 = t;
+                        }
+                    }
+                }
+                Grab::None => {}
             }
-        } else if ed.panning {
-            let dl = resp.drag_delta();
-            cu -= sx * dl.x as f64 / s;
-            cv += dl.y as f64 / s;
         }
     }
     if resp.drag_stopped() {
-        ed.drag = None;
-        ed.panning = false;
+        ed.grab = Grab::None;
     }
     ed.view = Some([cu, cv, s]);
     let to = |u: f64, v: f64| Pos2::new(c.x + (sx * (u - cu) * s) as f32, c.y - ((v - cv) * s) as f32);
@@ -810,7 +919,7 @@ pub fn show(
         let (a, b) = (d.pts[e[0]], d.pts[e[1]]);
         painter.line_segment([to(a[0], a[1]), to(b[0], b[1])], Stroke::new(2.0, Color32::from_rgb(30, 60, 120)));
     }
-    if ed.tool == DTool::Line {
+    if matches!(ed.tool, DTool::Line | DTool::Connect) {
         if let (Some(cur), Some(p)) = (ed.current, resp.hover_pos()) {
             let a = d.pts[cur];
             painter.line_segment([to(a[0], a[1]), p], Stroke::new(1.0, Color32::from_rgba_unmultiplied(30, 60, 120, 110)));
@@ -818,10 +927,13 @@ pub fn show(
     }
     for (i, q) in d.pts.iter().enumerate() {
         let pp = to(q[0], q[1]);
-        let active = ed.current == Some(i) && ed.tool == DTool::Line || ed.selected == Some(i);
+        let active = ed.current == Some(i) && matches!(ed.tool, DTool::Line | DTool::Connect) || ed.selected == Some(i);
         let (r, col) = if i == 0 { (8.0, Color32::from_rgb(210, 50, 40)) } else if active { (8.0, Color32::from_rgb(255, 140, 0)) } else { (6.0, Color32::from_rgb(30, 90, 200)) };
         painter.circle_filled(pp, r, col);
         painter.circle_stroke(pp, r, Stroke::new(1.5, Color32::WHITE));
+        if ed.current == Some(i) && matches!(ed.tool, DTool::Line | DTool::Connect) {
+            painter.circle_stroke(pp, r + 5.0, Stroke::new(2.5, Color32::from_rgb(255, 140, 0)));
+        }
     }
     if let Some(f) = ed.fillet.as_ref().filter(|f| f.p < d.pts.len() && f.a < d.pts.len() && f.b < d.pts.len()) {
         let curve: Vec<Pos2> = f.curve(d).iter().map(|q| to(q[0], q[1])).collect();
@@ -850,25 +962,90 @@ pub fn show(
         painter.circle_filled(hq, 12.0, Color32::from_rgba_unmultiplied(255, 255, 255, 220));
         painter.circle_stroke(hq, 12.0, Stroke::new(2.0, Color32::from_rgb(40, 150, 70)));
         painter.circle_filled(hq, 4.0, Color32::from_rgb(40, 150, 70));
+        let (gh, gv) = gizmo(hq, rect);
+        draw_gizmo(&painter, hq, gh, gv, matches!(ed.grab, Grab::FilletMidH), matches!(ed.grab, Grab::FilletMidV));
+    }
+    if let Some(i) = ed.selected.filter(|&i| i > 0 && i < d.pts.len() && matches!(ed.tool, DTool::Move | DTool::Point)) {
+        let pp = to(d.pts[i][0], d.pts[i][1]);
+        let (gh, gv) = gizmo(pp, rect);
+        draw_gizmo(&painter, pp, gh, gv, matches!(ed.grab, Grab::PointH(_)), matches!(ed.grab, Grab::PointV(_)));
     }
     let hint = match ed.tool {
-        DTool::Line => "Linha: toque num ponto e depois na tela para criar pontos ligados; toque num ponto existente para fechar o contorno",
+        DTool::Line => "Desenhar: a linha sai do ponto com anel laranja (no começo, a origem vermelha). Toque na tela para criar o próximo ponto; toque num ponto existente para ligar até ele",
         DTool::Point => "Ponto: toque na tela para criar um ponto solto",
-        DTool::Move => "Mover: arraste os pontos; arraste o fundo para mover a vista",
+        DTool::Move => "Mover: toque num ponto e arraste as setas (vermelha = horizontal, verde = vertical)",
         DTool::Split => "Dividir: toque numa linha para pôr um ponto no meio",
         DTool::Erase => "Apagar: toque num ponto ou numa linha",
         DTool::Bucket => "Balde: toque dentro de um contorno fechado para encher com o material",
-        DTool::Fillet => "Arredondar: toque num canto; arraste as setas (início/fim) e o círculo verde (forma) e toque em Aplicar",
+        DTool::Fillet => "Arredondar: toque num canto; as setas nas linhas ajustam início e fim, as setas do círculo verde ajustam a forma; depois toque em Aplicar",
+        DTool::Connect => "Ligar: toque em dois pontos para fazer uma linha entre eles",
     };
     let g = painter.layout(hint.to_string(), FontId::proportional(12.0), Color32::from_rgb(80, 90, 110), rect.width() - 16.0);
     painter.galley(rect.left_top() + Vec2::new(8.0, 6.0), g, Color32::from_rgb(80, 90, 110));
     if !ed.msg.is_empty() {
-        painter.text(rect.left_bottom() + Vec2::new(8.0, -8.0), Align2::LEFT_BOTTOM, &ed.msg, FontId::proportional(13.0), Color32::from_rgb(190, 110, 0));
+        painter.text(rect.left_bottom() + Vec2::new(8.0, -58.0), Align2::LEFT_BOTTOM, &ed.msg, FontId::proportional(13.0), Color32::from_rgb(190, 110, 0));
     }
+    // faixa de ferramentas na base do desenho (ícone em cima, nome embaixo)
+    let ctx = ui.ctx().clone();
+    let list: [(DTool, &str, &str); 8] = [
+        (DTool::Line, "✎", "Desenhar"),
+        (DTool::Connect, "↔", "Ligar"),
+        (DTool::Point, "•", "Ponto"),
+        (DTool::Move, "✥", "Mover"),
+        (DTool::Split, "✂", "Dividir"),
+        (DTool::Fillet, "◠", "Arredondar"),
+        (DTool::Erase, "⌫", "Apagar"),
+        (DTool::Bucket, "▧", "Balde"),
+    ];
+    let strip = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 50.0), rect.right_bottom());
+    painter.rect_filled(strip, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 240));
+    painter.line_segment([strip.left_top(), strip.right_top()], Stroke::new(1.0, Color32::from_rgb(215, 220, 228)));
+    egui::Area::new(egui::Id::new(("draw_tools", mode == Mode::Projectile))).order(egui::Order::Foreground).fixed_pos(strip.left_top() + Vec2::new(4.0, 3.0)).show(&ctx, |ui| {
+        ui.set_max_width(strip.width() - 8.0);
+        egui::ScrollArea::horizontal().id_salt(("tools_scroll", mode == Mode::Projectile)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
+                ui.spacing_mut().button_padding = Vec2::new(2.0, 2.0);
+                for (t, ic, l) in list {
+                    let on = ed.tool == t;
+                    let fg = if on { Color32::WHITE } else { Color32::from_gray(45) };
+                    let b = egui::Button::new(RichText::new(format!("{ic}\n{l}")).size(10.5).color(fg))
+                        .fill(if on { Color32::from_rgb(0, 112, 192) } else { Color32::TRANSPARENT })
+                        .corner_radius(8.0)
+                        .min_size(Vec2::new(40.0, 42.0));
+                    if ui.add(b).clicked() && !on {
+                        ed.tool = t;
+                        ed.msg.clear();
+                        if t != DTool::Fillet {
+                            ed.fillet = None;
+                        }
+                        if t == DTool::Connect {
+                            ed.current = None;
+                        }
+                    }
+                }
+            });
+        });
+    });
+    // desfazer / enquadrar / terminar linha (canto superior direito, abaixo da troca 2D/3D)
+    egui::Area::new(egui::Id::new(("draw_actions", mode == Mode::Projectile))).order(egui::Order::Foreground).pivot(Align2::RIGHT_TOP).fixed_pos(rect.right_top() + Vec2::new(-8.0, 84.0)).show(&ctx, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
+            if ui.add_enabled(!ed.undo.is_empty(), egui::Button::new("↶ Desfazer").corner_radius(14.0).min_size(Vec2::new(110.0, 28.0))).clicked() {
+                changed |= ed.undo(d);
+            }
+            if ui.add(egui::Button::new("Enquadrar").corner_radius(14.0).min_size(Vec2::new(110.0, 28.0))).clicked() {
+                ed.fit = true;
+            }
+            if ed.tool == DTool::Line && ed.current.is_some() && ui.add(egui::Button::new(RichText::new("✓ Terminar linha").strong()).corner_radius(14.0).min_size(Vec2::new(110.0, 28.0))).clicked() {
+                ed.current = None;
+            }
+        });
+    });
     if let Some(i) = ed.selected.filter(|&i| i < d.pts.len()) {
         let q = d.pts[i];
         let txt = if mode == Mode::Projectile { format!("ponto {}: a = {:.1} mm · r = {:.1} mm", i, q[0], q[1]) } else { format!("ponto {}: x = {:.1} mm · z = {:.1} mm", i, q[0], q[1]) };
-        painter.text(rect.right_bottom() + Vec2::new(-8.0, -8.0), Align2::RIGHT_BOTTOM, txt, FontId::proportional(12.0), Color32::from_rgb(40, 60, 100));
+        painter.text(rect.right_bottom() + Vec2::new(-8.0, -58.0), Align2::RIGHT_BOTTOM, txt, FontId::proportional(12.0), Color32::from_rgb(40, 60, 100));
     }
     changed
 }
