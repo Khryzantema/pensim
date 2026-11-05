@@ -164,6 +164,8 @@ pub struct Config {
     pub noise: f64,
     /// perturbação aleatória da posição dos nós, em fração de dx (quebra a anisotropia da malha)
     pub jitter: f64,
+    /// ignora a verificação de memória (o usuário escolheu continuar mesmo assim)
+    pub ignore_memory: bool,
 }
 
 impl Default for Config {
@@ -225,6 +227,7 @@ impl Preset {
             sleep_ratio: 0.03,
             noise: 0.15,
             jitter: 0.05,
+            ignore_memory: false,
         }
     }
 }
@@ -235,6 +238,21 @@ pub fn available_memory_mb() -> Option<f64> {
     let line = t.lines().find(|l| l.starts_with("MemAvailable:"))?;
     let kb: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(kb / 1024.0)
+}
+
+/// Swap livre (MB). No Android é zram (RAM comprimida): ajuda com dados frios, mas a simulação
+/// percorre tudo a cada passo, então só contamos uma fração dele.
+pub fn swap_free_mb() -> Option<f64> {
+    let t = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = t.lines().find(|l| l.starts_with("SwapFree:"))?;
+    let kb: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024.0)
+}
+
+/// Memória considerada utilizável: RAM livre + 25% do swap livre.
+pub fn usable_memory_mb() -> Option<f64> {
+    let ram = available_memory_mb()?;
+    Some(ram + 0.25 * swap_free_mb().unwrap_or(0.0))
 }
 
 impl Config {
@@ -267,11 +285,17 @@ impl Config {
     pub fn bonds_per_node(&self) -> f64 {
         4.19 * self.horizon_m.powi(3)
     }
-    /// Memória aproximada (MB): ligações + estado dos nós + quadros gravados.
+    /// Memória aproximada (MB) com quadros crus (36 B/nó/quadro).
     pub fn estimate_memory_mb(&self) -> f64 {
+        self.estimate_memory_with(false)
+    }
+
+    /// Memória aproximada (MB): ligações + estado dos nós + quadros (crus ou comprimidos ≈ 6 B/nó/quadro).
+    pub fn estimate_memory_with(&self, compressed: bool) -> f64 {
         let n = self.estimate_nodes() / self.sym_gain();
         let threads = std::thread::available_parallelism().map_or(4, |v| v.get()) as f64;
-        n * (self.bonds_per_node() * 10.0 + 150.0 + 32.0 * threads + 36.0 * self.n_frames as f64) / 1e6
+        let frame_b = if compressed { 6.0 } else { 36.0 };
+        n * (self.bonds_per_node() * 12.0 + 150.0 + 16.0 * threads * 4.0 + frame_b * self.n_frames as f64) / 1e6
     }
     pub fn obliquity(&self) -> f64 {
         self.obliquity_deg.to_radians()

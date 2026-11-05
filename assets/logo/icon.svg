@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#14304f"/>
+      <stop offset="0.55" stop-color="#0c1f36"/>
+      <stop offset="1" stop-color="#07111f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.62" r="0.55">
+      <stop offset="0" stop-color="#2aa3ff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#2aa3ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="top" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#cfd8e3"/>
+      <stop offset="0.5" stop-color="#9eabba"/>
+      <stop offset="1" stop-color="#7b8998"/>
+    </linearGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#68768a"/>
+      <stop offset="1" stop-color="#3a4553"/>
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4a5666"/>
+      <stop offset="1" stop-color="#2c3541"/>
+    </linearGradient>
+    <linearGradient id="cu" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffc58a"/>
+      <stop offset="0.45" stop-color="#e88a3a"/>
+      <stop offset="1" stop-color="#a9521a"/>
+    </linearGradient>
+    <linearGradient id="cu2" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#8f4214"/>
+      <stop offset="1" stop-color="#d9772f"/>
+    </linearGradient>
+    <radialGradient id="lead" cx="0.4" cy="0.35" r="0.8">
+      <stop offset="0" stop-color="#c9ced6"/>
+      <stop offset="0.6" stop-color="#7d8794"/>
+      <stop offset="1" stop-color="#4c5560"/>
+    </radialGradient>
+    <radialGradient id="crater" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#10161e"/>
+      <stop offset="0.7" stop-color="#27303b"/>
+      <stop offset="1" stop-color="#5b6877"/>
+    </radialGradient>
+    <clipPath id="topclip"><polygon points="132,598 548,432 900,556 484,742"/></clipPath>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="10"/></filter>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%"><feGaussianBlur stdDeviation="16"/></filter>
+    <clipPath id="icon"><rect width="1024" height="1024" rx="228"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#icon)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+    <rect width="1024" height="1024" fill="url(#glow)"/>
+    <!-- grade técnica -->
+    <g stroke="#2aa3ff" stroke-opacity="0.10" stroke-width="2">
+      <path d="M0 192H1024M0 320H1024M0 448H1024M0 576H1024M0 704H1024M0 832H1024M0 960H1024"/>
+      <path d="M128 0V1024M256 0V1024M384 0V1024M512 0V1024M640 0V1024M768 0V1024M896 0V1024"/>
+    </g>
+
+    <g transform="translate(512 505) scale(1.14) translate(-517 -640)">
+    <!-- sombra da placa -->
+    <polygon points="150,760 520,900 960,730 584,606" fill="#000" opacity="0.45" filter="url(#shadow)"/>
+
+    <!-- placa: laterais -->
+    <polygon points="132,598 484,742 484,846 132,702" fill="url(#front)"/>
+    <polygon points="484,742 900,556 900,660 484,846" fill="url(#side)"/>
+    <!-- aresta clara -->
+    <polyline points="132,598 484,742 900,556" fill="none" stroke="#e9eff6" stroke-opacity="0.55" stroke-width="3"/>
+    <!-- rebites -->
+    <g fill="#2b3440" stroke="#8b99aa" stroke-width="2">
+      <ellipse cx="190" cy="676" rx="10" ry="9"/><ellipse cx="260" cy="705" rx="10" ry="9"/>
+      <ellipse cx="330" cy="734" rx="10" ry="9"/><ellipse cx="400" cy="763" rx="10" ry="9"/>
+    </g>
+
+    <!-- placa: face superior -->
+    <polygon points="132,598 548,432 900,556 484,742" fill="url(#top)"/>
+    <!-- contornos de tensão (estilo MEF) recortados na face superior -->
+    <g clip-path="url(#topclip)">
+      <ellipse cx="516" cy="590" rx="372" ry="170" fill="#1d5cff" opacity="0.30"/>
+      <ellipse cx="516" cy="590" rx="300" ry="136" fill="#10b4ff" opacity="0.55"/>
+      <ellipse cx="516" cy="590" rx="236" ry="107" fill="#19d38a" opacity="0.70"/>
+      <ellipse cx="516" cy="590" rx="178" ry="81" fill="#c8e83a" opacity="0.82"/>
+      <ellipse cx="516" cy="590" rx="124" ry="56" fill="#ffb21f" opacity="0.92"/>
+      <ellipse cx="516" cy="590" rx="82" ry="37" fill="#ff5a1f"/>
+      <!-- brilho de reflexo -->
+      <polygon points="132,598 548,432 640,468 224,634" fill="#fff" opacity="0.10"/>
+    </g>
+    <!-- cratera -->
+    <ellipse cx="516" cy="594" rx="60" ry="26" fill="url(#crater)"/>
+    <ellipse cx="516" cy="590" rx="60" ry="26" fill="none" stroke="#e9eff6" stroke-opacity="0.35" stroke-width="3"/>
+
+    <g transform="translate(516 592) scale(1.32) translate(-516 -592)">
+    <!-- bala achatada (cogumelo): sombra de contato -->
+    <ellipse cx="516" cy="598" rx="118" ry="38" fill="#000" opacity="0.35" filter="url(#soft)"/>
+    <!-- pétalas da camisa de cobre abertas -->
+    <g stroke="#6b300e" stroke-width="3" stroke-linejoin="round" transform="translate(0 590) scale(1.08 0.62) translate(-0 -590) translate(-20 0)">
+      <path d="M398 578 Q372 560 360 574 Q372 590 392 596 Z" fill="url(#cu2)"/>
+      <path d="M430 548 Q412 516 392 522 Q394 546 414 566 Z" fill="url(#cu)"/>
+      <path d="M476 534 Q468 498 446 496 Q444 524 462 548 Z" fill="url(#cu)"/>
+      <path d="M538 530 Q548 494 572 494 Q574 522 556 546 Z" fill="url(#cu)"/>
+      <path d="M594 546 Q616 514 638 520 Q634 546 612 566 Z" fill="url(#cu)"/>
+      <path d="M632 576 Q662 560 674 574 Q662 592 640 598 Z" fill="url(#cu2)"/>
+      <path d="M408 606 Q386 628 400 640 Q424 634 440 616 Z" fill="url(#cu2)"/>
+      <path d="M624 606 Q648 628 632 642 Q608 634 594 616 Z" fill="url(#cu2)"/>
+    </g>
+    <!-- disco achatado do corpo -->
+    <ellipse cx="516" cy="584" rx="124" ry="46" fill="url(#cu2)" stroke="#6b300e" stroke-width="3"/>
+    <ellipse cx="516" cy="574" rx="112" ry="40" fill="url(#cu)" stroke="#8a3f10" stroke-width="2"/>
+    <!-- núcleo de chumbo expandido -->
+    <ellipse cx="516" cy="566" rx="74" ry="28" fill="url(#lead)" stroke="#3b434d" stroke-width="3"/>
+    <path d="M462 560 Q516 520 570 560 Q516 546 462 560 Z" fill="#fff" opacity="0.35"/>
+    <!-- linhas de deformação -->
+    <g stroke="#6b300e" stroke-opacity="0.55" stroke-width="3" fill="none" stroke-linecap="round">
+      <path d="M430 586 Q516 608 602 586"/>
+      <path d="M452 596 Q516 614 580 596"/>
+    </g>
+    <!-- brilho -->
+    <ellipse cx="470" cy="560" rx="34" ry="7" fill="#fff" opacity="0.35" transform="rotate(-12 470 560)"/>
+    </g>
+
+    <!-- partículas projetadas -->
+    <g fill="#ffd9a8" opacity="0.9">
+      <circle cx="338" cy="520" r="7"/><circle cx="702" cy="506" r="6"/><circle cx="312" cy="560" r="4.5"/>
+      <circle cx="724" cy="548" r="5"/><circle cx="392" cy="470" r="5"/><circle cx="650" cy="462" r="4.5"/>
+    </g>
+    </g>
+  </g>
+  <rect x="4" y="4" width="1016" height="1016" rx="224" fill="none" stroke="#2aa3ff" stroke-opacity="0.35" stroke-width="8"/>
+</svg>

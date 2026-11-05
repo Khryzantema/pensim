@@ -98,10 +98,11 @@ pub struct Sim {
     pub time: f64,
     pub dt: f64,
     pub step_count: u64,
-    pub frames: Vec<Frame>,
+    /// quadros gravados, comprimidos (veja `store`)
+    pub frames: Vec<crate::store::PackedFrame>,
     p: Vec<P>,
     /// buffers locais (fx, fy, fz, dT) por bloco de nós: forças acumuladas sem corridas
-    locals: Vec<Vec<[f64; 4]>>,
+    locals: Vec<Vec<[f32; 4]>>,
     cur_e_el: f64,
     cur_e_ct: f64,
     pos0: Vec<[f64; 3]>,
@@ -151,6 +152,14 @@ pub struct Sim {
     pub prof: [f64; 3],
     exit_found: bool,
     had_contact: bool,
+    compress_frames: bool,
+    /// instante em que o corpo principal se separou do alvo
+    sep_time: Option<f64>,
+    /// intervalo entre quadros [s] (dobra se gravar quadros demais)
+    frame_dt: f64,
+    captured: usize,
+    xcm0: f64,
+    x_exit: f64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -208,12 +217,19 @@ fn cell_coords(c: u32, g: &GridInfo) -> [i64; 3] {
 
 impl Sim {
     pub fn new(cfg: Config) -> Result<Sim, String> {
-        if let Some(av) = crate::config::available_memory_mb() {
-            let need = cfg.estimate_memory_mb();
-            if need > 0.85 * av {
+        // memória: quadros crus por padrão; comprimidos (zstd) só se a simulação estourar a memória
+        let mut compress_frames = false;
+        if let Some(av) = crate::config::usable_memory_mb() {
+            let raw = cfg.estimate_memory_with(false);
+            let packed = cfg.estimate_memory_with(true);
+            if raw > 0.6 * av {
+                compress_frames = true;
+            }
+            let need = if compress_frames { packed } else { raw };
+            if need > 0.85 * av && !cfg.ignore_memory {
                 return Err(format!(
-                    "Memória insuficiente: esta malha precisa de ≈{:.0} MB e há ≈{:.0} MB livres. Aumente o espaçamento (aba RESOLUÇÃO) ou reduza os quadros gravados.",
-                    need, av
+                    "Memória insuficiente: esta malha precisa de ≈{:.0} MB (já com compressão) e há ≈{:.0} MB utilizáveis (RAM livre + parte do swap). Aumente o espaçamento, reduza os quadros ou continue mesmo assim.",
+                    packed, av
                 ));
             }
         }
@@ -319,17 +335,36 @@ impl Sim {
             prof: [0.0; 3],
             exit_found: false,
             had_contact: false,
+            compress_frames,
+            sep_time: None,
+            // o evento real dura ~1/3 do tempo máximo (a simulação termina na separação + 25%)
+            frame_dt: cfg.t_end() / (3.0 * cfg.n_frames.max(1) as f64),
+            captured: 0,
+            xcm0: 0.0,
+            x_exit: 1.0,
             cfg,
         };
         sim.build_bonds(horizon);
         // blocos de trabalho: 4× as threads (melhor balanceamento, inclusive em núcleos heterogêneos),
         // limitados pela memória dos buffers locais (n_real × 32 B por bloco)
         let threads = rayon::current_num_threads().max(1);
-        let mem_cap = (48_000_000 / (n_real.max(1) * 32)).max(threads);
+        let mem_cap = (48_000_000 / (n_real.max(1) * 16)).max(threads);
         let nch = (threads * 4).min(mem_cap).max(1);
         sim.locals = (0..nch).map(|_| vec![[0.0; 4]; n_real]).collect();
         sim.dt = sim.stable_dt();
         sim.ke0 = sim.kinetic(Some(true));
+        {
+            let (mut sx, mut np) = (0.0, 0.0);
+            for i in 0..n_real {
+                if sim.part[i] < sim.n_proj {
+                    sx += sim.p[i].x;
+                    np += 1.0;
+                }
+            }
+            sim.xcm0 = sx / f64::max(np, 1.0);
+            // o corpo sai do alvo quando o centro de massa passa da face traseira + meio comprimento
+            sim.x_exit = sim.back_x + 0.5 * sim.cfg.design.projectile.length();
+        }
         if sim.cfg.sleep_ratio > 0.0 {
             // só o projétil começa acordado; a placa acorda onde recebe força (contato/ondas)
             sim.sleep_v = sim.cfg.sleep_ratio * sim.cfg.velocity;
@@ -341,6 +376,10 @@ impl Sim {
     }
 
     /// nós calculados (os quadros têm este tamanho)
+    /// `true` se os quadros estão sendo guardados comprimidos (zstd).
+    pub fn frames_compressed(&self) -> bool {
+        self.compress_frames
+    }
     pub fn n(&self) -> usize {
         self.n_real
     }
@@ -355,6 +394,30 @@ impl Sim {
     pub fn t_end(&self) -> f64 {
         self.t_end
     }
+    /// Progresso (0..1) pela **penetração**: até 80% conforme o centro de massa do projétil
+    /// avança até sair do alvo; os 20% finais cobrem a cauda de +25% após a separação.
+    /// Se o projétil não avança (retido/ricochete), usa o tempo.
+    pub fn progress(&self) -> f64 {
+        if self.done() {
+            return 1.0;
+        }
+        if let Some(ts) = self.sep_time {
+            let tail = (self.t_end - ts).max(1e-12);
+            return 0.8 + 0.2 * ((self.time - ts) / tail).clamp(0.0, 1.0);
+        }
+        let (mut sx, mut np) = (0.0, 0.0);
+        for i in 0..self.n_real {
+            if self.part[i] < self.n_proj {
+                sx += self.p[i].x;
+                np += 1.0;
+            }
+        }
+        let xcm = sx / f64::max(np, 1.0);
+        let p_pen = ((xcm - self.xcm0) / (self.x_exit - self.xcm0).max(1e-9)).clamp(0.0, 1.0);
+        let p_time = (self.time / self.t_end).clamp(0.0, 1.0);
+        (0.8 * p_pen).max(0.8 * p_time).min(0.8)
+    }
+
     pub fn done(&self) -> bool {
         self.time >= self.t_end
     }
@@ -719,17 +782,17 @@ impl Sim {
                             az += fz;
                             if tgt != i {
                                 let lt = &mut loc[tgt];
-                                lt[0] -= fx;
-                                lt[1] += sy * fy;
-                                lt[2] += sz * fz;
-                                lt[3] += dtemp;
+                                lt[0] -= (fx) as f32;
+                                lt[1] += (sy * fy) as f32;
+                                lt[2] += (sz * fz) as f32;
+                                lt[3] += (dtemp) as f32;
                             }
                             tot.e_el += wgt * 0.5 * cvv * s_el * s_el * w / ixi;
                         }
-                        loc[i][0] += ax;
-                        loc[i][1] += ay;
-                        loc[i][2] += az;
-                        loc[i][3] += acc_t;
+                        loc[i][0] += (ax) as f32;
+                        loc[i][1] += (ay) as f32;
+                        loc[i][2] += (az) as f32;
+                        loc[i][3] += (acc_t) as f32;
                         // contato por penalidade entre nós reais: cada par uma vez, só células "à frente"
                         let c0 = cell_coords(cell_of[i], &g);
                         for &(ox, oy, oz) in FORWARD.iter() {
@@ -754,12 +817,12 @@ impl Sim {
                                 let s = (r - rc) / rc;
                                 let kk = c_ct * s * v2 / r;
                                 let (fx, fy, fz) = (kk * rx, kk * ry, kk * rz);
-                                loc[i][0] += fx;
-                                loc[i][1] += fy;
-                                loc[i][2] += fz;
-                                loc[j][0] -= fx;
-                                loc[j][1] -= fy;
-                                loc[j][2] -= fz;
+                                loc[i][0] += (fx) as f32;
+                                loc[i][1] += (fy) as f32;
+                                loc[i][2] += (fz) as f32;
+                                loc[j][0] -= (fx) as f32;
+                                loc[j][1] -= (fy) as f32;
+                                loc[j][2] -= (fz) as f32;
                                 tot.e_ct += 0.5 * c_ct * s * s * rc * v2;
                             }
                         }
@@ -795,15 +858,15 @@ impl Sim {
                                             let s = (r - rc) / rc;
                                             let kk = c_ct * s * v2 / r;
                                             let (fx, fy, fz) = (kk * rx, kk * ry, kk * rz);
-                                            loc[i][0] += fx;
-                                            loc[i][1] += fy;
-                                            loc[i][2] += fz;
+                                            loc[i][0] += (fx) as f32;
+                                            loc[i][1] += (fy) as f32;
+                                            loc[i][2] += (fz) as f32;
                                             let wgt = if org == i { 0.5 } else {
                                                 let m = gmask[j - nr];
                                                 let (sy, sz) = (if m & 1 != 0 { 1.0 } else { -1.0 }, if m & 2 != 0 { 1.0 } else { -1.0 });
-                                                loc[org][0] -= fx;
-                                                loc[org][1] += sy * fy;
-                                                loc[org][2] += sz * fz;
+                                                loc[org][0] -= (fx) as f32;
+                                                loc[org][1] += (sy * fy) as f32;
+                                                loc[org][2] += (sz * fz) as f32;
                                                 1.0
                                             };
                                             tot.e_ct += wgt * 0.5 * c_ct * s * s * rc * v2;
@@ -829,10 +892,10 @@ impl Sim {
                 let mut f = [0.0f64; 4];
                 for l in locals {
                     let v = &l[i];
-                    f[0] += v[0];
-                    f[1] += v[1];
-                    f[2] += v[2];
-                    f[3] += v[3];
+                    f[0] += v[0] as f64;
+                    f[1] += v[1] as f64;
+                    f[2] += v[2] as f64;
+                    f[3] += v[3] as f64;
                 }
                 if !*awake {
                     // dormindo: acorda quando a força o aceleraria ao limiar de velocidade em ~10 passos
@@ -939,6 +1002,7 @@ impl Sim {
             self.had_contact = true;
         } else if self.had_contact && n_main > 0 {
             self.exit_found = true;
+            self.sep_time = Some(self.time);
             self.t_end = self.t_end.min(self.time * 1.25);
         }
     }
@@ -948,7 +1012,12 @@ impl Sim {
         while !self.done() {
             if self.time >= self.next_frame_t {
                 self.capture();
-                self.next_frame_t += self.t_end / self.cfg.n_frames.max(1) as f64;
+                self.captured += 1;
+                if self.captured > self.cfg.n_frames * 3 / 2 {
+                    self.frame_dt *= 2.0; // evento mais longo que o previsto: espaça mais
+                    self.captured = self.cfg.n_frames / 2;
+                }
+                self.next_frame_t += self.frame_dt;
             }
             for _ in 0..2 {
                 self.step();
@@ -1082,7 +1151,7 @@ impl Sim {
             }
         }
         let (e_el, e_ct) = (self.cur_e_el, self.cur_e_ct);
-        self.frames.push(Frame {
+        let frame = Frame {
             time: self.time,
             pos: self.p[..n].iter().map(|q| [q.x as f32, q.y as f32, q.z as f32]).collect(),
             speed: self.p[..n].iter().map(|q| (q.vx * q.vx + q.vy * q.vy + q.vz * q.vz).sqrt() as f32).collect(),
@@ -1098,7 +1167,8 @@ impl Sim {
             e_contact: e_ct * self.gfac,
             e_plastic: self.e_pl * self.gfac,
             e_fracture: self.e_fr * self.gfac,
-        });
+        };
+        self.frames.push(crate::store::PackedFrame::pack(&frame, self.compress_frames));
     }
 
     pub fn outcome(&self) -> Outcome {

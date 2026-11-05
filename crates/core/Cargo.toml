@@ -6,3 +6,4 @@ description = "Solver de impacto balístico 2D (peridinâmica com plasticidade, 
 
 [dependencies]
 rayon = "1"
+zstd = { version = "0.13", default-features = false }

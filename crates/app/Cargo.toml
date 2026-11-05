@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 pensim-core = { path = "../core" }
 log = "0.4"
+png = "0.17"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
@@ -24,6 +25,7 @@ android_logger = "0.14"
 
 # Empacotamento com `cargo apk build -p pensim-app --release`
 [package.metadata.android]
+resources = "res"
 package = "dev.pensim.ballistics"
 apk_name = "PenSim"
 build_targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android"]
@@ -34,6 +36,7 @@ target_sdk_version = 34
 
 [package.metadata.android.application]
 label = "PenSim Balística"
+icon = "@mipmap/ic_launcher"
 
 [package.metadata.android.application.activity]
 orientation = "fullSensor"

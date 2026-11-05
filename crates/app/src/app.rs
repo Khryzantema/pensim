@@ -3,7 +3,7 @@ use crate::sketch::{self, SketchEditor, Tool};
 use crate::view3d::{self, Camera, View};
 use crate::worker::{Job, SweepJob};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
-use pensim_core::{Ammo, Config, Core, Design, Frame, Layer, Model, Nose, Outcome, OutcomeKind, Preset, AMMO, LIBRARY};
+use pensim_core::{Ammo, Config, Core, Design, Frame, Layer, Model, Nose, Outcome, OutcomeKind, PackedFrame, Preset, AMMO, LIBRARY};
 use std::sync::atomic::AtomicBool;
 
 /// tempos médios do último intervalo [µs]: quadro inteiro, viewport 3D
@@ -108,6 +108,7 @@ enum ResTab {
     Summary,
     Charts,
     Limit,
+    Files,
 }
 
 struct Preview {
@@ -124,8 +125,49 @@ struct Preview {
 
 type Key = (Design, [f64; 8], [bool; 2]);
 
+/// Simulação aberta de um arquivo salvo.
+struct Loaded {
+    title: String,
+    frames: Vec<Arc<PackedFrame>>,
+    parts: Arc<Vec<u8>>,
+    surface: Arc<Vec<bool>>,
+    normals: Arc<Vec<[f32; 3]>>,
+    ref_pos: Arc<Vec<[f32; 3]>>,
+    sym: u8,
+    n: usize,
+    dt: f64,
+    steps: u64,
+    wall: f64,
+    t_end: f64,
+    back_x: f64,
+    outcome: Outcome,
+}
+
+struct SaveEntry {
+    path: std::path::PathBuf,
+    title: String,
+    frames: usize,
+    size: u64,
+}
+
+/// Pasta das simulações salvas (armazenamento interno do app no Android).
+fn saves_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "android")]
+    let base = crate::ANDROID_APP.get().and_then(|a| a.internal_data_path());
+    #[cfg(not(target_os = "android"))]
+    let base = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share/pensim"));
+    let dir = base.unwrap_or_else(|| std::path::PathBuf::from(".")).join("saves");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn mb(bytes: u64) -> f64 {
+    bytes as f64 / 1e6
+}
+
 struct Snap {
-    frames: Vec<Arc<Frame>>,
+    frames: Vec<Arc<PackedFrame>>,
+    back_x: f64,
     live: Option<Outcome>,
     done: bool,
     error: Option<String>,
@@ -134,6 +176,7 @@ struct Snap {
     steps: u64,
     wall: f64,
     sim_time: f64,
+    progress: f64,
     t_end: f64,
     sym: u8,
     normals: Arc<Vec<[f32; 3]>>,
@@ -148,8 +191,19 @@ pub struct PenSim {
     ammo_scale: f64,
     show_side: bool,
     show_fps: bool,
+    loaded: Option<Loaded>,
+    started_cfg: Option<Config>,
+    saves: Vec<SaveEntry>,
+    saves_dirty: bool,
+    save_msg: String,
+    /// quadro descomprimido em exibição: (id da simulação, índice, quadro)
+    decoded: Option<(u64, usize, Arc<Frame>)>,
+    job_id: u64,
+    logo_tex: Option<egui::TextureHandle>,
     /// esconde nós quase totalmente desligados (fragmentos soltos)
     hide_loose: bool,
+    hide_proj: bool,
+    hide_target: bool,
     /// contorno escuro na silhueta do projétil
     outline: bool,
     /// desenha os nós como esferas suaves em vez de quadrados
@@ -234,7 +288,17 @@ impl PenSim {
             ammo_scale: AMMO[ammo_idx].scale,
             show_side: true,
             show_fps: std::env::var("PENSIM_PROF").is_ok(),
+            loaded: None,
+            started_cfg: None,
+            saves: vec![],
+            saves_dirty: true,
+            save_msg: String::new(),
+            decoded: None,
+            job_id: 0,
+            logo_tex: crate::load_logo(&cc.egui_ctx),
             hide_loose: false,
+            hide_proj: false,
+            hide_target: false,
             outline: true,
             round_nodes: true,
             disc_tex: Some(view3d::disc_texture(&cc.egui_ctx)),
@@ -279,6 +343,9 @@ impl PenSim {
         if let Some(v) = std::env::var("PENSIM_DX").ok().and_then(|v| v.parse::<f64>().ok()) {
             me.cfg.dx = v / 1e3;
         }
+        if let Some(v) = std::env::var("PENSIM_ANGLE").ok().and_then(|v| v.parse::<f64>().ok()) {
+            me.cfg.obliquity_deg = v;
+        }
         if std::env::var("PENSIM_TARGET").is_ok() {
             me.ws = Ws::Target;
             me.cfg.design.layers.push(Layer { thickness: 0.008, gap_before: 0.004, width: 0.05, height: 0.05, round: false, material: LIBRARY[2].clone() });
@@ -293,6 +360,18 @@ impl PenSim {
             if let Ok(i) = a.parse::<usize>() {
                 me.load_ammo(i.min(AMMO.len() - 1), AMMO[i.min(AMMO.len() - 1)].scale);
             }
+        }
+        if std::env::var("PENSIM_OPENLATEST").is_ok() {
+            me.refresh_saves();
+            if let Some(e) = me.saves.first() {
+                let p = e.path.clone();
+                me.open_save(&p);
+            }
+            me.res_tab = ResTab::Files;
+            me.sheet_tab = 1;
+        }
+        if std::env::var("PENSIM_HIDETARGET").is_ok() {
+            me.hide_target = true;
         }
         if std::env::var("PENSIM_DEMO").is_ok() {
             me.start(&cc.egui_ctx);
@@ -354,7 +433,14 @@ impl PenSim {
     }
 
     fn start(&mut self, ctx: &egui::Context) {
+        self.start_with(ctx, false);
+    }
+
+    /// `force`: ignora a verificação de memória (o usuário escolheu continuar mesmo assim).
+    fn start_with(&mut self, ctx: &egui::Context, force: bool) {
         self.job = None;
+        self.job_id += 1;
+        self.decoded = None;
         self.range = [(0.0, 0.0); 7];
         self.view_idx = 0;
         self.autoplayed = false;
@@ -362,19 +448,26 @@ impl PenSim {
         self.play_pos = 0.0;
         self.started_at = std::time::Instant::now();
         self.started_key = Some(self.key());
-        self.job = Some(Job::spawn(self.cfg.clone(), ctx.clone()));
+        self.loaded = None;
+        let mut jcfg = self.cfg.clone();
+        jcfg.ignore_memory = force;
+        self.started_cfg = Some(self.cfg.clone());
+        self.job = Some(Job::spawn(jcfg, ctx.clone()));
         self.ws = Ws::Results;
         self.field = Field::VonMises;
         self.cam = Camera::front();
     }
 
     fn snapshot(&self) -> Snap {
+        if let (None, Some(l)) = (&self.job, &self.loaded) {
+            return Snap { frames: l.frames.clone(), back_x: l.back_x, live: Some(l.outcome.clone()), done: true, error: None, n: l.n, dt: l.dt, steps: l.steps, wall: l.wall, sim_time: l.t_end, progress: 1.0, t_end: l.t_end, sym: l.sym, normals: l.normals.clone(), parts: l.parts.clone(), surface: l.surface.clone(), ref_pos: l.ref_pos.clone() };
+        }
         match &self.job {
             Some(j) => {
                 let g = j.shared.lock().unwrap();
-                Snap { frames: g.frames.clone(), live: g.live.clone(), done: g.done, error: g.error.clone(), n: g.n, dt: g.dt, steps: g.steps, wall: g.wall, sim_time: g.sim_time, t_end: g.t_end, sym: g.sym, normals: g.normals.clone(), parts: g.parts.clone(), surface: g.surface.clone(), ref_pos: g.ref_pos.clone() }
+                Snap { frames: g.frames.clone(), back_x: g.back_x, live: g.live.clone(), done: g.done, error: g.error.clone(), n: g.n, dt: g.dt, steps: g.steps, wall: g.wall, sim_time: g.sim_time, progress: g.progress, t_end: g.t_end, sym: g.sym, normals: g.normals.clone(), parts: g.parts.clone(), surface: g.surface.clone(), ref_pos: g.ref_pos.clone() }
             }
-            None => Snap { frames: vec![], live: None, done: false, error: None, n: 0, dt: 0.0, steps: 0, wall: 0.0, sim_time: 0.0, t_end: 1.0, sym: 0, normals: Default::default(), parts: Default::default(), surface: Default::default(), ref_pos: Default::default() },
+            None => Snap { frames: vec![], back_x: 0.0, live: None, done: false, error: None, n: 0, dt: 0.0, steps: 0, wall: 0.0, sim_time: 0.0, progress: 0.0, t_end: 1.0, sym: 0, normals: Default::default(), parts: Default::default(), surface: Default::default(), ref_pos: Default::default() },
         }
     }
 
@@ -408,8 +501,8 @@ fn system_insets(ctx: &egui::Context) -> [f32; 4] {
                     l = (r.left as f32).clamp(0.0, dw);
                     rr = dw - l;
                 }
-                let cap = |v: f32| (v / ppp).min(64.0);
-                return [cap(l), cap(t), cap(rr), cap(b)];
+                let cap = |v: f32, m: f32| (v / ppp).min(m);
+                return [cap(l, 48.0), cap(t, 32.0), cap(rr, 48.0), cap(b, 32.0)];
             }
         }
     }
@@ -462,6 +555,11 @@ impl PenSim {
             }
         }
         self.view_idx = self.view_idx.min(snap.frames.len().saturating_sub(1));
+        if std::env::var("PENSIM_AUTOSAVE").is_ok() && snap.done && !snap.frames.is_empty() && self.loaded.is_none() && self.save_msg.is_empty() {
+            self.save_current(&snap);
+            self.res_tab = ResTab::Files;
+            self.sheet_tab = 1;
+        }
         self.refresh_preview();
         // painel de propriedades acompanha a aba: PROJÉTIL → projétil, ALVO → camada selecionada
         match self.ws {
@@ -479,7 +577,10 @@ impl PenSim {
         }
 
         // área segura: mantém a interface fora da barra de status, do recorte da câmera e da navegação
-        let sys = system_insets(&ctx);
+        let mut sys = system_insets(&ctx);
+        if ui.available_width() > ui.available_height() {
+            sys[1] = 0.0; // deitado: a faixa do topo fica igual à do celular em pé
+        }
         let inset = [sys[0] + self.extra_inset[0], sys[1] + self.extra_inset[1], sys[2] + self.extra_inset[2], sys[3] + self.extra_inset[3]];
         let blank = egui::Frame::NONE.fill(ctx.global_style().visuals.panel_fill);
         if inset[1] > 0.5 {
@@ -499,19 +600,21 @@ impl PenSim {
         COMPACT.store(is_compact, Ordering::Relaxed);
         // faixa do topo: sempre visível (na tela deitada é fina). Além da marca, ela mantém a
         // primeira linha de botões fora da barra de status e do recorte da câmera.
-        egui::Panel::top("title").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if is_compact {
-                    ui.label(RichText::new("PenSim").strong().size(13.0).color(ACCENT));
-                } else {
-                    ui.label(RichText::new("PenSim").strong().size(18.0).color(ACCENT));
-                    ui.label(RichText::new("· Simulação de impacto balístico 3D").weak());
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.weak(format!("{} threads", pensim_core::threads()));
+        egui::Panel::top("title")
+            .frame(egui::Frame::NONE.fill(ctx.global_style().visuals.panel_fill).inner_margin(egui::Margin::symmetric(8, 2)))
+            .show_separator_line(true)
+            .show(ui, |ui| {
+                // linha fina: sem a altura mínima de toque dos botões
+                ui.spacing_mut().interact_size.y = 22.0;
+                ui.horizontal(|ui| {
+                    if let Some(t) = &self.logo_tex {
+                        ui.image((t.id(), Vec2::splat(20.0)));
+                    }
+                    ui.label(RichText::new("PenSim").strong().size(16.0).color(ACCENT));
+                    ui.label(RichText::new("· Simulação de impacto balístico 3D").weak().size(12.0));
+                    ui.label(RichText::new(format!("· {} threads", pensim_core::threads())).weak().size(11.0));
                 });
             });
-        });
         egui::Panel::top("ribbon").show(ui, |ui| self.ribbon(ui, &ctx, &snap));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui, &snap));
 
@@ -640,6 +743,41 @@ impl PenSim {
         }
     }
 
+    /// Reescala **todo** o modelo (projétil, núcleo e camadas do alvo) pelo fator novo/atual,
+    /// preservando as edições. A velocidade não muda (similaridade geométrica).
+    fn rescale(&mut self, new_scale: f64) {
+        let f = new_scale / self.ammo_scale.max(1e-9);
+        if (f - 1.0).abs() < 1e-9 || !f.is_finite() {
+            return;
+        }
+        let d = &mut self.cfg.design;
+        for q in d.projectile.profile.iter_mut() {
+            q[0] *= f;
+            q[1] *= f;
+        }
+        if let Some(c) = d.projectile.core.as_mut() {
+            for q in c.profile.iter_mut() {
+                q[0] *= f;
+                q[1] *= f;
+            }
+        }
+        for l in d.layers.iter_mut() {
+            l.thickness *= f;
+            l.gap_before *= f;
+            l.width *= f;
+            l.height *= f;
+        }
+        self.ammo_scale = new_scale;
+    }
+
+    /// Controle de escala global (vale para projétil e alvo).
+    fn scale_control(&mut self, ui: &mut egui::Ui) {
+        let mut sc = self.ammo_scale;
+        if ui.add(egui::DragValue::new(&mut sc).prefix("escala ×").speed(0.01).range(0.03..=3.0).fixed_decimals(2)).on_hover_text("Escala TUDO: projétil e alvo (mesma velocidade). Preserva suas edições.").changed() {
+            self.rescale(sc);
+        }
+    }
+
     fn load_ammo(&mut self, idx: usize, scale: f64) {
         let keep = (self.cfg.velocity, self.cfg.obliquity_deg, self.cfg.dx, self.cfg.horizon_m, self.cfg.n_frames);
         let a = &AMMO[idx];
@@ -689,6 +827,17 @@ impl PenSim {
                             self.sketch.tsel = None;
                         }
                     });
+                    group(ui, "ESCALA DO MODELO", |ui| {
+                        self.scale_control(ui);
+                    });
+                    group(ui, "ÂNGULO DO ALVO", |ui| {
+                        ui.add(egui::DragValue::new(&mut self.cfg.obliquity_deg).range(0.0..=75.0).suffix(" °").speed(0.5).fixed_decimals(0));
+                        for deg in [0.0, 15.0, 30.0, 45.0, 60.0] {
+                            if ui.selectable_label((self.cfg.obliquity_deg - deg).abs() < 0.5, format!("{deg:.0}°")).clicked() {
+                                self.cfg.obliquity_deg = deg;
+                            }
+                        }
+                    });
                     group(ui, "GRADE", |ui| {
                         for s in [0.5, 1.0, 2.0] {
                             ui.selectable_value(&mut self.sketch.snap_mm, s, format!("{s} mm"));
@@ -715,10 +864,7 @@ impl PenSim {
                                 }
                             }
                         });
-                        let mut sc = self.ammo_scale;
-                        if ui.add(egui::DragValue::new(&mut sc).prefix("escala ×").speed(0.01).range(0.03..=3.0).fixed_decimals(2)).on_hover_text("Todas as dimensões × escala (mesma velocidade)").changed() {
-                            self.load_ammo(self.ammo_idx, sc);
-                        }
+                        self.scale_control(ui);
                     });
                     group(ui, "FERRAMENTAS DE ESBOÇO", |ui| {
                         for (t, i, l) in [(Tool::Move, "✥", "Mover"), (Tool::Add, "+", "Ponto"), (Tool::Delete, "✕", "Excluir")] {
@@ -827,6 +973,12 @@ impl PenSim {
                     if tbtn(ui, "◌", "Contorno", self.outline, true, 62.0).clicked() {
                         self.outline = !self.outline;
                     }
+                    if tbtn(ui, "◁", "Ocultar\nprojétil", self.hide_proj, true, 70.0).clicked() {
+                        self.hide_proj = !self.hide_proj;
+                    }
+                    if tbtn(ui, "▯", "Ocultar\nalvo", self.hide_target, true, 62.0).clicked() {
+                        self.hide_target = !self.hide_target;
+                    }
                 });
                 group(ui, "EXECUÇÃO", |ui| {
                     self.pause_btn(ui, snap);
@@ -918,12 +1070,14 @@ impl PenSim {
                 ui.selectable_value(&mut self.res_tab, ResTab::Summary, "Resumo");
                 ui.selectable_value(&mut self.res_tab, ResTab::Charts, "Gráficos");
                 ui.selectable_value(&mut self.res_tab, ResTab::Limit, "Limite");
+                ui.selectable_value(&mut self.res_tab, ResTab::Files, "Arquivos");
             });
             ui.separator();
             match self.res_tab {
                 ResTab::Summary => self.ui_summary(ui, snap),
                 ResTab::Charts => self.ui_charts(ui, snap),
                 ResTab::Limit => self.ui_limit(ui, ctx),
+                ResTab::Files => self.ui_files(ui, snap),
             }
             return;
         }
@@ -1100,7 +1254,7 @@ impl PenSim {
         let n = self.estimate_nodes();
         let bonds = self.cfg.bonds_per_node();
         let mem = self.cfg.estimate_memory_mb();
-        let free = pensim_core::available_memory_mb();
+        let free = pensim_core::usable_memory_mb();
         let base = Preset::Rifle762.config();
         let base_n = 30000.0_f64;
         let rel = (n / base_n) * (self.cfg.horizon_m / base.horizon_m).powi(3) * (base.dx / self.cfg.dx);
@@ -1115,7 +1269,7 @@ impl PenSim {
             ui.label("Ligações por nó");
             ui.label(format!("≈ {:.0}", bonds));
             ui.end_row();
-            ui.label("Memória estimada / livre");
+            ui.label("Memória estimada / utilizável");
             ui.label(match free {
                 Some(f) => format!("≈ {:.0} MB / {:.0} MB", mem, f),
                 None => format!("≈ {:.0} MB", mem),
@@ -1156,7 +1310,7 @@ impl PenSim {
     }
 
     fn progress_card(&mut self, ui: &mut egui::Ui, painter: &egui::Painter, rect: Rect, s: &Snap) {
-        let p = (s.sim_time / s.t_end.max(1e-12)).clamp(0.0, 1.0);
+        let p = s.progress.clamp(0.0, 1.0);
         let elapsed = self.started_at.elapsed().as_secs_f64();
         let eta = if p > 0.03 { Some(elapsed * (1.0 - p) / p) } else { None };
         let card = Rect::from_center_size(rect.center(), Vec2::new(rect.width().min(380.0) - 20.0, 150.0));
@@ -1180,9 +1334,134 @@ impl PenSim {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
     }
 
+    /// Aviso de memória recusada com o botão para continuar mesmo assim.
+    fn memory_override(&mut self, ui: &mut egui::Ui, err: &str) {
+        ui.colored_label(Color32::from_rgb(200, 50, 40), err);
+        if err.starts_with("Memória insuficiente") {
+            ui.weak("O app pode ficar lento ou ser fechado pelo Android se faltar memória de verdade.");
+            if ui.add_sized([ui.available_width(), 38.0], egui::Button::new(RichText::new("Ignorar e continuar mesmo assim").strong())).clicked() {
+                let ctx = ui.ctx().clone();
+                self.start_with(&ctx, true);
+            }
+        }
+    }
+
+    /// Estimativa do tamanho do arquivo (quadros sempre comprimidos).
+    fn estimate_save_bytes(snap: &Snap) -> u64 {
+        snap.frames.iter().map(|f| if f.is_compressed() { f.size_bytes() as u64 } else { f.size_bytes() as u64 / 6 }).sum::<u64>() + snap.parts.len() as u64 * 6
+    }
+
+    fn save_current(&mut self, snap: &Snap) {
+        let (Some(cfg), Some(outcome)) = (self.started_cfg.clone(), snap.live.clone()) else {
+            self.save_msg = "Nada para salvar.".into();
+            return;
+        };
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let title = format!("{} · {:.0} m/s{}", AMMO[self.ammo_idx].name, cfg.velocity, if cfg.obliquity_deg > 0.5 { format!(" · {:.0}°", cfg.obliquity_deg) } else { String::new() });
+        let data = pensim_core::save::SaveData {
+            title, velocity: cfg.velocity, obliquity_deg: cfg.obliquity_deg, dx: cfg.dx, design: cfg.design.clone(),
+            n_phys: snap.n, dt: snap.dt, steps: snap.steps, wall: snap.wall, t_end: snap.t_end, back_x: snap.back_x, sym: snap.sym, outcome,
+            parts: snap.parts.to_vec(), surface: snap.surface.to_vec(), normals: snap.normals.to_vec(), ref_pos: snap.ref_pos.to_vec(), frames: snap.frames.clone(),
+        };
+        let path = saves_dir().join(format!("sim_{secs}.psim"));
+        self.save_msg = match pensim_core::save::write(&path, &data) {
+            Ok(sz) => format!("Salvo: {} ({:.1} MB)", path.file_name().and_then(|n| n.to_str()).unwrap_or("?"), mb(sz)),
+            Err(e) => format!("Falha ao salvar: {e}"),
+        };
+        self.saves_dirty = true;
+    }
+
+    fn open_save(&mut self, path: &std::path::Path) {
+        let Some(d) = pensim_core::save::read(path) else {
+            self.save_msg = "Arquivo inválido ou de outra versão.".into();
+            return;
+        };
+        self.job = None;
+        self.job_id += 1;
+        self.decoded = None;
+        self.cfg.design = d.design.clone();
+        self.cfg.velocity = d.velocity;
+        self.cfg.obliquity_deg = d.obliquity_deg;
+        self.cfg.dx = d.dx;
+        self.started_cfg = Some(self.cfg.clone());
+        self.range = [(0.0, 0.0); 7];
+        self.view_idx = 0;
+        self.autoplayed = false;
+        self.playing = false;
+        self.play_pos = 0.0;
+        self.save_msg = format!("Aberto: {}", d.title);
+        self.loaded = Some(Loaded {
+            title: d.title, frames: d.frames, parts: Arc::new(d.parts), surface: Arc::new(d.surface), normals: Arc::new(d.normals), ref_pos: Arc::new(d.ref_pos),
+            sym: d.sym, n: d.n_phys, dt: d.dt, steps: d.steps, wall: d.wall, t_end: d.t_end, back_x: d.back_x, outcome: d.outcome,
+        });
+        self.ws = Ws::Results;
+    }
+
+    fn refresh_saves(&mut self) {
+        let mut v: Vec<SaveEntry> = std::fs::read_dir(saves_dir())
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().map_or(false, |x| x == "psim")).filter_map(|p| pensim_core::save::info(&p).map(|i| SaveEntry { path: p, title: i.title, frames: i.frames, size: i.size_bytes })).collect())
+            .unwrap_or_default();
+        v.sort_by(|a, b| b.path.cmp(&a.path));
+        self.saves = v;
+        self.saves_dirty = false;
+    }
+
+    fn ui_files(&mut self, ui: &mut egui::Ui, snap: &Snap) {
+        if self.saves_dirty {
+            self.refresh_saves();
+        }
+        ui.label(RichText::new("Salvar e abrir simulações").strong());
+        let ready = snap.done && !snap.frames.is_empty() && self.loaded.is_none();
+        let mem: u64 = snap.frames.iter().map(|f| f.size_bytes() as u64).sum();
+        if !snap.frames.is_empty() {
+            ui.label(format!("Na memória: {:.1} MB ({} quadros{}).", mb(mem), snap.frames.len(), if snap.frames.iter().any(|f| f.is_compressed()) { ", comprimidos" } else { "" }));
+            let est = Self::estimate_save_bytes(snap);
+            ui.label(format!("Arquivo estimado: ≈ {:.1} MB (sempre comprimido).", mb(est)));
+            if mb(mem) >= 150.0 {
+                ui.colored_label(Color32::from_rgb(190, 120, 0), "Simulação grande: salve para não perdê-la e liberar memória depois.");
+            }
+        }
+        if ui.add_enabled(ready, egui::Button::new(RichText::new("Salvar esta simulação").strong())).clicked() {
+            self.save_current(snap);
+        }
+        if !self.save_msg.is_empty() {
+            ui.weak(self.save_msg.clone());
+        }
+        ui.separator();
+        ui.label(RichText::new("Simulações salvas").strong());
+        if self.saves.is_empty() {
+            ui.weak("Nenhuma ainda.");
+        }
+        let mut open: Option<std::path::PathBuf> = None;
+        let mut del: Option<std::path::PathBuf> = None;
+        for e in &self.saves {
+            ui.group(|ui| {
+                ui.label(RichText::new(&e.title).strong());
+                ui.weak(format!("{} quadros · {:.1} MB · {}", e.frames, mb(e.size), e.path.file_name().and_then(|n| n.to_str()).unwrap_or("")));
+                ui.horizontal(|ui| {
+                    if ui.button("Abrir").clicked() {
+                        open = Some(e.path.clone());
+                    }
+                    if ui.button("Excluir").clicked() {
+                        del = Some(e.path.clone());
+                    }
+                });
+            });
+        }
+        if let Some(p) = open {
+            self.open_save(&p);
+        }
+        if let Some(p) = del {
+            let _ = std::fs::remove_file(&p);
+            self.saves_dirty = true;
+        }
+        let total: u64 = self.saves.iter().map(|e| e.size).sum();
+        ui.weak(format!("Total salvo: {:.1} MB", mb(total)));
+    }
+
     fn ui_summary(&mut self, ui: &mut egui::Ui, s: &Snap) {
         if let Some(e) = &s.error {
-            ui.colored_label(Color32::RED, e);
+            self.memory_override(ui, e);
             return;
         }
         let Some(o) = s.live.as_ref() else {
@@ -1222,7 +1501,7 @@ impl PenSim {
             return;
         }
         let fr = &s.frames;
-        let mk = |name: &'static str, color, g: &dyn Fn(&Frame) -> f64| Series { name, color, markers: false, pts: fr.iter().map(|f| (f.time * 1e6, g(f))).collect() };
+        let mk = |name: &'static str, color, g: &dyn Fn(&PackedFrame) -> f64| Series { name, color, markers: false, pts: fr.iter().map(|f| (f.time * 1e6, g(f))).collect() };
         line_plot(ui, 190.0, "Balanço de energia", "t [µs]", "J", &[
             mk("Cinética proj.", Color32::from_rgb(30, 110, 220), &|f| f.ke_proj),
             mk("Cinética alvo", Color32::from_rgb(30, 160, 90), &|f| f.ke_target),
@@ -1268,7 +1547,7 @@ impl PenSim {
     fn status_bar(&mut self, ui: &mut egui::Ui, s: &Snap) {
         if self.ws == Ws::Results && self.job.is_some() && !s.done && s.error.is_none() {
             ui.horizontal(|ui| {
-                let p = (s.sim_time / s.t_end.max(1e-12)).clamp(0.0, 1.0) as f32;
+                let p = s.progress.clamp(0.0, 1.0) as f32;
                 ui.add(egui::ProgressBar::new(p).desired_width((ui.available_width() - 130.0).max(80.0)).text(format!("calculando… {:.0}%", p * 100.0)));
                 ui.label(if self.running(s) { "● em execução" } else { "pausado" });
             });
@@ -1331,7 +1610,7 @@ impl PenSim {
         if self.ws == Ws::Target && !self.peek3d {
             let colors: Vec<Color32> = self.cfg.design.layers.iter().map(|l| mat_color(l.material.name)).collect();
             let proj = self.cfg.design.projectile.profile.clone();
-            sketch::show_target(ui, &mut self.sketch, &mut self.cfg.design.layers, &proj, &colors);
+            sketch::show_target(ui, &mut self.sketch, &mut self.cfg.design.layers, &proj, &colors, self.cfg.obliquity_deg);
             return;
         }
         if self.ws == Ws::Projectile && !self.peek3d {
@@ -1361,9 +1640,27 @@ impl PenSim {
         let view = View { cam: self.cam, rect, center: p.center, radius: p.radius };
 
         if let Some(e) = snap.error.as_ref().or(p.err.as_ref()) {
-            painter.text(rect.center(), Align2::CENTER_CENTER, e, FontId::proportional(15.0), Color32::from_rgb(190, 40, 40));
+            painter.text(rect.center() - Vec2::new(0.0, 30.0), Align2::CENTER_CENTER, e, FontId::proportional(14.0), Color32::from_rgb(190, 40, 40));
+            if e.starts_with("Memória insuficiente") {
+                let ctx2 = ui.ctx().clone();
+                egui::Area::new(egui::Id::new("mem_override")).anchor(Align2::CENTER_CENTER, Vec2::new(0.0, 10.0)).show(&ctx2, |ui| {
+                    if ui.add(egui::Button::new(RichText::new("Ignorar e continuar mesmo assim").strong()).min_size(Vec2::new(260.0, 38.0))).clicked() {
+                        self.start_with(&ctx2, true);
+                    }
+                });
+            }
         } else if results {
-            let f = &snap.frames[self.view_idx];
+            // só o quadro exibido é descomprimido (e fica em cache enquanto não muda)
+            let key = (self.job_id, self.view_idx);
+            let fr: Arc<Frame> = match &self.decoded {
+                Some((j, i, fr)) if (*j, *i) == key => fr.clone(),
+                _ => {
+                    let fr = snap.frames[self.view_idx].unpack();
+                    self.decoded = Some((key.0, key.1, fr.clone()));
+                    fr
+                }
+            };
+            let f = &*fr;
             let n = f.pos.len();
             // a simulação calcula só 1/2 ou 1/4 do modelo (simetria); as demais cópias são espelhadas aqui
             let masks: Vec<u8> = match snap.sym {
@@ -1385,6 +1682,10 @@ impl PenSim {
                         continue;
                     }
                     if self.hide_loose && f.damage[i] >= 0.9 {
+                        continue;
+                    }
+                    let is_p = snap.parts[i] < self.cfg.design.n_proj_parts() as u8;
+                    if (is_p && self.hide_proj) || (!is_p && self.hide_target) {
                         continue;
                     }
                     if snap.surface[i] || (self.section && near_face(ry)) || f.damage[i] > 0.4 {

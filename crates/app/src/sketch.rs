@@ -268,7 +268,7 @@ pub fn layer_spans(layers: &[Layer]) -> Vec<(f64, f64)> {
 
 /// Editor 2D (vista lateral x–z) do alvo: vértices frontal (folga) e traseiro (espessura)
 /// de cada camada; a seta vertical altera a altura. Retorna `true` se algo mudou.
-pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<Layer>, proj: &[[f64; 2]], colors: &[Color32]) -> bool {
+pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<Layer>, proj: &[[f64; 2]], colors: &[Color32], angle_deg: f64) -> bool {
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let rect = resp.rect;
     painter.rect_filled(rect, 0.0, Color32::from_rgb(250, 251, 253));
@@ -303,13 +303,23 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
     painter.line_segment([Pos2::new(rect.left(), origin.y), Pos2::new(rect.right(), origin.y)], Stroke::new(1.5, Color32::from_rgb(200, 60, 60)));
     painter.text(Pos2::new(rect.left() + 6.0, origin.y - 4.0), Align2::LEFT_BOTTOM, "eixo de voo", FontId::proportional(11.0), Color32::from_rgb(200, 60, 60));
 
-    // projétil de referência (ponta voltada para o alvo)
+    // projétil de referência na direção de impacto (ângulo medido a partir da normal da placa)
     if proj.len() >= 2 {
-        let tip_x = -0.6;
-        let mut poly: Vec<Pos2> = proj.iter().map(|p| to(tip_x - p[0] * 1e3 + 0.0, p[1] * 1e3)).collect();
-        let mut back: Vec<Pos2> = proj.iter().rev().map(|p| to(tip_x - p[0] * 1e3, -p[1] * 1e3)).collect();
+        let al = angle_deg.to_radians();
+        let d = (al.cos(), -al.sin()); // direção de voo no plano x–z (desce quando α > 0)
+        let v = (al.sin(), al.cos());
+        let tip = (-0.6 - 0.0, 0.0);
+        let world = |a: f64, r: f64| to(tip.0 - d.0 * a + v.0 * r, tip.1 - d.1 * a + v.1 * r);
+        let mut poly: Vec<Pos2> = proj.iter().map(|p| world(p[0] * 1e3, p[1] * 1e3)).collect();
+        let mut back: Vec<Pos2> = proj.iter().rev().map(|p| world(p[0] * 1e3, -p[1] * 1e3)).collect();
         poly.append(&mut back);
         painter.add(egui::Shape::convex_polygon(poly, Color32::from_rgba_unmultiplied(120, 130, 150, 90), Stroke::new(1.0, Color32::from_rgb(100, 110, 130))));
+        // seta da trajetória e rótulo do ângulo
+        let len = (plen + 12.0).max(25.0);
+        let a0 = world(len, 0.0);
+        let a1 = world(0.0, 0.0);
+        painter.line_segment([a0, a1], Stroke::new(1.5, Color32::from_rgb(200, 60, 60)));
+        painter.text(a0 + egui::Vec2::new(6.0, -6.0), Align2::LEFT_BOTTOM, format!("α = {angle_deg:.0}°"), FontId::proportional(13.0), Color32::from_rgb(200, 60, 60));
     }
 
     // camadas

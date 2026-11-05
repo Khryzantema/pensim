@@ -14,7 +14,7 @@ fn main() {
     s.run_to_end();
     let run = t.elapsed().as_secs_f64();
     let o = s.outcome();
-    let f = s.frames.last().unwrap();
+    let f = &s.frames.last().unwrap().unpack();
     let vm = f.von_mises.iter().cloned().fold(0.0f32, f32::max);
     println!("acordados no fim: {:.0}%", 100.0 * s.awake_fraction());
     println!("fases ms/passo: grade {:.2} forças {:.2} integração {:.2}", 1e3*s.prof[0]/s.step_count as f64, 1e3*s.prof[1]/s.step_count as f64, 1e3*s.prof[2]/s.step_count as f64);

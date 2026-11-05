@@ -1,14 +1,14 @@
 //! Threads de trabalho: a simulação nunca roda na thread de UI.
 //! Cada passo do solver ainda é paralelizado internamente com rayon.
 use pensim_core::sweep::{self, SweepPoint};
-use pensim_core::{Config, Frame, Outcome, Sim};
+use pensim_core::{Config, Outcome, PackedFrame, Sim};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct Shared {
-    pub frames: Vec<Arc<Frame>>,
+    pub frames: Vec<Arc<PackedFrame>>,
     pub live: Option<Outcome>,
     pub done: bool,
     pub error: Option<String>,
@@ -18,6 +18,7 @@ pub struct Shared {
     pub steps: u64,
     pub wall: f64,
     pub sim_time: f64,
+    pub progress: f64,
     pub back_x: f64,
     pub sym: u8,
     pub normals: Arc<Vec<[f32; 3]>>,
@@ -76,13 +77,14 @@ impl Job {
                 let t = Instant::now();
                 sim.advance_for(Duration::from_millis(60));
                 wall += t.elapsed().as_secs_f64();
-                let new: Vec<Arc<Frame>> = sim.frames.drain(..).map(Arc::new).collect();
+                let new: Vec<Arc<PackedFrame>> = sim.frames.drain(..).map(Arc::new).collect();
                 let live = sim.outcome();
                 let mut g = s.lock().unwrap();
                 g.frames.extend(new);
                 g.live = Some(live);
                 g.steps = sim.step_count;
                 g.sim_time = sim.time;
+                g.progress = sim.progress();
                 g.wall = wall;
                 g.t_end = sim.t_end();
                 g.done = sim.done();
