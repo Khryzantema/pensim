@@ -97,20 +97,15 @@ fn ammo_library_builds_valid_models() {
         let m = Model::build(&cfg).unwrap_or_else(|e| panic!("{}: {e}", a.name));
         assert!(m.pos.len() > 200 && m.pos.len() < 150_000, "{}: {} nós", a.name, m.pos.len());
         assert!(m.part.iter().any(|&p| p == 0), "{}", a.name);
-        // cavidade menor que ~0,8 nó de raio não aparece na malha (esperado para cargas pequenas)
-        if let Some(co) = &a.core {
-            let r_nodes = co.r_frac * (a.caliber_mm * a.scale / 2.0) / (cfg.dx * 1e3);
-            if r_nodes >= 1.0 {
-                assert!(m.part.iter().any(|&p| p == 1), "{}: sem nós de núcleo", a.name);
-                assert_eq!(m.n_proj, 2);
-            }
-        }
+        // todas as peças entram na contagem de peças do projétil
+        assert_eq!(m.n_proj as usize, cfg.design.n_proj_parts(), "{}", a.name);
+        assert!(m.part.iter().all(|&p| (p as usize) < cfg.design.materials().len()), "{}", a.name);
     }
 }
 
 #[test]
 fn scaled_projectile_with_core_runs() {
-    let a = AMMO.iter().find(|a| a.name.contains("M61")).unwrap();
+    let a = AMMO.iter().find(|a| a.name.contains("M61 (AP)")).unwrap();
     let mut c = a.config(a.scale);
     c.n_frames = 6;
     let mut s = Sim::new(c).unwrap();

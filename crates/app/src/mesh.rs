@@ -19,6 +19,8 @@ pub struct SurfMesh {
     pub verts: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub quads: Vec<Quad>,
+    /// fragmentos de um nó só (sem vizinho preso): desenhados como nós redondos
+    pub loose: Vec<u32>,
 }
 
 struct Lattice {
@@ -117,7 +119,8 @@ pub fn build(
     }
 
     let mut out = SurfMesh::default();
-    let mut vmap: HashMap<u64, u32> = HashMap::new();
+    // canto + nó de referência do grupo de células que ainda estão juntas → vértice
+    let mut vmap: HashMap<(u64, u32), u32> = HashMap::new();
     // deslocamento (atual − inicial) de um nó estendido
     let disp = |e: u32| -> [f32; 3] {
         let (mi, i) = ((e as usize) / n, (e as usize) % n);
@@ -125,10 +128,36 @@ pub fn build(
         let (a, b) = (flip(cur[i], m), flip(refp[i], m));
         [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
     };
+    // duas células vizinhas só "continuam juntas" se a posição relativa mudou menos que isso;
+    // senão houve trinca/separação: a face entre elas aparece e os cantos não são compartilhados
+    let tol2 = (0.75 * dx) * (0.75 * dx);
+    let together = |da: [f32; 3], v: u32| -> bool {
+        let db = disp(v);
+        let d = [db[0] - da[0], db[1] - da[1], db[2] - da[2]];
+        d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < tol2
+    };
     let mut outward: Vec<[f32; 3]> = Vec::new();
     for &(e, k, g) in &cells {
         let lat = if g == 1 { &proj } else { &targ };
         let gg = g as u64;
+        let de = disp(e as u32);
+        // fragmento isolado: nenhum dos 6 vizinhos continua preso a ele
+        let mut attached = false;
+        for ax in 0..3 {
+            for sgn in [-1i32, 1] {
+                let mut nk = k;
+                nk[ax] += sgn;
+                if let Some(&v) = map.get(&pack(gg, nk)) {
+                    if v & 0x8000_0000 == 0 && together(de, v) {
+                        attached = true;
+                    }
+                }
+            }
+        }
+        if !attached {
+            out.loose.push(e as u32);
+            continue;
+        }
         for ax in 0..3 {
             for sgn in [-1i32, 1] {
                 let mut nk = k;
@@ -137,6 +166,7 @@ pub fn build(
                 let cut = match nb {
                     None => false,
                     Some(v) if v & 0x8000_0000 != 0 => true,
+                    Some(v) if !together(de, v) => false, // trinca: face exposta
                     Some(_) => continue,
                 };
                 if out.quads.len() >= max_quads {
@@ -150,28 +180,29 @@ pub fn build(
                     c[ax] = base;
                     c[a1] = k[a1] + du;
                     c[a2] = k[a2] + dv;
-                    let key = pack(gg, c);
-                    let id = *vmap.entry(key).or_insert_with(|| {
-                        // média dos deslocamentos das 8 células em volta do canto
-                        let (mut acc, mut cnt) = ([0.0f32; 3], 0.0f32);
-                        for dz in 0..2 {
-                            for dy in 0..2 {
-                                for dxx in 0..2 {
-                                    let cc = [c[0] - dxx, c[1] - dy, c[2] - dz];
-                                    if let Some(&v) = map.get(&pack(gg, cc)) {
-                                        if v & 0x8000_0000 == 0 {
-                                            let dd = disp(v);
-                                            acc[0] += dd[0];
-                                            acc[1] += dd[1];
-                                            acc[2] += dd[2];
-                                            cnt += 1.0;
-                                        }
+                    // média dos deslocamentos das células em volta do canto que continuam presas a esta
+                    let (mut acc, mut cnt, mut rep) = ([0.0f32; 3], 0.0f32, e as u32);
+                    for dz in 0..2 {
+                        for dy in 0..2 {
+                            for dxx in 0..2 {
+                                let cc = [c[0] - dxx, c[1] - dy, c[2] - dz];
+                                if let Some(&v) = map.get(&pack(gg, cc)) {
+                                    if v & 0x8000_0000 == 0 && (v == e as u32 || together(de, v)) {
+                                        let dd = disp(v);
+                                        acc[0] += dd[0];
+                                        acc[1] += dd[1];
+                                        acc[2] += dd[2];
+                                        cnt += 1.0;
+                                        rep = rep.min(v);
                                     }
                                 }
                             }
                         }
+                    }
+                    let key = (pack(gg, c), rep);
+                    let id = *vmap.entry(key).or_insert_with(|| {
                         let p = lat.corner(c);
-                        let inv = if cnt > 0.0 { 1.0 / cnt } else { 0.0 };
+                        let inv = 1.0 / cnt.max(1.0);
                         out.verts.push(turn([p[0] + acc[0] * inv, p[1] + acc[1] * inv, p[2] + acc[2] * inv]));
                         (out.verts.len() - 1) as u32
                     });

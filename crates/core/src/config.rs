@@ -71,6 +71,51 @@ pub struct Projectile {
     pub material: Material,
     /// região interna de outro material (núcleo de aço, carga, traçante…)
     pub core: Option<Core>,
+    /// peças internas (camisa, capuz, para-brisa oco, carga, cinta…), aplicadas em ordem:
+    /// a última que contém o ponto decide o material. Têm prioridade sobre o núcleo.
+    pub regions: Vec<Region>,
+}
+
+/// O que preenche uma região do projétil.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Fill {
+    /// vazio (interior do para-brisa balístico, cavidade de ar)
+    Void,
+    /// material do corpo
+    Body,
+    Mat(Material),
+}
+
+/// Peça do projétil: sólido de revolução entre `inner(a)` e `outer(a)` (raios em função da
+/// distância da ponta). `inner` vazio = maciço. Fora do intervalo de `a` do perfil não vale.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Region {
+    pub name: String,
+    pub outer: Vec<[f64; 2]>,
+    pub inner: Vec<[f64; 2]>,
+    pub fill: Fill,
+}
+
+impl Region {
+    /// `min_wall`: cascas mais finas que isso (camisa, para-brisa, cinta) são engrossadas para
+    /// dentro até essa espessura, para não sumirem entre os nós da malha.
+    pub fn contains(&self, a: f64, rho: f64, min_wall: f64) -> bool {
+        let ro = profile_radius(&self.outer, a);
+        if ro < 0.0 || rho > ro + 1e-12 {
+            return false;
+        }
+        if self.inner.is_empty() {
+            return true;
+        }
+        let ri = profile_radius(&self.inner, a);
+        ri < 0.0 || rho > ri.min(ro - min_wall) + 1e-12
+    }
+    pub fn scale(&mut self, f: f64) {
+        for q in self.outer.iter_mut().chain(self.inner.iter_mut()) {
+            q[0] *= f;
+            q[1] *= f;
+        }
+    }
 }
 
 /// Região interna do projétil; tem prioridade sobre o material externo.
@@ -105,6 +150,55 @@ impl Projectile {
     pub fn max_radius(&self) -> f64 {
         self.profile.iter().map(|p| p[1]).fold(0.0, f64::max)
     }
+    /// Índice da peça (0 = corpo, 1 = núcleo, depois as regiões com material próprio) do ponto
+    /// (a, ρ) já dentro do perfil externo; `None` = vazio.
+    pub fn part_at(&self, a: f64, rho: f64, min_wall: f64) -> Option<u8> {
+        let mut part = 0u8;
+        if let Some(c) = &self.core {
+            if rho <= profile_radius(&c.profile, a) + 1e-12 {
+                part = 1;
+            }
+        }
+        let mut next = 1 + self.core.is_some() as u8;
+        let mut void = false;
+        for r in &self.regions {
+            let idx = if matches!(r.fill, Fill::Mat(_)) {
+                next += 1;
+                next - 1
+            } else {
+                0
+            };
+            if r.contains(a, rho, min_wall) {
+                match r.fill {
+                    Fill::Void => void = true,
+                    Fill::Body => {
+                        void = false;
+                        part = 0;
+                    }
+                    Fill::Mat(_) => {
+                        void = false;
+                        part = idx;
+                    }
+                }
+            }
+        }
+        if void { None } else { Some(part) }
+    }
+    pub fn scale(&mut self, f: f64) {
+        for q in self.profile.iter_mut() {
+            q[0] *= f;
+            q[1] *= f;
+        }
+        if let Some(c) = self.core.as_mut() {
+            for q in c.profile.iter_mut() {
+                q[0] *= f;
+                q[1] *= f;
+            }
+        }
+        for r in self.regions.iter_mut() {
+            r.scale(f);
+        }
+    }
 }
 
 /// Camada do alvo (extrusão de retângulo ou disco ao longo de x).
@@ -129,13 +223,18 @@ pub struct Design {
 impl Design {
     /// Número de peças do projétil (1 ou 2 com núcleo).
     pub fn n_proj_parts(&self) -> usize {
-        1 + self.projectile.core.is_some() as usize
+        1 + self.projectile.core.is_some() as usize + self.projectile.regions.iter().filter(|r| matches!(r.fill, Fill::Mat(_))).count()
     }
     /// Materiais por peça: projétil, núcleo (se houver), camadas do alvo.
     pub fn materials(&self) -> Vec<Material> {
         let mut v = vec![self.projectile.material.clone()];
         if let Some(c) = &self.projectile.core {
             v.push(c.material.clone());
+        }
+        for r in &self.projectile.regions {
+            if let Fill::Mat(m) = &r.fill {
+                v.push(m.clone());
+            }
         }
         v.extend(self.layers.iter().map(|l| l.material.clone()));
         v
@@ -207,7 +306,7 @@ impl Preset {
             thickness: t, gap_before: 0.0, width: w, height: w, round: false, material: mat(m),
         };
         let proj = |nose: Nose, d: f64, l: f64, m: usize| Projectile {
-            profile: nose.profile(d, l), material: mat(m), core: None,
+            profile: nose.profile(d, l), material: mat(m), core: None, regions: vec![],
         };
         let (projectile, layers, velocity) = match self {
             Preset::Rifle762 => (proj(Nose::Ogive, 0.00762, 0.028, 0), vec![layer(0.016, 0.06, 0)], 800.0),

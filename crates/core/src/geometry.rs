@@ -115,8 +115,9 @@ pub fn hash_unit(a: u64, b: u64, c: u64, d: u64) -> f64 {
                     let v = (iv as f64 - (nw as f64 - 1.0) / 2.0) * dx;
                     let rho = (u * u + v * v).sqrt();
                     if rho <= ra + 1e-12 {
-                        let in_core = pr.core.as_ref().map_or(false, |c| rho <= crate::config::profile_radius(&c.profile, a) + 1e-12);
-                        ploc.push((a, u, v, in_core as u8));
+                        if let Some(part) = pr.part_at(a, rho, dx) {
+                            ploc.push((a, u, v, part));
+                        }
                     }
                 }
             }

@@ -16,7 +16,7 @@ pub mod store;
 pub mod sweep;
 
 pub use ammo::{Ammo, AMMO};
-pub use config::{available_memory_mb, swap_free_mb, usable_memory_mb, Config, Core, Design, Layer, Nose, Preset, Projectile};
+pub use config::{available_memory_mb, swap_free_mb, usable_memory_mb, Config, Core, Design, Fill, Layer, Nose, Preset, Projectile, Region};
 pub use geometry::Model;
 pub use material::{Material, LIBRARY};
 pub use store::PackedFrame;

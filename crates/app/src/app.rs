@@ -255,7 +255,13 @@ pub struct PenSim {
 
 fn mat_color(name: &str) -> Color32 {
     let c = |r, g, b| Color32::from_rgb(r, g, b);
-    if name.contains("Aço") { c(118, 134, 156) }
+    if name.contains("capuz") { c(150, 92, 70) }
+    else if name.contains("Latão") { c(201, 162, 72) }
+    else if name.contains("Enchimento") { c(214, 120, 40) }
+    else if name.contains("Urânio") { c(80, 96, 70) }
+    else if name.contains("Carboneto") { c(52, 60, 70) }
+    else if name.contains("Aço doce") { c(150, 160, 172) }
+    else if name.contains("Aço") { c(118, 134, 156) }
     else if name.contains("Alum") { c(190, 197, 206) }
     else if name.contains("Tit") { c(150, 140, 172) }
     else if name.contains("tungst") { c(64, 96, 108) }
@@ -389,6 +395,12 @@ impl PenSim {
             me.res_tab = ResTab::Files;
             me.sheet_tab = 1;
         }
+        if let Some(k) = std::env::var("PENSIM_AMMO").ok().and_then(|v| v.parse::<usize>().ok()) {
+            if k < AMMO.len() {
+                me.ammo_idx = k;
+                me.load_ammo(k, 1.0);
+            }
+        }
         if std::env::var("PENSIM_SIDE").is_ok() {
             me.cam = Camera::front();
         }
@@ -423,16 +435,7 @@ impl PenSim {
     fn scaled_cfg(&self) -> Config {
         let f = self.model_scale();
         let mut c = self.cfg.clone();
-        for q in c.design.projectile.profile.iter_mut() {
-            q[0] *= f;
-            q[1] *= f;
-        }
-        if let Some(core) = c.design.projectile.core.as_mut() {
-            for q in core.profile.iter_mut() {
-                q[0] *= f;
-                q[1] *= f;
-            }
-        }
+        c.design.projectile.scale(f);
         for l in c.design.layers.iter_mut() {
             l.thickness *= f;
             l.gap_before *= f;
@@ -840,10 +843,10 @@ impl PenSim {
                         let l = &mut self.cfg.design.layers[sel];
                         let (mut g, mut t, mut h, mut w) = (l.gap_before * 1e3 / u, l.thickness * 1e3 / u, l.height * 1e3 / u, l.width * 1e3 / u);
                         ui.label(format!("#{}", sel + 1));
-                        ui.add_enabled(sel > 0, egui::DragValue::new(&mut g).prefix("folga ").suffix(" mm").speed(0.5).range(0.0..=80.0 / u).fixed_decimals(0));
-                        ui.add(egui::DragValue::new(&mut t).prefix("esp. ").suffix(" mm").speed(1.0).range(1.0 / u..=400.0 / u).fixed_decimals(0));
-                        ui.add(egui::DragValue::new(&mut h).prefix("alt. ").suffix(" mm").speed(1.0).range(20.0 / u..=500.0 / u).fixed_decimals(0));
-                        ui.add_enabled(!l.round, egui::DragValue::new(&mut w).prefix("larg. ").suffix(" mm").speed(1.0).range(20.0 / u..=500.0 / u).fixed_decimals(0));
+                        ui.add_enabled(sel > 0, egui::DragValue::new(&mut g).prefix("folga ").suffix(" mm").speed(0.5).range(0.0..=f64::MAX).fixed_decimals(0));
+                        ui.add(egui::DragValue::new(&mut t).prefix("esp. ").suffix(" mm").speed(1.0).range(0.5..=f64::MAX).fixed_decimals(0));
+                        ui.add(egui::DragValue::new(&mut h).prefix("alt. ").suffix(" mm").speed(1.0).range(1.0..=f64::MAX).fixed_decimals(0));
+                        ui.add_enabled(!l.round, egui::DragValue::new(&mut w).prefix("larg. ").suffix(" mm").speed(1.0).range(1.0..=f64::MAX).fixed_decimals(0));
                         ui.checkbox(&mut l.round, "Disco");
                         l.gap_before = g * u / 1e3;
                         l.thickness = t * u / 1e3;
@@ -1163,7 +1166,7 @@ impl PenSim {
                     ui.label(format!("{:.1} g", am.mass_g));
                     ui.end_row();
                 });
-                ui.weak("Valores aproximados. Camisas finas (cobre/latão) ficam abaixo da resolução da malha e não são modeladas.");
+                ui.weak("Montada peça por peça a partir de cortes técnicos (medidas aproximadas, massa conferida com a real). Peças mais finas que um nó são engrossadas até um nó.");
                 ui.separator();
                 ui.label("Material do corpo:");
                 mat_combo(ui, "pm", &mut self.cfg.design.projectile.material);
@@ -1181,6 +1184,38 @@ impl PenSim {
                             let (l, r) = (pr.length(), pr.max_radius());
                             pr.core = Some(Core { profile: vec![[0.1 * l, 0.55 * r], [0.8 * l, 0.55 * r]], material: LIBRARY[11].clone() });
                         }
+                    }
+                }
+                // peças internas da munição (camisa, capuz, para-brisa, carga…)
+                let pr = &mut self.cfg.design.projectile;
+                if !pr.regions.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new("Peças").strong());
+                    let mut remove = None;
+                    for (k, g) in pr.regions.iter_mut().enumerate() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(&g.name);
+                            match &mut g.fill {
+                                pensim_core::Fill::Void => {
+                                    ui.weak("(vazio)");
+                                }
+                                pensim_core::Fill::Body => {
+                                    ui.weak("(material do corpo)");
+                                }
+                                pensim_core::Fill::Mat(m) => {
+                                    ui.colored_label(mat_color(m.name), "■");
+                                }
+                            }
+                            if ui.small_button("✕").on_hover_text("Remover peça").clicked() {
+                                remove = Some(k);
+                            }
+                        });
+                        if let pensim_core::Fill::Mat(m) = &mut g.fill {
+                            mat_combo(ui, &format!("rg{k}"), m);
+                        }
+                    }
+                    if let Some(k) = remove {
+                        pr.regions.remove(k);
                     }
                 }
                 let p = &self.cfg.design.projectile;
@@ -1201,17 +1236,18 @@ impl PenSim {
                 // medidas REAIS (o modelo guarda × escala)
                 let u = self.ammo_scale.max(1e-6);
                 let (mut t, mut g, mut w, mut h) = (l.thickness * 1e3 / u, l.gap_before * 1e3 / u, l.width * 1e3 / u, l.height * 1e3 / u);
-                ui.add(egui::Slider::new(&mut t, 2.0..=1500.0).logarithmic(true).text("espessura real mm"));
-                ui.add(egui::Slider::new(&mut g, 0.0..=300.0).text("folga antes mm"));
-                ui.add(egui::Slider::new(&mut w, 20.0..=2000.0).logarithmic(true).text(if l.round { "diâmetro real mm" } else { "largura real mm" }));
+                ui.add(egui::Slider::new(&mut t, 2.0..=1500.0).logarithmic(true).clamping(egui::SliderClamping::Never).text("espessura real mm"));
+                ui.add(egui::Slider::new(&mut g, 0.0..=300.0).clamping(egui::SliderClamping::Never).text("folga antes mm"));
+                ui.add(egui::Slider::new(&mut w, 20.0..=2000.0).logarithmic(true).clamping(egui::SliderClamping::Never).text(if l.round { "diâmetro real mm" } else { "largura real mm" }));
                 if !l.round {
-                    ui.add(egui::Slider::new(&mut h, 20.0..=2000.0).logarithmic(true).text("altura real mm"));
+                    ui.add(egui::Slider::new(&mut h, 20.0..=2000.0).logarithmic(true).clamping(egui::SliderClamping::Never).text("altura real mm"));
                 }
                 ui.checkbox(&mut l.round, "Seção circular (disco)");
-                l.thickness = t * u / 1e3;
-                l.gap_before = g * u / 1e3;
-                l.width = w * u / 1e3;
-                l.height = h * u / 1e3;
+                // sem limite superior; só evita valores nulos/negativos digitados
+                l.thickness = t.max(0.5) * u / 1e3;
+                l.gap_before = g.max(0.0) * u / 1e3;
+                l.width = w.max(1.0) * u / 1e3;
+                l.height = h.max(1.0) * u / 1e3;
                 ui.horizontal(|ui| {
                     if ui.add_enabled(i > 0, egui::Button::new("▲ Subir")).clicked() {
                         self.cfg.design.layers.swap(i, i - 1);
@@ -1679,8 +1715,9 @@ impl PenSim {
         }
         if self.ws == Ws::Projectile && !self.peek3d {
             let fill = mat_color(self.cfg.design.projectile.material.name);
-            let core = self.cfg.design.projectile.core.as_ref().map(|c| (c.profile.clone(), mat_color(c.material.name)));
-            sketch::show(ui, &mut self.sketch, &mut self.cfg.design.projectile.profile, fill, core.as_ref().map(|(p, c)| (p.as_slice(), *c)), self.ammo_scale);
+            let pr = self.cfg.design.projectile.clone();
+            let cols: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
+            sketch::show(ui, &mut self.sketch, &mut self.cfg.design.projectile.profile, fill, Some((&pr, &cols)), self.ammo_scale);
             return;
         }
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
@@ -1855,6 +1892,7 @@ impl PenSim {
                             rainbow((data[e % n] * sc_f - lo) / (hi - lo), bands)
                         }
                     });
+                    view3d::render(&painter, &view, dx, &ext_pos, &sm.loose, false, None, self.disc_tex.as_ref().map(|t| t.id()), &|i| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands));
                 } else {
                     view3d::render(&painter, &view, dx, &ext_pos, &idx, false, Some(&light), round_id, &|i| {
                         if plain[i] {
@@ -1874,6 +1912,7 @@ impl PenSim {
                 let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
                 if let Some(sm) = &faces_mesh {
                     view3d::render_surf(&painter, &view, sm, ld, &|e, _| mats[(parts[e % n] as usize).min(mats.len() - 1)]);
+                    view3d::render(&painter, &view, dx, &ext_pos, &sm.loose, true, None, self.disc_tex.as_ref().map(|t| t.id()), &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
                 } else {
                     view3d::render(&painter, &view, dx, &ext_pos, &idx, true, Some(&light), round_id, &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
                 }

@@ -75,7 +75,8 @@ fn arrow_dir(painter: &egui::Painter, c: Pos2, d: egui::Vec2, col: Color32, acti
 
 /// Retorna `true` se o perfil mudou. `profile` em metros: (a = distância da ponta, r = raio).
 /// `unit`: escala do modelo; os textos mostram medidas REAIS (valor do modelo ÷ unit).
-pub fn show(ui: &mut egui::Ui, ed: &mut SketchEditor, profile: &mut Vec<[f64; 2]>, fill: Color32, core: Option<(&[[f64; 2]], Color32)>, unit: f64) -> bool {
+/// `parts`: projétil completo (para desenhar as peças internas) e a cor de cada peça.
+pub fn show(ui: &mut egui::Ui, ed: &mut SketchEditor, profile: &mut Vec<[f64; 2]>, fill: Color32, parts: Option<(&pensim_core::Projectile, &[Color32])>, unit: f64) -> bool {
     let unit = unit.max(1e-6);
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let rect = resp.rect;
@@ -121,22 +122,37 @@ pub fn show(ui: &mut egui::Ui, ed: &mut SketchEditor, profile: &mut Vec<[f64; 2]
         poly.append(&mut back);
         painter.add(egui::Shape::closed_line(poly, Stroke::new(2.0, Color32::from_rgb(30, 60, 120))));
     }
-    // núcleo (somente exibição)
-    if let Some((cp, cc)) = core {
-        if cp.len() >= 2 {
-            let c = Color32::from_rgba_unmultiplied(cc.r(), cc.g(), cc.b(), 210);
-            let mut mesh = egui::Mesh::default();
-            for w in cp.windows(2) {
-                let q = [to(w[0][0] * 1e3, w[0][1] * 1e3), to(w[1][0] * 1e3, w[1][1] * 1e3), to(w[1][0] * 1e3, -w[1][1] * 1e3), to(w[0][0] * 1e3, -w[0][1] * 1e3)];
-                let base = mesh.vertices.len() as u32;
-                for p in q {
-                    mesh.colored_vertex(p, c);
-                }
-                mesh.add_triangle(base, base + 1, base + 2);
-                mesh.add_triangle(base, base + 2, base + 3);
+    // peças internas (somente exibição): corte amostrado com a mesma regra da malha
+    if let Some((pr, cols)) = parts {
+        let (na, nr) = (220usize, 70usize);
+        let da = len / na as f64;
+        let dr = rmax / nr as f64;
+        let mut mesh = egui::Mesh::default();
+        let bg = Color32::from_rgb(250, 251, 253);
+        for ia in 0..na {
+            let a = (ia as f64 + 0.5) * da;
+            let ro = pr.radius_at(a * 1e-3) * 1e3;
+            if ro <= 0.0 {
+                continue;
             }
-            painter.add(egui::Shape::mesh(mesh));
+            for ir in 0..nr {
+                let r = (ir as f64 + 0.5) * dr;
+                if r > ro {
+                    break;
+                }
+                let col = match pr.part_at(a * 1e-3, r * 1e-3, 0.0) {
+                    None => bg,
+                    Some(0) => continue,
+                    Some(k) => cols.get(k as usize).copied().unwrap_or(Color32::GRAY),
+                };
+                for sgn in [1.0, -1.0] {
+                    let p0 = to(a - 0.5 * da, sgn * (r - 0.5 * dr));
+                    let p1 = to(a + 0.5 * da, sgn * (r + 0.5 * dr));
+                    mesh.add_colored_rect(egui::Rect::from_two_pos(p0, p1).expand(0.3), col);
+                }
+            }
         }
+        painter.add(egui::Shape::mesh(mesh));
     }
     // cotas
     painter.text(to(len / 2.0, -rmax - 2.0), Align2::CENTER_TOP, format!("L = {:.1} mm   ⌀ máx = {:.1} mm (reais)", len / unit, rmax * 2.0 / unit), FontId::proportional(13.0), Color32::from_rgb(40, 60, 100));
@@ -447,7 +463,7 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
         false
     };
     let apply_y = |ls: &mut Vec<Layer>, i: usize, y: f64| -> bool {
-        let h = (2.0 * snapv(y)).clamp(20.0, 500.0) / 1e3;
+        let h = (2.0 * snapv(y)).max(2.0) / 1e3;
         let mut ch = false;
         if (ls[i].height - h).abs() > 1e-9 {
             ls[i].height = h;

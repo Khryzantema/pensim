@@ -1,12 +1,12 @@
 //! Salvar/abrir simulações prontas (arquivo `.psim`): projeto, resultados e quadros comprimidos.
-use crate::config::{Core, Design, Layer, Projectile};
+use crate::config::{Core, Design, Fill, Layer, Projectile, Region};
 use crate::material::{Material, LIBRARY};
 use crate::sim::{Outcome, OutcomeKind};
 use crate::store::PackedFrame;
 use std::sync::Arc;
 
 const MAGIC: &[u8; 4] = b"PSIM";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 pub struct SaveData {
     pub title: String,
@@ -91,6 +91,17 @@ pub fn write(path: &std::path::Path, d: &SaveData) -> std::io::Result<u64> {
         Some(c) => { w.u8(1); w.str(c.material.name); w.profile(&c.profile); }
         None => w.u8(0),
     }
+    w.u32(p.regions.len() as u32);
+    for g in &p.regions {
+        w.str(&g.name);
+        match &g.fill {
+            Fill::Void => { w.u8(0); }
+            Fill::Body => { w.u8(1); }
+            Fill::Mat(m) => { w.u8(2); w.str(m.name); }
+        }
+        w.profile(&g.outer);
+        w.profile(&g.inner);
+    }
     w.u32(d.design.layers.len() as u32);
     for l in &d.design.layers {
         for v in [l.thickness, l.gap_before, l.width, l.height] { w.f64(v); }
@@ -127,7 +138,7 @@ pub fn info(path: &std::path::Path) -> Option<SaveInfo> {
     let mut buf = vec![0u8; 512];
     let n = std::fs::File::open(path).ok()?.read(&mut buf).ok()?;
     let mut r = R(&buf[..n]);
-    if r.take(4)? != MAGIC || r.u32()? != VERSION {
+    if r.take(4)? != MAGIC || !(2..=VERSION).contains(&r.u32()?) {
         return None;
     }
     let title = r.str()?;
@@ -138,7 +149,11 @@ pub fn info(path: &std::path::Path) -> Option<SaveInfo> {
 pub fn read(path: &std::path::Path) -> Option<SaveData> {
     let bytes = std::fs::read(path).ok()?;
     let mut r = R(&bytes);
-    if r.take(4)? != MAGIC || r.u32()? != VERSION {
+    if r.take(4)? != MAGIC {
+        return None;
+    }
+    let ver = r.u32()?;
+    if !(2..=VERSION).contains(&ver) {
         return None;
     }
     let title = r.str()?;
@@ -155,6 +170,21 @@ pub fn read(path: &std::path::Path) -> Option<SaveData> {
     } else {
         None
     };
+    let mut regions = Vec::new();
+    if ver >= 3 {
+        let nr = r.u32()? as usize;
+        for _ in 0..nr {
+            let name = r.str()?;
+            let fill = match r.u8()? {
+                0 => Fill::Void,
+                1 => Fill::Body,
+                _ => Fill::Mat(material(&r.str()?)),
+            };
+            let outer = r.profile()?;
+            let inner = r.profile()?;
+            regions.push(Region { name, outer, inner, fill });
+        }
+    }
     let nl = r.u32()? as usize;
     let mut layers = Vec::new();
     for _ in 0..nl {
@@ -184,7 +214,7 @@ pub fn read(path: &std::path::Path) -> Option<SaveData> {
     }
     Some(SaveData {
         title, velocity, obliquity_deg, dx, scale,
-        design: Design { projectile: Projectile { profile, material: pm, core }, layers },
+        design: Design { projectile: Projectile { profile, material: pm, core, regions }, layers },
         n_phys, dt, steps, wall, t_end, back_x, sym, outcome, parts, surface, normals, ref_pos, frames,
     })
 }

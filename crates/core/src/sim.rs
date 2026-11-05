@@ -108,7 +108,8 @@ pub struct Sim {
     cur_e_ct: f64,
     pos0: Vec<[f64; 3]>,
     part: Vec<u8>,
-    fixed: Vec<bool>,
+    /// nós presos na borda do alvo; soltam quando danificados ou sob carga de impacto direto
+    fixed: Vec<AtomicBool>,
     surface: Vec<bool>,
     bonds: Vec<Vec<Bond>>,
     initial_bonds: Vec<u32>,
@@ -398,7 +399,7 @@ impl Sim {
             p,
             pos0: model.pos,
             part: model.part,
-            fixed: model.fixed,
+            fixed: model.fixed.iter().map(|&f| AtomicBool::new(f)).collect(),
             surface: vec![false; n_real],
             bonds: vec![vec![]; n_real],
             initial_bonds: vec![0; n_real],
@@ -955,7 +956,7 @@ impl Sim {
                             continue;
                         }
                         let me = &p[i];
-                        let fi = fixed[i];
+                        let fi = fixed[i].load(Ordering::Relaxed);
                         let ai = awake[i];
                         let b = part[i] as usize;
                         let mat = &mats[b];
@@ -964,17 +965,18 @@ impl Sim {
                         let sy0 = mat.yield_strength / mat.young * rate_gain;
                         let hard = mat.hardening / mat.young * rate_gain;
                         let comp = mat.comp_factor;
+                        let rate_c = mat.rate_c;
                         // materiais frágeis têm bem mais dispersão de resistência
                         let nf = (noise * if comp >= 5.0 { 2.0 } else { 1.0 }).min(0.6);
                         let heat = TAYLOR_QUINNEY * 0.5 / (mat.rho * mat.cp * vol);
                         let (mut ax, mut ay, mut az, mut acc_t) = (0.0f64, 0.0f64, 0.0f64, 0.0f32 as f64);
                         let (mut acc_s, mut acc_w) = (0.0f32, 0.0f32);
                         for bd in bonds.iter_mut() {
-                            if bd.ixi < 0.0 {
-                                continue;
-                            }
+                            // ligação rompida (ixi < 0 guarda −1/|ξ|): perdeu a tração, mas os
+                            // fragmentos ainda se empurram quando comprimidos
+                            let broken = bd.ixi < 0.0;
                             let j = bd.j as usize;
-                            if fi && fixed[j] {
+                            if fi && fixed[if j < nr { j } else { src[j - nr] as usize }].load(Ordering::Relaxed) {
                                 continue;
                             }
                             if !ai && !awake[if j < nr { j } else { src[j - nr] as usize }] {
@@ -991,8 +993,32 @@ impl Sim {
                             let q = &p[j];
                             let (rx, ry, rz) = (q.x - me.x, q.y - me.y, q.z - me.z);
                             let r = (rx * rx + ry * ry + rz * rz).sqrt().max(1e-12);
-                            let ixi = bd.ixi as f64;
+                            let ixi = (bd.ixi as f64).abs();
                             let s = r * ixi - 1.0;
+                            if broken {
+                                let s_el = s - bd.sp as f64;
+                                if s_el >= 0.0 {
+                                    continue;
+                                }
+                                // compressão do material fraturado: só elástica, sem escoamento
+                                let w = bd.w as f64;
+                                let k = cvv * s_el * w / r;
+                                let (fx, fy, fz) = (k * rx, k * ry, k * rz);
+                                ax += fx;
+                                ay += fy;
+                                az += fz;
+                                if tgt != i {
+                                    if !awake[tgt] {
+                                        touched[tgt].store(true, Ordering::Relaxed);
+                                    }
+                                    let lt = &mut loc[tgt];
+                                    lt[0] -= fx as f32;
+                                    lt[1] += (sy * fy) as f32;
+                                    lt[2] += (sz * fz) as f32;
+                                }
+                                tot.e_el += wgt * 0.5 * cvv * s_el * s_el * w / ixi;
+                                continue;
+                            }
                             // estiramento médio local (parte volumétrica) do passo anterior
                             let sb = if dev { 0.5 * (sbar[i] + sbar[tgt]) as f64 } else { 0.0 };
                             // somas para o estiramento médio do próximo passo
@@ -1008,14 +1034,22 @@ impl Sim {
                             if s > fail * (1.0 + nf * u) {
                                 let s_el = s - sp;
                                 tot.e_fr += wgt * 0.5 * cvv * s_el * s_el * w / ixi;
-                                bd.ixi = -1.0;
+                                bd.ixi = -bd.ixi;
                                 continue;
                             }
-                            let sy_t = (sy0 + hard * bd.acc as f64) * (0.5 * (me.soft + q.soft)) * (1.0 + 0.3 * nf * u);
+                            let mut sy_t = (sy0 + hard * bd.acc as f64) * (0.5 * (me.soft + q.soft)) * (1.0 + 0.3 * nf * u);
                             let mut s_el = s - sp;
                             let mut dtemp = 0.0;
                             // plastifica só a parte desviadora (s_el − sb); a volumétrica fica elástica
                             let sd = s_el - sb;
+                            if (sd > sy_t || sd < -sy_t * comp) && rate_c > 0.0 {
+                                // Johnson-Cook: resistência cresce com a taxa de estiramento da ligação
+                                // (calculada só nas ligações que iam escoar, quase sem custo)
+                                let rate = (((q.vx - me.vx) * rx + (q.vy - me.vy) * ry + (q.vz - me.vz) * rz) / r * ixi).abs();
+                                if rate > 1.0 {
+                                    sy_t *= 1.0 + rate_c * rate.ln();
+                                }
+                            }
                             if sd > sy_t || sd < -sy_t * comp {
                                 let lim = if sd > 0.0 { sy_t } else { -sy_t * comp };
                                 let dsp = sd - lim;
@@ -1075,7 +1109,7 @@ impl Sim {
                                 while cur != NIL {
                                     let j = cur as usize;
                                     cur = hg.next[j];
-                                    if hg.cell[j] != tc || j == i || (fi && fixed[j]) {
+                                    if hg.cell[j] != tc || j == i || (fi && fixed[if j < nr { j } else { src[j - nr] as usize }].load(Ordering::Relaxed)) {
                                         continue;
                                     }
                                     let (org, is_ghost) = if j < nr { (j, false) } else { (src[j - nr] as usize, true) };
@@ -1143,6 +1177,7 @@ impl Sim {
             let ptrs: Vec<SyncPtr> = self.locals.iter_mut().map(|v| SyncPtr(v.as_mut_ptr())).collect();
             let part = &self.part;
             let fixed = &self.fixed;
+            let release_dv = 0.02 * self.cfg.velocity;
             let mass = &self.mass;
             let mats = &self.mats;
             let touched = &self.touched;
@@ -1177,13 +1212,19 @@ impl Sim {
                 let m = &mats[part[i] as usize];
                 let theta = ((q.temp - T_REF) / (m.t_melt - T_REF)).clamp(0.0, 1.0);
                 q.soft = (1.0 - theta).max(0.03);
-                if fixed[i] {
-                    q.vx = 0.0;
-                    q.vy = 0.0;
-                    q.vz = 0.0;
-                    return;
-                }
                 let mm = mass[part[i] as usize];
+                if fixed[i].load(Ordering::Relaxed) {
+                    // a fixação só segura cargas moderadas (ondas, flexão); impacto direto a arranca
+                    let dv = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt() / mm * dt;
+                    if dv > release_dv {
+                        fixed[i].store(false, Ordering::Relaxed);
+                    } else {
+                        q.vx = 0.0;
+                        q.vy = 0.0;
+                        q.vz = 0.0;
+                        return;
+                    }
+                }
                 q.vx += f[0] / mm * dt;
                 q.vy += f[1] / mm * dt;
                 q.vz += f[2] / mm * dt;
@@ -1231,6 +1272,12 @@ impl Sim {
                 if t != i {
                     alive[t] += 1;
                 }
+            }
+        }
+        // fixação danificada (perdeu ligações para o material que rasgou) solta o nó
+        for i in 0..nr {
+            if alive[i] < (0.75 * self.initial_bonds[i] as f64) as u32 && self.fixed[i].load(Ordering::Relaxed) {
+                self.fixed[i].store(false, Ordering::Relaxed);
             }
         }
         let reach2 = (1.3 * self.cfg.dx).powi(2);
