@@ -169,6 +169,9 @@ pub struct Config {
     /// resistência dinâmica: multiplica o escoamento (e o encruamento) para representar o ganho
     /// por taxa de deformação em impacto balístico (1 = valores quase-estáticos da biblioteca)
     pub rate_gain: f64,
+    /// EXPERIMENTAL (desligada): plasticidade só na parte desviadora do estiramento. Ainda não
+    /// conserva energia em alta velocidade (erro cresce com v) e não reproduz o lábio de entrada
+    pub deviatoric_plasticity: bool,
 }
 
 impl Default for Config {
@@ -232,6 +235,7 @@ impl Preset {
             jitter: 0.05,
             ignore_memory: false,
             rate_gain: 1.0,
+            deviatoric_plasticity: false,
         }
     }
 }
@@ -311,7 +315,7 @@ impl Config {
     pub fn t_end(&self) -> f64 {
         let t_eff = self.target_thickness() / self.obliquity().cos().max(0.3);
         // +35%: o projétil precisa sair bastante do alvo antes de a simulação terminar
-        (3.0 * 1.35 * (t_eff + self.design.projectile.length()) / self.velocity.max(1.0) * self.time_factor)
+        (3.0 * 1.35 * (t_eff + self.design.projectile.length() + 2.0 * self.design.projectile.max_radius()) / self.velocity.max(1.0) * self.time_factor)
             .clamp(54e-6, 4e-3)
     }
 }

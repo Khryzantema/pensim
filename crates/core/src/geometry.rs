@@ -129,13 +129,20 @@ pub fn hash_unit(a: u64, b: u64, c: u64, d: u64) -> f64 {
             .map(|&(a, u, v, _)| [-d[0] * a + ev[0] * v, u, -d[2] * a + ev[2] * v])
             .collect();
         let maxx = wp.iter().map(|p| p[0]).fold(f64::MIN, f64::max);
-        // espacinho inicial entre a ponta do projétil e a face do alvo
-        let gap = 0.003f64.max(2.0 * dx);
-        let shift = -gap - maxx;
+        // distância inicial: no mínimo 100% da largura (diâmetro) do projétil
+        let gap = 0.003f64.max(2.0 * dx).max(2.0 * rmax);
+        // desloca AO LONGO da linha de voo (−d·λ), para que a trajetória sempre cruze o centro da
+        // placa (deslocar só em x faria a bala errar o alvo em ângulos grandes)
+        let lambda = (maxx + gap) / d[0].max(0.05);
+        let shift = [-d[0] * lambda, 0.0, -d[2] * lambda];
         for (k, p) in wp.into_iter().enumerate() {
             let jt = cfg.jitter * dx;
             let kk = k as u64;
-            pos.push([p[0] + shift + jt * Self::hash_unit(99, kk, 0, 1), p[1] + jt * Self::hash_unit(99, kk, 0, 2), p[2] + jt * Self::hash_unit(99, kk, 0, 3)]);
+            pos.push([
+                p[0] + shift[0] + jt * Self::hash_unit(99, kk, 0, 1),
+                p[1] + shift[1] + jt * Self::hash_unit(99, kk, 0, 2),
+                p[2] + shift[2] + jt * Self::hash_unit(99, kk, 0, 3),
+            ]);
             part.push(ploc[k].3);
             fixed.push(false);
         }

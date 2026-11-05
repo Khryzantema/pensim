@@ -6,6 +6,7 @@ fn main() {
     c.velocity = env("V", 900.0); c.n_frames = 6; c.horizon_m = env("HZ", 2.5);
     c.sleep_ratio = env("SLEEP", 0.02);
     if env("THICK", 0.0) > 0.0 { c.design.layers[0].thickness = env("THICK", 0.0) * 1e-3; c.design.layers[0].width = 0.07; c.design.layers[0].height = 0.07; }
+    c.deviatoric_plasticity = env("DEV", 1.0) > 0.5;
     c.obliquity_deg = env("A", 0.0); c.symmetry = sym; c.dx = env("DX", 1.5) * 1e-3;
     let t = std::time::Instant::now();
     let mut s = Sim::new(c).unwrap();

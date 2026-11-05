@@ -43,6 +43,8 @@ pub const LIBRARY: &[Material] = &[
     m("Urânio empobrecido", 18950.0, 205e9, 1.10e9, 0.6e9, 0.10, 1.0, 117.0, 1405.0),
     m("Enchimento (carga/traçante)", 1650.0, 8e9, 0.06e9, 0.0, 0.05, 3.0, 1000.0, 700.0),
     m("Aço de projétil AP", 7850.0, 205e9, 1.60e9, 1.0e9, 0.06, 1.0, 477.0, 1800.0),
+    // WC-Co (metal duro): muito rígido e duro, frágil em tração (ruptura transversal ~2 GPa)
+    m("Carboneto de tungstênio (WC-Co)", 15500.0, 580e9, 1.5e9, 0.0, 0.008, 2.6, 200.0, 3000.0),
 ];
 
 impl Material {

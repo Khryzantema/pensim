@@ -103,7 +103,7 @@ pub struct Sim {
     pub frames: Vec<crate::store::PackedFrame>,
     p: Vec<P>,
     /// buffers locais (fx, fy, fz, dT) por bloco de nós: forças acumuladas sem corridas
-    locals: Vec<Vec<[f32; 4]>>,
+    locals: Vec<Vec<[f32; 6]>>,
     cur_e_el: f64,
     cur_e_ct: f64,
     pos0: Vec<[f64; 3]>,
@@ -152,6 +152,8 @@ pub struct Sim {
     /// tempos acumulados [s]: grade, forças (ligações+contato), integração
     pub prof: [f64; 3],
     exit_found: bool,
+    /// estiramento médio das ligações de cada nó (≈ dilatação/3), do passo anterior
+    sbar: Vec<f32>,
     hg: HGrid,
     /// nós calculados na região ativa (acordados + vizinhança de ligações)
     active: Vec<bool>,
@@ -168,6 +170,9 @@ pub struct Sim {
     compress_frames: bool,
     /// instante em que o corpo principal se separou do alvo
     sep_time: Option<f64>,
+    /// direção de voo inicial (unitária) e último instante de contato
+    dir: [f64; 3],
+    last_touch: f64,
     /// intervalo entre quadros [s] (dobra se gravar quadros demais)
     frame_dt: f64,
     captured: usize,
@@ -271,7 +276,7 @@ impl HGrid {
 }
 
 /// Ponteiro compartilhável entre threads (acessos sempre em índices disjuntos).
-struct SyncPtr(*mut [f32; 4]);
+struct SyncPtr(*mut [f32; 6]);
 unsafe impl Send for SyncPtr {}
 unsafe impl Sync for SyncPtr {}
 
@@ -427,6 +432,7 @@ impl Sim {
             gfac,
             prof: [0.0; 3],
             exit_found: false,
+            sbar: vec![0.0; n_real],
             hg: HGrid::new(1, 1.0),
             active: vec![false; n_real],
             halo_done: vec![false; n_real],
@@ -438,6 +444,8 @@ impl Sim {
             had_contact: false,
             compress_frames,
             sep_time: None,
+            dir: model.dir,
+            last_touch: 0.0,
             // o evento real dura ~1/3 do tempo máximo (a simulação termina na separação + 25%)
             frame_dt: cfg.t_end() / (3.0 * cfg.n_frames.max(1) as f64),
             captured: 0,
@@ -451,7 +459,7 @@ impl Sim {
         let threads = rayon::current_num_threads().max(1);
         let mem_cap = (48_000_000 / (n_real.max(1) * 16)).max(threads);
         let nch = (threads * 4).min(mem_cap).max(1);
-        sim.locals = (0..nch).map(|_| vec![[0.0; 4]; n_real]).collect();
+        sim.locals = (0..nch).map(|_| vec![[0.0; 6]; n_real]).collect();
         sim.dt = sim.stable_dt();
         sim.ke0 = sim.kinetic(Some(true));
         {
@@ -926,6 +934,8 @@ impl Sim {
             let awake = &self.awake;
             let noise = self.cfg.noise;
             let rate_gain = self.cfg.rate_gain;
+            let dev = self.cfg.deviatoric_plasticity;
+            let sbar = &self.sbar;
             let hg = &self.hg;
             let active = &self.active;
             let touched = &self.touched;
@@ -955,7 +965,8 @@ impl Sim {
                         // materiais frágeis têm bem mais dispersão de resistência
                         let nf = (noise * if comp >= 5.0 { 2.0 } else { 1.0 }).min(0.6);
                         let heat = TAYLOR_QUINNEY * 0.5 / (mat.rho * mat.cp * vol);
-                        let (mut ax, mut ay, mut az, mut acc_t) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+                        let (mut ax, mut ay, mut az, mut acc_t) = (0.0f64, 0.0f64, 0.0f64, 0.0f32 as f64);
+                        let (mut acc_s, mut acc_w) = (0.0f32, 0.0f32);
                         for bd in bonds.iter_mut() {
                             if bd.ixi < 0.0 {
                                 continue;
@@ -980,6 +991,15 @@ impl Sim {
                             let r = (rx * rx + ry * ry + rz * rz).sqrt().max(1e-12);
                             let ixi = bd.ixi as f64;
                             let s = r * ixi - 1.0;
+                            // estiramento médio local (parte volumétrica) do passo anterior
+                            let sb = if dev { 0.5 * (sbar[i] + sbar[tgt]) as f64 } else { 0.0 };
+                            // somas para o estiramento médio do próximo passo
+                            let wf = bd.w;
+                            let s_elastic = (s - bd.sp as f64) as f32;
+                            if dev {
+                                acc_s += s_elastic * wf;
+                                acc_w += wf;
+                            }
                             let sp = bd.sp as f64;
                             let w = bd.w as f64;
                             let u = bd.rnd as f64 * (1.0 / 127.5) - 1.0;
@@ -992,13 +1012,17 @@ impl Sim {
                             let sy_t = (sy0 + hard * bd.acc as f64) * (0.5 * (me.soft + q.soft)) * (1.0 + 0.3 * nf * u);
                             let mut s_el = s - sp;
                             let mut dtemp = 0.0;
-                            if s_el > sy_t || s_el < -sy_t * comp {
-                                let lim = if s_el > 0.0 { sy_t } else { -sy_t * comp };
-                                let dsp = s_el - lim;
+                            // plastifica só a parte desviadora (s_el − sb); a volumétrica fica elástica
+                            let sd = s_el - sb;
+                            if sd > sy_t || sd < -sy_t * comp {
+                                let lim = if sd > 0.0 { sy_t } else { -sy_t * comp };
+                                let dsp = sd - lim;
                                 bd.sp = (sp + dsp) as f32;
                                 bd.acc += dsp.abs() as f32;
-                                s_el = lim;
-                                let de = cvv * lim.abs() * dsp.abs() * w / ixi;
+                                // dissipação = tensão elástica APÓS o retorno ao limite × incremento plástico
+                                // (no caso desviador, a tensão inclui a parte volumétrica: sb + lim)
+                                s_el -= dsp;
+                                let de = cvv * s_el.abs() * dsp.abs() * w / ixi;
                                 tot.e_pl += wgt * de;
                                 dtemp = heat * de;
                                 acc_t += dtemp;
@@ -1014,6 +1038,10 @@ impl Sim {
                                     touched[tgt].store(true, Ordering::Relaxed);
                                 }
                                 let lt = &mut loc[tgt];
+                                if dev {
+                                    lt[4] += s_elastic * wf;
+                                    lt[5] += wf;
+                                }
                                 lt[0] -= (fx) as f32;
                                 lt[1] += (sy * fy) as f32;
                                 lt[2] += (sz * fz) as f32;
@@ -1025,6 +1053,10 @@ impl Sim {
                         loc[i][1] += (ay) as f32;
                         loc[i][2] += (az) as f32;
                         loc[i][3] += (acc_t) as f32;
+                        if dev {
+                            loc[i][4] += acc_s;
+                            loc[i][5] += acc_w;
+                        }
                         if !ai && (ax != 0.0 || ay != 0.0 || az != 0.0) {
                             touched[i].store(true, Ordering::Relaxed);
                         }
@@ -1113,20 +1145,22 @@ impl Sim {
             let mats = &self.mats;
             let touched = &self.touched;
             let sleep_v = self.sleep_v;
-            self.p[..nr].par_iter_mut().zip(self.awake.par_iter_mut()).enumerate().with_min_len(256).for_each(|(i, (q, awake))| {
+            self.p[..nr].par_iter_mut().zip(self.awake.par_iter_mut()).zip(self.sbar.par_iter_mut()).enumerate().with_min_len(256).for_each(|(i, ((q, awake), sbar_i))| {
                 let was_touched = touched[i].swap(false, Ordering::Relaxed);
                 if !*awake && !was_touched {
                     return; // dormindo e sem força: os buffers dele já estão zerados
                 }
-                let mut f = [0.0f64; 4];
+                let mut f = [0.0f64; 6];
                 for pt in &ptrs {
                     // SAFETY: índice i exclusivo desta thread; o buffer não é usado em outro lugar agora
                     let v = unsafe { &mut *pt.0.add(i) };
-                    f[0] += v[0] as f64;
-                    f[1] += v[1] as f64;
-                    f[2] += v[2] as f64;
-                    f[3] += v[3] as f64;
-                    *v = [0.0; 4];
+                    for k in 0..6 {
+                        f[k] += v[k] as f64;
+                    }
+                    *v = [0.0; 6];
+                }
+                if f[5] > 0.0 {
+                    *sbar_i = (f[4] / f[5]) as f32;
                 }
                 if !*awake {
                     // dormindo: acorda quando a força o aceleraria ao limiar de velocidade em ~10 passos
@@ -1199,16 +1233,25 @@ impl Sim {
         }
         let reach2 = (1.3 * self.cfg.dx).powi(2);
         let (mut touching, mut n_main, mut x_main) = (false, 0usize, 0.0f64);
+        // corpo principal = nós com ≥ 50% das ligações vivas; se o projétil se estilhaçou e não
+        // sobrou nenhum, usa todos os nós do projétil
+        let strict = |i: usize| alive[i] as f64 >= 0.5 * self.initial_bonds[i] as f64;
+        let any_main = (0..nr).any(|i| self.part[i] < self.n_proj && strict(i));
+        let is_main = |i: usize| self.part[i] < self.n_proj && (!any_main || strict(i));
+        let (mut x_min, mut x_max, mut vx_main) = (f64::MAX, f64::MIN, 0.0f64);
         for i in 0..nr {
-            if self.part[i] < self.n_proj && (alive[i] as f64) >= 0.5 * self.initial_bonds[i] as f64 {
+            if is_main(i) {
                 x_main += self.p[i].x;
+                vx_main += self.p[i].vx;
+                n_main += 1;
+                x_min = x_min.min(self.p[i].x);
+                x_max = x_max.max(self.p[i].x);
             }
         }
         'nodes: for i in 0..nr {
-            if self.part[i] >= self.n_proj || (alive[i] as f64) < 0.5 * self.initial_bonds[i] as f64 {
+            if !is_main(i) {
                 continue;
             }
-            n_main += 1;
             let c0 = self.hg.cell[i];
             let me = &self.p[i];
             for oz in -1..=1 {
@@ -1234,12 +1277,29 @@ impl Sim {
             }
         }
         // o corpo só "saiu" se o centro de massa estiver fora do alvo (depois da face traseira ou
-        // antes da frontal); a cauda de um dardo dentro do túnel já aberto não toca as paredes
+        // antes da frontal); a cauda de um dardo dentro do túnel já aberto não toca as paredes.
+        // Se estiver a mais de um comprimento de projétil, vale como separado mesmo que um tampão
+        // ejetado ainda viaje colado a ele.
         let xcm = if n_main > 0 { x_main / n_main as f64 } else { 0.0 };
-        let outside = xcm > self.back_x || xcm < 0.0;
+        let vxm = if n_main > 0 { vx_main / n_main as f64 } else { 0.0 };
+        // saída pela frente só conta se ele estiver se afastando (senão é só a aproximação inicial)
+        // ricochete: ainda na frente do alvo e sem contato há um tempo (a 80° vx pode continuar > 0)
+        let grace = 0.25 * self.cfg.design.projectile.length() / self.cfg.velocity.max(1.0);
+        let bounced = xcm < 0.0 && (vxm < 0.0 || self.time - self.last_touch > grace);
+        let outside = xcm > self.back_x || bounced;
+        // corpo inteiro fora do alvo (nó mais recuado depois da face traseira, ou o mais avançado antes
+        // da frontal): o que ainda encosta nele é o tampão ejetado, não o alvo
+        let len = self.cfg.design.projectile.length();
+        let far_out = n_main > 0 && (x_min > self.back_x || (x_max < 0.0 && vxm < 0.0));
+        let _ = len;
+        if std::env::var("PENSIM_DBG").is_ok() && self.step_count % 200 == 0 {
+            eprintln!("t={:.0}µs contato_antes={} tocando={} n_main={} xcm={:.1}mm back={:.1}mm outside={} fora_total={}", self.time * 1e6, self.had_contact, touching, n_main, xcm * 1e3, self.back_x * 1e3, outside, far_out);
+        }
         if touching {
             self.had_contact = true;
-        } else if self.had_contact && n_main > 0 && outside {
+            self.last_touch = self.time;
+        }
+        if self.had_contact && n_main > 0 && outside && (!touching || far_out) {
             self.exit_found = true;
             self.sep_time = Some(self.time);
             self.t_end = self.t_end.min(self.time * 1.25);
@@ -1324,7 +1384,8 @@ impl Sim {
                         let r = (rx * rx + ry * ry + rz * rz).sqrt().max(1e-12);
                         let s = r * bd.ixi as f64 - 1.0;
                         let sy_t = (sy0 + hard * bd.acc as f64) * (0.5 * (me.soft + q.soft));
-                        let s_el = (s - bd.sp as f64).clamp(-sy_t * mat.comp_factor, sy_t);
+                        let sb = if self.cfg.deviatoric_plasticity { 0.5 * (self.sbar[i] + self.sbar[t]) as f64 } else { 0.0 };
+                        let s_el = sb + (s - bd.sp as f64 - sb).clamp(-sy_t * mat.comp_factor, sy_t);
                         let f = cvv * s_el * bd.w as f64;
                         let k = 0.5 * f / r / vol;
                         let v = [k * rx * rx, k * ry * ry, k * rz * rz, k * rx * ry, k * ry * rz, k * rz * rx];
@@ -1414,13 +1475,14 @@ impl Sim {
 
     pub fn outcome(&self) -> Outcome {
         let n = self.n_real;
+        let d = self.dir;
         let (mut np, mut behind, mut vx, mut tip) = (0.0f64, 0.0f64, 0.0f64, f64::MIN);
         let (mut nt, mut ejected) = (0.0f64, 0.0f64);
         for i in 0..n {
             let q = self.p[i];
             if self.part[i] < self.n_proj {
                 np += 1.0;
-                vx += q.vx;
+                vx += q.vx * d[0] + q.vz * d[2]; // velocidade ao longo da trajetória original
                 tip = tip.max(q.x);
                 if q.x > self.back_x {
                     behind += 1.0;
@@ -1436,7 +1498,7 @@ impl Sim {
         let behind_frac = behind / np.max(1.0);
         let kind = if behind_frac > 0.5 && v_res > 0.0 {
             OutcomeKind::Perforation
-        } else if v_res < 0.0 && behind_frac < 0.05 {
+        } else if behind_frac < 0.05 && (v_res < 0.0 || (self.sep_time.is_some() && tip < 0.5 * self.cfg.dx)) {
             OutcomeKind::Rejected
         } else {
             OutcomeKind::PartialPenetration

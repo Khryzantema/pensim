@@ -43,6 +43,7 @@ const W: usize = 4;
 const DU: usize = 9;
 const FILL: usize = 10;
 const AP: usize = 11;
+const WC: usize = 12;
 
 macro_rules! core {
     ($a0:expr, $a1:expr, $r:expr, $m:expr) => {
@@ -73,6 +74,14 @@ pub const AMMO: &[Ammo] = &[
         caliber_mm: 88.0, length_mm: 380.0, mass_g: 10200.0, velocity: 1000.0, nose: Nose::Ogive, body_mat: AP, core: core!(0.58, 0.95, 0.3, FILL), plate_mat: RHA, plate_mm: 140.0, scale: 0.10 },
     Ammo { name: "128 mm PzGr 43 (Pak 44 / Jagdtiger)", group: "Canhões históricos", note: "O maior projétil AP alemão em serviço, contra 300 mm de aço. Escala reduzida (×0,12 ≈ 10 nós no diâmetro).",
         caliber_mm: 128.0, length_mm: 600.0, mass_g: 26200.0, velocity: 920.0, nose: Nose::Ogive, body_mat: AP, core: core!(0.58, 0.95, 0.32, FILL), plate_mat: RHA, plate_mm: 300.0, scale: 0.12 },
+    Ammo { name: "75 mm M61 APC-T (M3 / Sherman)", group: "Canhões históricos", note: "APHE/APC americano com capuz; corpo de aço, pequena carga explosiva (Explosive D).",
+        caliber_mm: 75.0, length_mm: 310.0, mass_g: 6320.0, velocity: 619.0, nose: Nose::Ogive, body_mat: AP, core: core!(0.60, 0.95, 0.20, FILL), plate_mat: RHA, plate_mm: 75.0, scale: 0.12 },
+    Ammo { name: "85 mm BR-365 APHE (D-5T / ZIS-S-53 soviético)", group: "Canhões históricos", note: "Perfurante de alto explosivo soviético do T-34-85; pequena carga explosiva.",
+        caliber_mm: 85.0, length_mm: 360.0, mass_g: 9200.0, velocity: 792.0, nose: Nose::Ogive, body_mat: AP, core: core!(0.60, 0.95, 0.20, FILL), plate_mat: RHA, plate_mm: 100.0, scale: 0.1 },
+    Ammo { name: "122 mm BR-471 APHE (D-25T / IS-2 soviético)", group: "Canhões históricos", note: "Perfurante de alto explosivo do IS-2; projétil muito pesado, pequena carga explosiva.",
+        caliber_mm: 122.0, length_mm: 540.0, mass_g: 25000.0, velocity: 800.0, nose: Nose::Ogive, body_mat: AP, core: core!(0.60, 0.95, 0.22, FILL), plate_mat: RHA, plate_mm: 160.0, scale: 0.075 },
+    Ammo { name: "90 mm M304 HVAP-T (M26 Pershing)", group: "Canhões históricos", note: "Núcleo subcalibre de carboneto de tungstênio do HVAP americano (projétil total ~7,6 kg; corpo leve de alumínio ignorado).",
+        caliber_mm: 38.0, length_mm: 220.0, mass_g: 3600.0, velocity: 1016.0, nose: Nose::Ogive, body_mat: WC, core: None, plate_mat: RHA, plate_mm: 200.0, scale: 0.3 },
     Ammo { name: "120 mm M829A1 APFSDS (DU)", group: "Penetradores modernos", note: "Dardo de urânio empobrecido (sabot ignorado). Escala reduzida.",
         caliber_mm: 22.0, length_mm: 700.0, mass_g: 4600.0, velocity: 1575.0, nose: Nose::Conical, body_mat: DU, core: None, plate_mat: RHA, plate_mm: 150.0, scale: 0.3 },
     Ammo { name: "125 mm 3BM42 'Mango' APFSDS (W)", group: "Penetradores modernos", note: "Dardo de tungstênio soviético/russo (sabot ignorado). Escala reduzida.",
@@ -117,6 +126,7 @@ impl Ammo {
             jitter: 0.05,
             ignore_memory: false,
             rate_gain: 1.0,
+            deviatoric_plasticity: false,
         };
         cfg
     }

@@ -480,6 +480,18 @@ impl PenSim {
         self.start_with(ctx, false);
     }
 
+    /// Cancela a simulação em andamento (a thread de cálculo para) e volta ao modelo.
+    fn cancel_job(&mut self) {
+        self.job = None; // Drop cancela a thread
+        self.job_id += 1;
+        self.decoded = None;
+        self.playing = false;
+        self.save_msg = "Simulação cancelada.".into();
+        if self.ws == Ws::Results {
+            self.ws = Ws::Sim;
+        }
+    }
+
     /// `force`: ignora a verificação de memória (o usuário escolheu continuar mesmo assim).
     fn start_with(&mut self, ctx: &egui::Context, force: bool) {
         self.job = None;
@@ -1027,6 +1039,10 @@ impl PenSim {
     }
 
     fn pause_btn(&mut self, ui: &mut egui::Ui, snap: &Snap) {
+        if self.job.is_some() && !snap.done && tbtn(ui, "✕", "Cancelar", false, true, 62.0).clicked() {
+            self.cancel_job();
+            return;
+        }
         if let Some(j) = &self.job {
             if !snap.done {
                 let paused = j.paused.load(Ordering::SeqCst);
@@ -1342,7 +1358,13 @@ impl PenSim {
             s.n
         );
         painter.text(card.center() + Vec2::new(0.0, 22.0), Align2::CENTER_TOP, txt, FontId::proportional(12.0), Color32::from_gray(70));
-        painter.text(card.center() + Vec2::new(0.0, 42.0), Align2::CENTER_TOP, "A reprodução começa sozinha quando terminar.", FontId::proportional(11.0), Color32::from_gray(110));
+        painter.text(card.center() + Vec2::new(0.0, 36.0), Align2::CENTER_TOP, "A reprodução começa sozinha quando terminar.", FontId::proportional(11.0), Color32::from_gray(110));
+        let ctx2 = ui.ctx().clone();
+        egui::Area::new(egui::Id::new("cancel_card")).fixed_pos(card.center_bottom() + Vec2::new(-60.0, -34.0)).show(&ctx2, |ui| {
+            if ui.add(egui::Button::new(RichText::new("✕ Cancelar simulação").strong()).min_size(Vec2::new(120.0, 28.0))).clicked() {
+                self.cancel_job();
+            }
+        });
         let btn = Rect::from_center_size(card.center_bottom() + Vec2::new(0.0, -2.0), Vec2::ZERO);
         let _ = btn;
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
@@ -1571,6 +1593,9 @@ impl PenSim {
                 let p = s.progress.clamp(0.0, 1.0) as f32;
                 ui.add(egui::ProgressBar::new(p).desired_width((ui.available_width() - 130.0).max(80.0)).text(format!("calculando… {:.0}%", p * 100.0)));
                 ui.label(if self.running(s) { "● em execução" } else { "pausado" });
+                if ui.button("✕ Cancelar").clicked() {
+                    self.cancel_job();
+                }
             });
         } else if self.ws == Ws::Results && s.frames.len() > 1 {
             ui.horizontal(|ui| {
