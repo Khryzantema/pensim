@@ -116,6 +116,9 @@ struct Preview {
     center: [f32; 3],
     radius: f32,
     err: Option<String>,
+    /// espaçamento usado no desenho (≥ o da simulação quando a malha real é pesada demais)
+    dx: f32,
+    note: Option<String>,
 }
 
 type Key = (Design, [f64; 5], bool);
@@ -132,6 +135,7 @@ struct Snap {
     sim_time: f64,
     t_end: f64,
     sym: u8,
+    normals: Arc<Vec<[f32; 3]>>,
     parts: Arc<Vec<u8>>,
     surface: Arc<Vec<bool>>,
     ref_pos: Arc<Vec<[f32; 3]>>,
@@ -248,7 +252,7 @@ impl PenSim {
             speed: 1.0,
             play_pos: 0.0,
             started_at: std::time::Instant::now(),
-            preview: Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: None },
+            preview: Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: None, dx: 0.0015, note: None },
             preview_key: None,
         };
         // ganchos de teste visual (captura de telas): PENSIM_WS, PENSIM_SKETCH, PENSIM_DEMO
@@ -259,6 +263,9 @@ impl PenSim {
                 "results" => Ws::Results,
                 _ => Ws::Design,
             };
+        }
+        if let Some(v) = std::env::var("PENSIM_DX").ok().and_then(|v| v.parse::<f64>().ok()) {
+            me.cfg.dx = v / 1e3;
         }
         if std::env::var("PENSIM_TARGET").is_ok() {
             me.target_mode = true;
@@ -302,11 +309,18 @@ impl PenSim {
             return;
         }
         self.preview_key = Some(key);
-        if self.estimate_nodes() > 700_000.0 {
-            self.preview = Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: Some("Malha fina demais para pré-visualizar (> 700 mil nós).".into()) };
-            return;
+        // a pré-visualização desenha cada nó; malhas muito finas são mostradas numa malha mais grossa
+        const MAX_PREVIEW_NODES: f64 = 120_000.0;
+        let est = self.estimate_nodes();
+        let mut pcfg = self.cfg.clone();
+        let mut note = None;
+        if est > MAX_PREVIEW_NODES {
+            let f = (est / MAX_PREVIEW_NODES).cbrt().ceil().max(2.0);
+            pcfg.dx *= f;
+            note = Some(format!("Prévia simplificada · malha real ≈ {:.1} mi nós", est / 1e6));
         }
-        match Model::build_full(&self.cfg) {
+        let pdx = pcfg.dx as f32;
+        match Model::build_full(&pcfg) {
             Ok(m) => {
                 let pos: Vec<[f32; 3]> = m.pos.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
                 let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -319,10 +333,10 @@ impl PenSim {
                 let center = [0, 1, 2].map(|k| 0.5 * (mn[k] + mx[k]));
                 let radius = (0..3).map(|k| (mx[k] - mn[k]).powi(2)).sum::<f32>().sqrt() * 0.5;
                 let idx = (0..pos.len() as u32).collect();
-                self.preview = Preview { pos, part: m.part, idx, center, radius, err: None };
+                self.preview = Preview { pos, part: m.part, idx, center, radius, err: None, dx: pdx, note };
             }
             Err(e) => {
-                self.preview = Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: Some(e) };
+                self.preview = Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: Some(e), dx: 0.0015, note: None };
             }
         }
     }
@@ -346,9 +360,9 @@ impl PenSim {
         match &self.job {
             Some(j) => {
                 let g = j.shared.lock().unwrap();
-                Snap { frames: g.frames.clone(), live: g.live.clone(), done: g.done, error: g.error.clone(), n: g.n, dt: g.dt, steps: g.steps, wall: g.wall, sim_time: g.sim_time, t_end: g.t_end, sym: g.sym, parts: g.parts.clone(), surface: g.surface.clone(), ref_pos: g.ref_pos.clone() }
+                Snap { frames: g.frames.clone(), live: g.live.clone(), done: g.done, error: g.error.clone(), n: g.n, dt: g.dt, steps: g.steps, wall: g.wall, sim_time: g.sim_time, t_end: g.t_end, sym: g.sym, normals: g.normals.clone(), parts: g.parts.clone(), surface: g.surface.clone(), ref_pos: g.ref_pos.clone() }
             }
-            None => Snap { frames: vec![], live: None, done: false, error: None, n: 0, dt: 0.0, steps: 0, wall: 0.0, sim_time: 0.0, t_end: 1.0, sym: 0, parts: Default::default(), surface: Default::default(), ref_pos: Default::default() },
+            None => Snap { frames: vec![], live: None, done: false, error: None, n: 0, dt: 0.0, steps: 0, wall: 0.0, sim_time: 0.0, t_end: 1.0, sym: 0, normals: Default::default(), parts: Default::default(), surface: Default::default(), ref_pos: Default::default() },
         }
     }
 
@@ -368,11 +382,22 @@ fn system_insets(ctx: &egui::Context) -> [f32; 4] {
                 let ppp = ctx.pixels_per_point();
                 let full = ctx.viewport_rect();
                 let (w, h) = (full.width() * ppp, full.height() * ppp);
-                let l = (r.left as f32).clamp(0.0, w * 0.3);
-                let t = (r.top as f32).clamp(0.0, h * 0.3);
-                let rr = (w - r.right as f32).clamp(0.0, w * 0.3);
-                let b = (h - r.bottom as f32).clamp(0.0, h * 0.5);
-                return [l / ppp, t / ppp, rr / ppp, b / ppp];
+                let (cw, ch) = ((r.right - r.left) as f32, (r.bottom - r.top) as f32);
+                // Só há sobreposição com as barras do sistema se o retângulo útil for MENOR que a
+                // superfície. Se tiver o mesmo tamanho, a superfície já começa abaixo das barras
+                // (reservar margem aqui seria contar em dobro e geraria uma faixa vazia).
+                let (dh, dw) = ((h - ch).max(0.0), (w - cw).max(0.0));
+                let (mut l, mut t, mut rr, mut b) = (0.0, 0.0, 0.0, 0.0);
+                if dh > 2.0 {
+                    t = (r.top as f32).clamp(0.0, dh);
+                    b = dh - t;
+                }
+                if dw > 2.0 {
+                    l = (r.left as f32).clamp(0.0, dw);
+                    rr = dw - l;
+                }
+                let cap = |v: f32| (v / ppp).min(64.0);
+                return [cap(l), cap(t), cap(rr), cap(b)];
             }
         }
     }
@@ -430,7 +455,7 @@ impl PenSim {
         // área segura: mantém a interface fora da barra de status, do recorte da câmera e da navegação
         let sys = system_insets(&ctx);
         let inset = [sys[0] + self.extra_inset[0], sys[1] + self.extra_inset[1], sys[2] + self.extra_inset[2], sys[3] + self.extra_inset[3]];
-        let blank = egui::Frame::NONE;
+        let blank = egui::Frame::NONE.fill(ctx.global_style().visuals.panel_fill);
         if inset[1] > 0.5 {
             egui::Panel::top("safe_top").exact_size(inset[1]).frame(blank).show_separator_line(false).show(ui, |_| {});
         }
@@ -446,17 +471,21 @@ impl PenSim {
         let avail = ui.available_size();
         let is_compact = avail.y < 520.0;
         COMPACT.store(is_compact, Ordering::Relaxed);
-        if !is_compact {
-            egui::Panel::top("title").show(ui, |ui| {
-                ui.horizontal(|ui| {
+        // faixa do topo: sempre visível (na tela deitada é fina). Além da marca, ela mantém a
+        // primeira linha de botões fora da barra de status e do recorte da câmera.
+        egui::Panel::top("title").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if is_compact {
+                    ui.label(RichText::new("PenSim").strong().size(13.0).color(ACCENT));
+                } else {
                     ui.label(RichText::new("PenSim").strong().size(18.0).color(ACCENT));
                     ui.label(RichText::new("· Simulação de impacto balístico 3D").weak());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.weak(format!("{} threads", pensim_core::threads()));
-                    });
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak(format!("{} threads", pensim_core::threads()));
                 });
             });
-        }
+        });
         egui::Panel::top("ribbon").show(ui, |ui| self.ribbon(ui, &ctx, &snap));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui, &snap));
 
@@ -1325,6 +1354,33 @@ impl PenSim {
                     }
                 }
             }
+            // iluminação: luz direcional (cima-esquerda da câmera) + difusa + brilho suave
+            let (cr, cu, ce) = self.cam.basis();
+            let ld = {
+                let v = [ce[0] * 0.8 + cu[0] * 0.55 - cr[0] * 0.45, ce[1] * 0.8 + cu[1] * 0.55 - cr[1] * 0.45, ce[2] * 0.8 + cu[2] * 0.55 - cr[2] * 0.45];
+                let m = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                [v[0] / m, v[1] / m, v[2] / m]
+            };
+            let cut_normal_y = if keep_pos { -1.0f32 } else { 1.0 };
+            let section_on = self.section;
+            let normals = snap.normals.clone();
+            let light = move |e: usize| -> f32 {
+                let (mi, i) = (e / n, e % n);
+                let m = masks[mi];
+                let nv = normals[i];
+                let nn = if nv == [0.0; 3] {
+                    // interior: na face do corte a normal aponta para a câmera; senão, de frente
+                    if section_on { [0.0, cut_normal_y, 0.0] } else { ce }
+                } else {
+                    [nv[0], if m & 1 != 0 { -nv[1] } else { nv[1] }, if m & 2 != 0 { -nv[2] } else { nv[2] }]
+                };
+                let dif = (nn[0] * ld[0] + nn[1] * ld[1] + nn[2] * ld[2]).max(0.0);
+                // brilho (Blinn) com o vetor de meia-via entre luz e câmera
+                let h = [ld[0] + ce[0], ld[1] + ce[1], ld[2] + ce[2]];
+                let hm = (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt().max(1e-6);
+                let sp = ((nn[0] * h[0] + nn[1] * h[1] + nn[2] * h[2]) / hm).max(0.0).powi(24);
+                0.34 + 0.80 * dif + 0.22 * sp
+            };
             let fi = Field::ALL.iter().position(|x| *x == self.field).unwrap();
             let sc_f = self.field.scale();
             if let Some(data) = self.field.data(f) {
@@ -1343,19 +1399,20 @@ impl PenSim {
                 };
                 let (lo, hi) = (r.0, if r.1 > r.0 { r.1 } else { r.0 + 1.0 });
                 let bands = self.bands;
-                view3d::render(&painter, &view, dx, &ext_pos, &idx, false, &|i| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands));
+                view3d::render(&painter, &view, dx, &ext_pos, &idx, false, Some(&light), &|i| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands));
                 legend(&painter, rect, self.field, lo, hi);
             } else {
                 let parts = snap.parts.clone();
                 let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
-                view3d::render(&painter, &view, dx, &ext_pos, &idx, true, &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
+                view3d::render(&painter, &view, dx, &ext_pos, &idx, true, Some(&light), &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
             }
             painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, format!("t = {:.1} µs", f.time * 1e6), FontId::monospace(15.0), Color32::from_gray(30));
         } else {
             let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
             let idx: Vec<u32> = if self.section { p.idx.iter().cloned().filter(|&i| in_section(p.pos[i as usize][1])).collect() } else { p.idx.clone() };
-            view3d::render(&painter, &view, dx, &p.pos, &idx, true, &|i| mats[(p.part[i] as usize).min(mats.len() - 1)]);
-            painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, format!("Modelo · {} nós", p.pos.len()), FontId::proportional(13.0), Color32::from_gray(60));
+            view3d::render(&painter, &view, p.dx, &p.pos, &idx, true, None, &|i| mats[(p.part[i] as usize).min(mats.len() - 1)]);
+            let label = p.note.clone().unwrap_or_else(|| format!("Modelo · {} nós", p.pos.len()));
+            painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, label, FontId::proportional(13.0), Color32::from_gray(60));
         }
         view3d::triad(&painter, &view);
         if self.ws == Ws::Results && self.job.is_some() && !snap.done && snap.error.is_none() && !results {

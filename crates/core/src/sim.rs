@@ -130,6 +130,8 @@ pub struct Sim {
     n_proj: u8,
     /// nós calculados (reais); os demais em `p` são fantasmas espelhados
     n_real: usize,
+    /// normais de superfície (apontando para fora) na configuração de referência; ~0 no interior
+    normals: Vec<[f32; 3]>,
     /// planos de simetria (bit 1 = y, bit 2 = z)
     sym: u8,
     /// por fantasma: nó real de origem e máscara de espelhamento
@@ -299,6 +301,7 @@ impl Sim {
             fill: vec![],
             n_proj: model.n_proj,
             n_real,
+            normals: vec![[0.0; 3]; n_real],
             sym,
             src,
             gmask,
@@ -309,7 +312,11 @@ impl Sim {
             cfg,
         };
         sim.build_bonds(horizon);
-        let nch = rayon::current_num_threads().max(1);
+        // blocos de trabalho: 4× as threads (melhor balanceamento, inclusive em núcleos heterogêneos),
+        // limitados pela memória dos buffers locais (n_real × 32 B por bloco)
+        let threads = rayon::current_num_threads().max(1);
+        let mem_cap = (48_000_000 / (n_real.max(1) * 32)).max(threads);
+        let nch = (threads * 4).min(mem_cap).max(1);
         sim.locals = (0..nch).map(|_| vec![[0.0; 4]; n_real]).collect();
         sim.dt = sim.stable_dt();
         sim.ke0 = sim.kinetic(Some(true));
@@ -345,6 +352,10 @@ impl Sim {
     pub fn surface(&self) -> Vec<bool> {
         self.surface.clone()
     }
+    /// normais de superfície dos nós (unitárias; zero no interior)
+    pub fn normals(&self) -> Vec<[f32; 3]> {
+        self.normals.clone()
+    }
     pub fn ref_positions(&self) -> Vec<[f32; 3]> {
         self.pos0[..self.n_real].iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect()
     }
@@ -354,7 +365,22 @@ impl Sim {
         let get = |i: usize| -> [f64; 3] {
             if use_ref { self.pos0[i] } else { [self.p[i].x, self.p[i].y, self.p[i].z] }
         };
-        let (mn, mx) = (0..n)
+        let small = n < 24_000; // abaixo disso, despachar tarefas paralelas custa mais que o trabalho
+        let (mn, mx) = if small {
+            let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+            for i in 0..n {
+                let q = get(i);
+                if !q.iter().all(|v| v.is_finite()) {
+                    continue;
+                }
+                for k in 0..3 {
+                    lo[k] = lo[k].min(q[k]);
+                    hi[k] = hi[k].max(q[k]);
+                }
+            }
+            (lo, hi)
+        } else {
+            (0..n)
             .into_par_iter()
             .with_min_len(2048)
             .map(|i| get(i))
@@ -372,7 +398,8 @@ impl Sim {
             .reduce(
                 || ([f64::MAX; 3], [f64::MIN; 3]),
                 |(l1, h1), (l2, h2)| ([0, 1, 2].map(|k| l1[k].min(l2[k])), [0, 1, 2].map(|k| h1[k].max(h2[k]))),
-            );
+            )
+        };
         let ext = (0..3).map(|k| mx[k] - mn[k]).fold(cs_min, f64::max);
         let cs = cs_min.max(ext / 90.0);
         let nn = [0, 1, 2].map(|k| ((mx[k] - mn[k]) / cs).floor() as i64 + 1);
@@ -383,11 +410,19 @@ impl Sim {
         let mut fill = std::mem::take(&mut self.fill);
         cell_start.clear();
         cell_start.resize(cells + 1, 0);
-        cell_of.par_iter_mut().with_min_len(2048).enumerate().for_each(|(i, c)| {
+        let inv = 1.0 / cs;
+        let key = |i: usize| -> u32 {
             let q = get(i);
-            let cc = [0, 1, 2].map(|k| (((q[k] - mn[k]) / cs) as i64).clamp(0, nn[k] - 1));
-            *c = ((cc[2] * nn[1] + cc[1]) * nn[0] + cc[0]) as u32;
-        });
+            let cc = [0, 1, 2].map(|k| (((q[k] - mn[k]) * inv) as i64).clamp(0, nn[k] - 1));
+            ((cc[2] * nn[1] + cc[1]) * nn[0] + cc[0]) as u32
+        };
+        if small {
+            for i in 0..n {
+                cell_of[i] = key(i);
+            }
+        } else {
+            cell_of.par_iter_mut().with_min_len(2048).enumerate().for_each(|(i, c)| *c = key(i));
+        }
         for i in 0..n {
             cell_start[cell_of[i] as usize + 1] += 1;
         }
@@ -417,12 +452,13 @@ impl Sim {
         let g = self.grid;
         let dx = self.cfg.dx;
         let nr = self.n_real;
-        let full: Vec<(u32, Vec<Bond>)> = (0..nr)
+        let full: Vec<(u32, Vec<Bond>, [f64; 3])> = (0..nr)
             .into_par_iter()
             .map(|i| {
                 let c = cell_coords(self.cell_of[i], &g);
                 let mut list = vec![];
                 let mut count = 0u32;
+                let mut nsum = [0.0f64; 3];
                 for oz in -1..=1 {
                     for oy in -1..=1 {
                         for ox in -1..=1 {
@@ -446,6 +482,9 @@ impl Sim {
                                         ((horizon + rr - xi) / dx).clamp(0.0, 1.0)
                                     };
                                     count += 1;
+                                    for a in 0..3 {
+                                        nsum[a] += d[a];
+                                    }
                                     // dono único: real–real com j > i; real–fantasma com i ≤ origem do fantasma
                                     let keep = if j < nr { j > i } else { i <= self.src[j - nr] as usize };
                                     if keep {
@@ -456,10 +495,22 @@ impl Sim {
                         }
                     }
                 }
-                (count, list)
+                (count, list, nsum)
             })
             .collect();
         self.initial_bonds = full.iter().map(|b| b.0).collect();
+        // normal de superfície: oposta à soma dos vetores para os vizinhos (≈ 0 no interior)
+        self.normals = full
+            .iter()
+            .map(|b| {
+                let m = (b.2[0] * b.2[0] + b.2[1] * b.2[1] + b.2[2] * b.2[2]).sqrt();
+                if m < 0.15 * dx * (b.0 as f64).max(1.0).sqrt() {
+                    [0.0; 3]
+                } else {
+                    [(-b.2[0] / m) as f32, (-b.2[1] / m) as f32, (-b.2[2] / m) as f32]
+                }
+            })
+            .collect();
         self.bonds = full.into_iter().map(|b| b.1).collect();
         // nós de superfície: menos ligações que o máximo da peça
         let nparts = self.mats.len();

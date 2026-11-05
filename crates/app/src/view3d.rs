@@ -22,7 +22,7 @@ impl Camera {
     pub fn right() -> Self {
         Camera { yaw: 0.0, pitch: 0.0, zoom: 1.0, pan: Vec2::ZERO }
     }
-    fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    pub fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
         let (sy, cy, sp, cp) = (self.yaw.sin(), self.yaw.cos(), self.pitch.sin(), self.pitch.cos());
         let eye = [cp * cy, cp * sy, sp];
         let right = [-sy, cy, 0.0];
@@ -74,7 +74,7 @@ pub fn background(painter: &egui::Painter, rect: Rect, dark: bool) {
 }
 
 /// Desenha os nós em ordem de profundidade (longe → perto).
-pub fn render(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3]], idx: &[u32], shade: bool, color: &dyn Fn(usize) -> Color32) {
+pub fn render(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3]], idx: &[u32], shade: bool, light: Option<&dyn Fn(usize) -> f32>, color: &dyn Fn(usize) -> Color32) {
     let mut items: Vec<(f32, u32, Pos2)> = idx
         .iter()
         .map(|&i| {
@@ -93,9 +93,16 @@ pub fn render(painter: &egui::Painter, v: &View, node_size: f32, pos: &[[f32; 3]
             continue;
         }
         let mut c = color(i as usize);
-        if shade {
-            let t = 0.68 + 0.32 * ((d - dmin) / (dmax - dmin).max(1e-9));
-            c = Color32::from_rgb((c.r() as f32 * t) as u8, (c.g() as f32 * t) as u8, (c.b() as f32 * t) as u8);
+        // profundidade (mais escuro ao fundo) × iluminação por normal, quando fornecida
+        let depth_t = 0.72 + 0.28 * ((d - dmin) / (dmax - dmin).max(1e-9));
+        let t = match light {
+            Some(l) => depth_t * l(i as usize),
+            None if shade => 0.68 + 0.32 * ((d - dmin) / (dmax - dmin).max(1e-9)),
+            None => 1.0,
+        };
+        if t != 1.0 {
+            let m = |ch: u8| ((ch as f32 * t).clamp(0.0, 255.0)) as u8;
+            c = Color32::from_rgb(m(c.r()), m(c.g()), m(c.b()));
         }
         mesh.add_colored_rect(Rect::from_center_size(p, Vec2::splat(half * 2.0)), c);
     }
