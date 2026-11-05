@@ -418,6 +418,11 @@ impl Sim {
         (0.8 * p_pen).max(0.8 * p_time).min(0.8)
     }
 
+    /// instante (s) em que o corpo principal se separou do alvo, se já ocorreu
+    pub fn separation_time(&self) -> Option<f64> {
+        self.sep_time
+    }
+
     pub fn done(&self) -> bool {
         self.time >= self.t_end
     }
@@ -705,6 +710,7 @@ impl Sim {
             let near = &self.near;
             let awake = &self.awake;
             let noise = self.cfg.noise;
+            let rate_gain = self.cfg.rate_gain;
             let cell_start = &self.cell_start;
             let cell_items = &self.cell_items;
             let cell_of = &self.cell_of;
@@ -728,8 +734,8 @@ impl Sim {
                         let mat = &mats[b];
                         let cvv = c_bond[b] * v2;
                         let fail = mat.fail_stretch;
-                        let sy0 = mat.yield_strength / mat.young;
-                        let hard = mat.hardening / mat.young;
+                        let sy0 = mat.yield_strength / mat.young * rate_gain;
+                        let hard = mat.hardening / mat.young * rate_gain;
                         let comp = mat.comp_factor;
                         // materiais frágeis têm bem mais dispersão de resistência
                         let nf = (noise * if comp >= 5.0 { 2.0 } else { 1.0 }).min(0.6);
@@ -974,7 +980,12 @@ impl Sim {
         }
         let g = self.grid;
         let reach2 = (1.3 * self.cfg.dx).powi(2);
-        let (mut touching, mut n_main) = (false, 0usize);
+        let (mut touching, mut n_main, mut x_main) = (false, 0usize, 0.0f64);
+        for i in 0..nr {
+            if self.part[i] < self.n_proj && (alive[i] as f64) >= 0.5 * self.initial_bonds[i] as f64 {
+                x_main += self.p[i].x;
+            }
+        }
         'nodes: for i in 0..nr {
             if self.part[i] >= self.n_proj || (alive[i] as f64) < 0.5 * self.initial_bonds[i] as f64 {
                 continue;
@@ -1006,9 +1017,13 @@ impl Sim {
                 }
             }
         }
+        // o corpo só "saiu" se o centro de massa estiver fora do alvo (depois da face traseira ou
+        // antes da frontal); a cauda de um dardo dentro do túnel já aberto não toca as paredes
+        let xcm = if n_main > 0 { x_main / n_main as f64 } else { 0.0 };
+        let outside = xcm > self.back_x || xcm < 0.0;
         if touching {
             self.had_contact = true;
-        } else if self.had_contact && n_main > 0 {
+        } else if self.had_contact && n_main > 0 && outside {
             self.exit_found = true;
             self.sep_time = Some(self.time);
             self.t_end = self.t_end.min(self.time * 1.25);
@@ -1154,7 +1169,9 @@ impl Sim {
         if self.time > 0.3 * self.t_end && h.len() >= 5 {
             let w = &h[h.len() - 5..];
             let (mn, mx) = (w.iter().cloned().fold(f64::MAX, f64::min), w.iter().cloned().fold(f64::MIN, f64::max));
-            if mx - mn < 0.004 * self.ke0.max(1e-12) {
+            // parada antecipada só se o projétil estiver de fato parado (energia desprezível e estável);
+            // enquanto ele ainda avança dentro do alvo, a simulação continua até ele sair (ou até o tempo máximo)
+            if mx - mn < 0.004 * self.ke0.max(1e-12) && ke_p < 2e-5 * self.ke0.max(1e-12) {
                 self.t_end = self.time;
             }
         }

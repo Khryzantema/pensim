@@ -116,6 +116,7 @@ impl Ammo {
             noise: 0.15,
             jitter: 0.05,
             ignore_memory: false,
+            rate_gain: 1.0,
         };
         cfg
     }

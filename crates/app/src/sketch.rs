@@ -55,7 +55,9 @@ fn arrow(painter: &egui::Painter, c: Pos2, horizontal: bool, col: Color32, activ
 }
 
 /// Retorna `true` se o perfil mudou. `profile` em metros: (a = distância da ponta, r = raio).
-pub fn show(ui: &mut egui::Ui, ed: &mut SketchEditor, profile: &mut Vec<[f64; 2]>, fill: Color32, core: Option<(&[[f64; 2]], Color32)>) -> bool {
+/// `unit`: escala do modelo; os textos mostram medidas REAIS (valor do modelo ÷ unit).
+pub fn show(ui: &mut egui::Ui, ed: &mut SketchEditor, profile: &mut Vec<[f64; 2]>, fill: Color32, core: Option<(&[[f64; 2]], Color32)>, unit: f64) -> bool {
+    let unit = unit.max(1e-6);
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let rect = resp.rect;
     painter.rect_filled(rect, 0.0, Color32::from_rgb(250, 251, 253));
@@ -118,7 +120,7 @@ pub fn show(ui: &mut egui::Ui, ed: &mut SketchEditor, profile: &mut Vec<[f64; 2]
         }
     }
     // cotas
-    painter.text(to(len / 2.0, -rmax - 2.0), Align2::CENTER_TOP, format!("L = {len:.1} mm   ⌀ máx = {:.1} mm", rmax * 2.0), FontId::proportional(13.0), Color32::from_rgb(40, 60, 100));
+    painter.text(to(len / 2.0, -rmax - 2.0), Align2::CENTER_TOP, format!("L = {:.1} mm   ⌀ máx = {:.1} mm (reais)", len / unit, rmax * 2.0 / unit), FontId::proportional(13.0), Color32::from_rgb(40, 60, 100));
 
     let mut changed = false;
     let hit = |p: Pos2, prof: &Vec<[f64; 2]>| -> Option<usize> {
@@ -246,7 +248,7 @@ pub fn show(ui: &mut egui::Ui, ed: &mut SketchEditor, profile: &mut Vec<[f64; 2]
         arrow(&painter, hh, true, if locked { Color32::GRAY } else { red }, matches!(ed.gizmo, Some((Axis::Horizontal, _, _))));
         arrow(&painter, hv, false, green, matches!(ed.gizmo, Some((Axis::Vertical, _, _))));
         let (off, al) = if pp.x + 190.0 > rect.right() { (egui::Vec2::new(-10.0, 12.0), Align2::RIGHT_TOP) } else { (egui::Vec2::new(10.0, 12.0), Align2::LEFT_TOP) };
-        painter.text(pp + off, al, format!("a = {:.1}  r = {:.1} mm", profile[i][0] * 1e3, profile[i][1] * 1e3), FontId::proportional(12.0), Color32::from_rgb(40, 60, 100));
+        painter.text(pp + off, al, format!("a = {:.1}  r = {:.1} mm", profile[i][0] * 1e3 / unit, profile[i][1] * 1e3 / unit), FontId::proportional(12.0), Color32::from_rgb(40, 60, 100));
     }
     painter.text(Pos2::new(rect.left() + 8.0, rect.top() + 6.0), Align2::LEFT_TOP, "ESBOÇO · plano a–r (a = distância da ponta)", FontId::proportional(12.0), Color32::from_rgb(90, 100, 120));
     changed
@@ -268,7 +270,8 @@ pub fn layer_spans(layers: &[Layer]) -> Vec<(f64, f64)> {
 
 /// Editor 2D (vista lateral x–z) do alvo: vértices frontal (folga) e traseiro (espessura)
 /// de cada camada; a seta vertical altera a altura. Retorna `true` se algo mudou.
-pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<Layer>, proj: &[[f64; 2]], colors: &[Color32], angle_deg: f64) -> bool {
+pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<Layer>, proj: &[[f64; 2]], colors: &[Color32], angle_deg: f64, unit: f64) -> bool {
+    let unit = unit.max(1e-6);
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let rect = resp.rect;
     painter.rect_filled(rect, 0.0, Color32::from_rgb(250, 251, 253));
@@ -458,7 +461,7 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
         arrow(&painter, hh, true, if locked { Color32::GRAY } else { red }, matches!(ed.gizmo, Some((Axis::Horizontal, _, _))));
         arrow(&painter, hv, false, green, matches!(ed.gizmo, Some((Axis::Vertical, _, _))));
         let sp = layer_spans(layers);
-        let txt = if back { format!("espessura {:.1} mm · altura {:.0} mm", layers[i].thickness * 1e3, layers[i].height * 1e3) } else { format!("folga {:.1} mm · altura {:.0} mm", layers[i].gap_before * 1e3, layers[i].height * 1e3) };
+        let txt = if back { format!("espessura {:.0} mm · altura {:.0} mm (reais)", layers[i].thickness * 1e3 / unit, layers[i].height * 1e3 / unit) } else { format!("folga {:.0} mm · altura {:.0} mm (reais)", layers[i].gap_before * 1e3 / unit, layers[i].height * 1e3 / unit) };
         let _ = sp;
         let (off, al) = if pp.x + 230.0 > rect.right() { (egui::Vec2::new(-10.0, 14.0), Align2::RIGHT_TOP) } else { (egui::Vec2::new(10.0, 14.0), Align2::LEFT_TOP) };
         painter.text(pp + off, al, txt, FontId::proportional(12.0), Color32::from_rgb(40, 60, 100));

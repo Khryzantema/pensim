@@ -166,6 +166,9 @@ pub struct Config {
     pub jitter: f64,
     /// ignora a verificação de memória (o usuário escolheu continuar mesmo assim)
     pub ignore_memory: bool,
+    /// resistência dinâmica: multiplica o escoamento (e o encruamento) para representar o ganho
+    /// por taxa de deformação em impacto balístico (1 = valores quase-estáticos da biblioteca)
+    pub rate_gain: f64,
 }
 
 impl Default for Config {
@@ -228,6 +231,7 @@ impl Preset {
             noise: 0.15,
             jitter: 0.05,
             ignore_memory: false,
+            rate_gain: 1.0,
         }
     }
 }

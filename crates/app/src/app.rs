@@ -779,7 +779,7 @@ impl PenSim {
     /// Controle de escala global (vale para projétil e alvo).
     fn scale_control(&mut self, ui: &mut egui::Ui) {
         let mut sc = self.ammo_scale;
-        if ui.add(egui::DragValue::new(&mut sc).prefix("escala ×").speed(0.01).range(0.03..=3.0).fixed_decimals(2)).on_hover_text("Escala TUDO: projétil e alvo (mesma velocidade). Preserva suas edições.").changed() {
+        if ui.add(egui::DragValue::new(&mut sc).prefix("escala ×").speed(0.01).range(0.03..=3.0).fixed_decimals(2)).on_hover_text("Escala TUDO (projétil e alvo), mesma velocidade. Todas as medidas na interface são REAIS; o modelo é simulado nesta escala.").changed() {
             self.rescale(sc);
         }
     }
@@ -804,20 +804,21 @@ impl PenSim {
     fn toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, snap: &Snap) {
         ui.horizontal(|ui| match self.ws {
             Ws::Target => {
-                    group(ui, "CAMADA SELECIONADA", |ui| {
+                    let u = self.ammo_scale.max(1e-6);
+                    group(ui, "CAMADA SELECIONADA (mm reais)", |ui| {
                         let sel = self.sketch.tsel.map(|t| t.0).unwrap_or(0).min(self.cfg.design.layers.len() - 1);
                         let l = &mut self.cfg.design.layers[sel];
-                        let (mut g, mut t, mut h, mut w) = (l.gap_before * 1e3, l.thickness * 1e3, l.height * 1e3, l.width * 1e3);
+                        let (mut g, mut t, mut h, mut w) = (l.gap_before * 1e3 / u, l.thickness * 1e3 / u, l.height * 1e3 / u, l.width * 1e3 / u);
                         ui.label(format!("#{}", sel + 1));
-                        ui.add_enabled(sel > 0, egui::DragValue::new(&mut g).prefix("folga ").suffix(" mm").speed(0.1).range(0.0..=80.0).fixed_decimals(1));
-                        ui.add(egui::DragValue::new(&mut t).prefix("esp. ").suffix(" mm").speed(0.1).range(1.0..=400.0).fixed_decimals(1));
-                        ui.add(egui::DragValue::new(&mut h).prefix("alt. ").suffix(" mm").speed(0.2).range(20.0..=500.0).fixed_decimals(0));
-                        ui.add_enabled(!l.round, egui::DragValue::new(&mut w).prefix("larg. ").suffix(" mm").speed(0.2).range(20.0..=500.0).fixed_decimals(0));
+                        ui.add_enabled(sel > 0, egui::DragValue::new(&mut g).prefix("folga ").suffix(" mm").speed(0.5).range(0.0..=80.0 / u).fixed_decimals(0));
+                        ui.add(egui::DragValue::new(&mut t).prefix("esp. ").suffix(" mm").speed(1.0).range(1.0 / u..=400.0 / u).fixed_decimals(0));
+                        ui.add(egui::DragValue::new(&mut h).prefix("alt. ").suffix(" mm").speed(1.0).range(20.0 / u..=500.0 / u).fixed_decimals(0));
+                        ui.add_enabled(!l.round, egui::DragValue::new(&mut w).prefix("larg. ").suffix(" mm").speed(1.0).range(20.0 / u..=500.0 / u).fixed_decimals(0));
                         ui.checkbox(&mut l.round, "Disco");
-                        l.gap_before = g / 1e3;
-                        l.thickness = t / 1e3;
-                        l.height = h / 1e3;
-                        l.width = if l.round { h / 1e3 } else { w / 1e3 };
+                        l.gap_before = g * u / 1e3;
+                        l.thickness = t * u / 1e3;
+                        l.height = h * u / 1e3;
+                        l.width = if l.round { h * u / 1e3 } else { w * u / 1e3 };
                     });
                     group(ui, "CAMADAS", |ui| {
                         if tbtn(ui, "+", "Camada", false, true, 62.0).clicked() {
@@ -880,17 +881,18 @@ impl PenSim {
                         }
                     });
                     let sel = self.sketch.selected;
+                    let u = self.ammo_scale.max(1e-6);
                     group(ui, "PONTO SELECIONADO", |ui| {
                         let prof = &mut self.cfg.design.projectile.profile;
                         match sel {
                             Some(i) if i < prof.len() => {
                                 let n = prof.len();
-                                let lo = if i == 0 { 0.0 } else { prof[i - 1][0] * 1e3 + 0.05 };
-                                let hi = if i + 1 == n { 400.0 } else { prof[i + 1][0] * 1e3 - 0.05 };
-                                let (mut a, mut r) = (prof[i][0] * 1e3, prof[i][1] * 1e3);
+                                let lo = if i == 0 { 0.0 } else { prof[i - 1][0] * 1e3 / u + 0.05 };
+                                let hi = if i + 1 == n { 400.0 / u } else { prof[i + 1][0] * 1e3 / u - 0.05 };
+                                let (mut a, mut r) = (prof[i][0] * 1e3 / u, prof[i][1] * 1e3 / u);
                                 ui.add_enabled(i != 0, egui::DragValue::new(&mut a).prefix("a ").suffix(" mm").speed(0.1).range(lo..=hi.max(lo)).fixed_decimals(1));
-                                ui.add(egui::DragValue::new(&mut r).prefix("r ").suffix(" mm").speed(0.1).range(0.0..=40.0).fixed_decimals(1));
-                                prof[i] = [a / 1e3, r / 1e3];
+                                ui.add(egui::DragValue::new(&mut r).prefix("r ").suffix(" mm").speed(0.1).range(0.0..=40.0 / u).fixed_decimals(1));
+                                prof[i] = [a * u / 1e3, r * u / 1e3];
                             }
                             _ => {
                                 ui.weak("toque num ponto");
@@ -1101,7 +1103,7 @@ impl PenSim {
                 ui.label("Contorno externo do projétil no plano a–r, revolvido em torno do eixo. A ponta fica em a = 0.");
                 ui.weak("Edite na aba PROJÉTIL: arraste os pontos ou use as setas.");
                 let p = &self.cfg.design.projectile;
-                ui.label(format!("Pontos: {} · L = {:.1} mm · ⌀ = {:.1} mm", p.profile.len(), p.length() * 1e3, p.max_radius() * 2e3));
+                ui.label(format!("Pontos: {} · L = {:.1} mm · ⌀ = {:.1} mm (reais)", p.profile.len(), p.length() * 1e3 / self.ammo_scale.max(1e-6), p.max_radius() * 2e3 / self.ammo_scale.max(1e-6)));
                 ui.separator();
                 ui.label("Gerar perfil paramétrico:");
                 let (mut d, mut l) = (p.max_radius() * 2e3, p.length() * 1e3);
@@ -1149,7 +1151,7 @@ impl PenSim {
                     }
                 }
                 let p = &self.cfg.design.projectile;
-                ui.label(format!("L = {:.1} mm · ⌀ = {:.1} mm", p.length() * 1e3, p.max_radius() * 2e3));
+                ui.label(format!("L = {:.1} mm · ⌀ = {:.1} mm (reais)", p.length() * 1e3 / self.ammo_scale.max(1e-6), p.max_radius() * 2e3 / self.ammo_scale.max(1e-6)));
             }
             Sel::Layer(i) => {
                 let n = self.cfg.design.layers.len();
@@ -1163,18 +1165,21 @@ impl PenSim {
                 }
                 let l: &mut Layer = &mut self.cfg.design.layers[i];
                 mat_combo(ui, "lm", &mut l.material);
-                let (mut t, mut g, mut w, mut h) = (l.thickness * 1e3, l.gap_before * 1e3, l.width * 1e3, l.height * 1e3);
-                ui.add(egui::Slider::new(&mut t, 1.0..=400.0).logarithmic(true).text("espessura mm"));
-                ui.add(egui::Slider::new(&mut g, 0.0..=40.0).text("folga antes mm"));
-                ui.add(egui::Slider::new(&mut w, 20.0..=500.0).logarithmic(true).text(if l.round { "diâmetro mm" } else { "largura mm" }));
+                // medidas REAIS (o modelo guarda × escala)
+                let u = self.ammo_scale.max(1e-6);
+                let (mut t, mut g, mut w, mut h) = (l.thickness * 1e3 / u, l.gap_before * 1e3 / u, l.width * 1e3 / u, l.height * 1e3 / u);
+                ui.add(egui::Slider::new(&mut t, 2.0..=1500.0).logarithmic(true).text("espessura real mm"));
+                ui.add(egui::Slider::new(&mut g, 0.0..=300.0).text("folga antes mm"));
+                ui.add(egui::Slider::new(&mut w, 20.0..=2000.0).logarithmic(true).text(if l.round { "diâmetro real mm" } else { "largura real mm" }));
                 if !l.round {
-                    ui.add(egui::Slider::new(&mut h, 20.0..=500.0).logarithmic(true).text("altura mm"));
+                    ui.add(egui::Slider::new(&mut h, 20.0..=2000.0).logarithmic(true).text("altura real mm"));
                 }
                 ui.checkbox(&mut l.round, "Seção circular (disco)");
-                l.thickness = t / 1e3;
-                l.gap_before = g / 1e3;
-                l.width = w / 1e3;
-                l.height = h / 1e3;
+                l.thickness = t * u / 1e3;
+                l.gap_before = g * u / 1e3;
+                l.width = w * u / 1e3;
+                l.height = h * u / 1e3;
+                ui.weak(format!("No modelo (escala ×{:.2}): espessura {:.1} mm.", self.ammo_scale, l.thickness * 1e3));
                 ui.horizontal(|ui| {
                     if ui.add_enabled(i > 0, egui::Button::new("▲ Subir")).clicked() {
                         self.cfg.design.layers.swap(i, i - 1);
@@ -1619,13 +1624,13 @@ impl PenSim {
         if self.ws == Ws::Target && !self.peek3d {
             let colors: Vec<Color32> = self.cfg.design.layers.iter().map(|l| mat_color(l.material.name)).collect();
             let proj = self.cfg.design.projectile.profile.clone();
-            sketch::show_target(ui, &mut self.sketch, &mut self.cfg.design.layers, &proj, &colors, self.cfg.obliquity_deg);
+            sketch::show_target(ui, &mut self.sketch, &mut self.cfg.design.layers, &proj, &colors, self.cfg.obliquity_deg, self.ammo_scale);
             return;
         }
         if self.ws == Ws::Projectile && !self.peek3d {
             let fill = mat_color(self.cfg.design.projectile.material.name);
             let core = self.cfg.design.projectile.core.as_ref().map(|c| (c.profile.clone(), mat_color(c.material.name)));
-            sketch::show(ui, &mut self.sketch, &mut self.cfg.design.projectile.profile, fill, core.as_ref().map(|(p, c)| (p.as_slice(), *c)));
+            sketch::show(ui, &mut self.sketch, &mut self.cfg.design.projectile.profile, fill, core.as_ref().map(|(p, c)| (p.as_slice(), *c)), self.ammo_scale);
             return;
         }
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
