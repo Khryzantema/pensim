@@ -305,7 +305,8 @@ pub fn layer_spans(layers: &[Layer]) -> Vec<(f64, f64)> {
 
 /// Editor 2D (vista lateral x–z) do alvo: vértices frontal (folga) e traseiro (espessura)
 /// de cada camada; a seta vertical altera a altura. Retorna `true` se algo mudou.
-pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<Layer>, proj: &[[f64; 2]], colors: &[Color32], angle_deg: f64, unit: f64) -> bool {
+/// `extra`: desenha os objetos do alvo com a mesma transformação (coordenadas do modelo em mm).
+pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<Layer>, proj: &[[f64; 2]], colors: &[Color32], angle_deg: f64, unit: f64, extra: &dyn Fn(&egui::Painter, &dyn Fn(f64, f64) -> Pos2)) -> bool {
     let unit = unit.max(1e-6);
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let rect = resp.rect;
@@ -385,6 +386,7 @@ pub fn show_target(ui: &mut egui::Ui, ed: &mut SketchEditor, layers: &mut Vec<La
         painter.text(a0 + egui::Vec2::new(6.0, -6.0), Align2::LEFT_BOTTOM, format!("α = {angle_deg:.0}°"), FontId::proportional(13.0), Color32::from_rgb(200, 60, 60));
     }
 
+    extra(&painter, &tor);
     // camadas
     for (i, l) in layers.iter().enumerate() {
         let (x0, x1) = spans[i];

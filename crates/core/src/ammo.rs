@@ -94,7 +94,7 @@ fn mat(i: usize) -> Fill {
 }
 
 fn reg(name: &str, outer: P, inner: P, fill: Fill) -> Region {
-    Region { name: name.into(), outer, inner, fill }
+    Region { name: name.into(), outer, inner, fill, poly: vec![] }
 }
 
 fn cyl(a0: f64, a1: f64, r: f64) -> P {
@@ -342,6 +342,7 @@ impl Ammo {
             dx: 0.0015,
             horizon_m: 2.5,
             design: Design {
+                objects: vec![],
                 projectile,
                 layers: vec![Layer {
                     thickness: self.plate_mm * k,

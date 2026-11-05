@@ -1,12 +1,12 @@
 //! Salvar/abrir simulações prontas (arquivo `.psim`): projeto, resultados e quadros comprimidos.
-use crate::config::{Core, Design, Fill, Layer, Projectile, Region};
+use crate::config::{Core, Design, Fill, Layer, Projectile, Region, TargetObject};
 use crate::material::{Material, LIBRARY};
 use crate::sim::{Outcome, OutcomeKind};
 use crate::store::PackedFrame;
 use std::sync::Arc;
 
 const MAGIC: &[u8; 4] = b"PSIM";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 pub struct SaveData {
     pub title: String,
@@ -101,12 +101,26 @@ pub fn write(path: &std::path::Path, d: &SaveData) -> std::io::Result<u64> {
         }
         w.profile(&g.outer);
         w.profile(&g.inner);
+        w.profile(&g.poly);
     }
     w.u32(d.design.layers.len() as u32);
     for l in &d.design.layers {
         for v in [l.thickness, l.gap_before, l.width, l.height] { w.f64(v); }
         w.u8(l.round as u8);
         w.str(l.material.name);
+    }
+    w.u32(d.design.objects.len() as u32);
+    for o in &d.design.objects {
+        w.str(&o.name);
+        w.f64(o.width);
+        w.u32(o.parts.len() as u32);
+        for (poly, fill) in &o.parts {
+            match fill {
+                Fill::Mat(m) => { w.u8(2); w.str(m.name); }
+                _ => { w.u8(0); }
+            }
+            w.profile(poly);
+        }
     }
     // resultado
     let o = &d.outcome;
@@ -182,7 +196,8 @@ pub fn read(path: &std::path::Path) -> Option<SaveData> {
             };
             let outer = r.profile()?;
             let inner = r.profile()?;
-            regions.push(Region { name, outer, inner, fill });
+            let poly = if ver >= 4 { r.profile()? } else { vec![] };
+            regions.push(Region { name, outer, inner, fill, poly });
         }
     }
     let nl = r.u32()? as usize;
@@ -191,6 +206,21 @@ pub fn read(path: &std::path::Path) -> Option<SaveData> {
         let (thickness, gap_before, width, height) = (r.f64()?, r.f64()?, r.f64()?, r.f64()?);
         let round = r.u8()? == 1;
         layers.push(Layer { thickness, gap_before, width, height, round, material: material(&r.str()?) });
+    }
+    let mut objects = Vec::new();
+    if ver >= 4 {
+        let no = r.u32()? as usize;
+        for _ in 0..no {
+            let name = r.str()?;
+            let width = r.f64()?;
+            let np = r.u32()? as usize;
+            let mut parts = Vec::new();
+            for _ in 0..np {
+                let fill = if r.u8()? == 2 { Fill::Mat(material(&r.str()?)) } else { Fill::Void };
+                parts.push((r.profile()?, fill));
+            }
+            objects.push(TargetObject { name, parts, width });
+        }
     }
     let kind = match r.u8()? { 0 => OutcomeKind::Perforation, 1 => OutcomeKind::PartialPenetration, _ => OutcomeKind::Rejected };
     let (v_residual, penetration, energy_absorbed_pct, target_ejected_pct, proj_behind_pct, energy_error_pct) = (r.f64()?, r.f64()?, r.f64()?, r.f64()?, r.f64()?, r.f64()?);
@@ -214,7 +244,7 @@ pub fn read(path: &std::path::Path) -> Option<SaveData> {
     }
     Some(SaveData {
         title, velocity, obliquity_deg, dx, scale,
-        design: Design { projectile: Projectile { profile, material: pm, core, regions }, layers },
+        design: Design { projectile: Projectile { profile, material: pm, core, regions }, layers, objects },
         n_phys, dt, steps, wall, t_end, back_x, sym, outcome, parts, surface, normals, ref_pos, frames,
     })
 }

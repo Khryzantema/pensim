@@ -21,7 +21,7 @@ impl Model {
     pub fn build(cfg: &Config) -> Result<Model, String> {
         let mut m = Self::build_full(cfg)?;
         if cfg.symmetry {
-            let sym: u8 = 1 | if cfg.obliquity_deg.abs() < 1e-9 { 2 } else { 0 };
+            let sym: u8 = 1 | if cfg.obliquity_deg.abs() < 1e-9 && cfg.design.objects.is_empty() { 2 } else { 0 };
             let keep: Vec<bool> = m.pos.iter().map(|q| q[1] > 0.0 && (sym & 2 == 0 || q[2] > 0.0)).collect();
             let sel = |v: &Vec<[f64; 3]>| -> Vec<[f64; 3]> { v.iter().zip(&keep).filter(|(_, k)| **k).map(|(q, _)| *q).collect() };
             m.pos = sel(&m.pos);
@@ -44,8 +44,8 @@ pub fn hash_unit(a: u64, b: u64, c: u64, d: u64) -> f64 {
     /// Modelo completo (pré-visualização e comparação).
     pub fn build_full(cfg: &Config) -> Result<Model, String> {
         let dx = cfg.dx;
-        if cfg.design.layers.is_empty() {
-            return Err("O alvo precisa de ao menos uma camada.".into());
+        if cfg.design.layers.is_empty() && cfg.design.objects.is_empty() {
+            return Err("O alvo precisa de ao menos uma camada ou um objeto.".into());
         }
         if cfg.design.projectile.profile.len() < 2 {
             return Err("O esboço do projétil precisa de ao menos 2 pontos.".into());
@@ -91,7 +91,51 @@ pub fn hash_unit(a: u64, b: u64, c: u64, d: u64) -> f64 {
             mats.push(l.material.clone());
             cursor += nt as f64 * dx;
         }
-        let back_x = cursor;
+        let mut back_x = cursor;
+
+        // --- objetos desenhados do alvo: contornos no plano x–z extrudados em y
+        let mut base_part = n_proj + cfg.design.layers.len();
+        let first_obj = pos.len();
+        let mut xmin_all = 0.0f64;
+        for (oi, o) in cfg.design.objects.iter().enumerate() {
+            let b = o.bbox();
+            if b[0] > b[1] {
+                continue;
+            }
+            let even = |v: usize| v + v % 2;
+            let ny = even(((o.width / dx).round() as usize).max(2));
+            let (i0, i1) = ((b[0] / dx).floor() as i64, (b[1] / dx).ceil() as i64);
+            let (k0, k1) = ((b[2] / dx).floor() as i64, (b[3] / dx).ceil() as i64);
+            for i in i0..i1 {
+                let x = (i as f64 + 0.5) * dx;
+                for k in k0..k1 {
+                    let z = (k as f64 + 0.5) * dx;
+                    let Some(lp) = o.part_at(x, z) else { continue };
+                    xmin_all = xmin_all.min(x - 0.5 * dx);
+                    back_x = back_x.max(x + 0.5 * dx);
+                    for j in 0..ny {
+                        let y = (j as f64 + 0.5 - ny as f64 / 2.0) * dx;
+                        let jt = cfg.jitter * dx;
+                        let id = (((oi + 1) as u64) << 44) ^ (((i - i0) as u64) << 22) ^ j as u64;
+                        pos.push([x + jt * Self::hash_unit(5, id, (k - k0) as u64, 1), y + jt * Self::hash_unit(5, id, (k - k0) as u64, 2), z + jt * Self::hash_unit(5, id, (k - k0) as u64, 3)]);
+                        part.push((base_part + lp) as u8);
+                        fixed.push(false);
+                    }
+                }
+            }
+            let m = o.materials();
+            base_part += m.len();
+            mats.extend(m);
+        }
+        let _ = first_obj;
+        // objeto na frente da primeira chapa: desloca o alvo todo para a face mais à frente ficar em x = 0
+        if xmin_all < 0.0 {
+            let sh = (-xmin_all / dx).ceil() * dx;
+            for p in pos.iter_mut() {
+                p[0] += sh;
+            }
+            back_x += sh;
+        }
 
         // --- projétil: sólido de revolução em torno do eixo de voo
         let pr = &cfg.design.projectile;

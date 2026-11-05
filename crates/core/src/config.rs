@@ -94,12 +94,102 @@ pub struct Region {
     pub outer: Vec<[f64; 2]>,
     pub inner: Vec<[f64; 2]>,
     pub fill: Fill,
+    /// contorno desenhado (a, r): se não vazio, vale o polígono em vez de outer/inner
+    pub poly: Vec<[f64; 2]>,
+}
+
+/// Ponto dentro do polígono (regra par-ímpar).
+pub fn point_in_poly(poly: &[[f64; 2]], x: f64, y: f64) -> bool {
+    let n = poly.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[j]);
+        if (a[1] > y) != (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0] {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Área com sinal (fórmula do laço).
+pub fn poly_area(poly: &[[f64; 2]]) -> f64 {
+    let n = poly.len();
+    let mut s = 0.0;
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        s += a[0] * b[1] - b[0] * a[1];
+    }
+    0.5 * s
+}
+
+/// Objeto desenhado do alvo: contornos na vista lateral (x = direção de voo a partir da face do
+/// alvo, z = vertical) extrudados na largura `width` (eixo y, centrado). Os contornos vêm em
+/// ordem de área decrescente: o último que contém o ponto decide (o mais interno vale).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetObject {
+    pub name: String,
+    pub parts: Vec<(Vec<[f64; 2]>, Fill)>,
+    pub width: f64,
+}
+
+impl TargetObject {
+    /// índice local entre as peças com material (para a numeração de materiais), ou None (vazio/fora)
+    pub fn part_at(&self, x: f64, z: f64) -> Option<usize> {
+        let mut hit: Option<usize> = None;
+        let mut k = 0usize;
+        for (poly, fill) in &self.parts {
+            let mat = matches!(fill, Fill::Mat(_));
+            if point_in_poly(poly, x, z) {
+                hit = if mat { Some(k) } else { None };
+            }
+            if mat {
+                k += 1;
+            }
+        }
+        hit
+    }
+    pub fn materials(&self) -> Vec<Material> {
+        self.parts.iter().filter_map(|(_, f)| if let Fill::Mat(m) = f { Some(m.clone()) } else { None }).collect()
+    }
+    /// (x mín, x máx, z mín, z máx)
+    pub fn bbox(&self) -> [f64; 4] {
+        let mut b = [f64::MAX, f64::MIN, f64::MAX, f64::MIN];
+        for (poly, _) in &self.parts {
+            for p in poly {
+                b[0] = b[0].min(p[0]);
+                b[1] = b[1].max(p[0]);
+                b[2] = b[2].min(p[1]);
+                b[3] = b[3].max(p[1]);
+            }
+        }
+        b
+    }
+    pub fn area(&self) -> f64 {
+        self.parts.iter().filter(|(_, f)| matches!(f, Fill::Mat(_))).map(|(p, _)| poly_area(p).abs()).fold(0.0, f64::max)
+    }
+    pub fn scale(&mut self, f: f64) {
+        for (poly, _) in self.parts.iter_mut() {
+            for q in poly.iter_mut() {
+                q[0] *= f;
+                q[1] *= f;
+            }
+        }
+        self.width *= f;
+    }
 }
 
 impl Region {
     /// `min_wall`: cascas mais finas que isso (camisa, para-brisa, cinta) são engrossadas para
     /// dentro até essa espessura, para não sumirem entre os nós da malha.
     pub fn contains(&self, a: f64, rho: f64, min_wall: f64) -> bool {
+        if !self.poly.is_empty() {
+            return point_in_poly(&self.poly, a, rho);
+        }
         let ro = profile_radius(&self.outer, a);
         if ro < 0.0 || rho > ro + 1e-12 {
             return false;
@@ -111,7 +201,7 @@ impl Region {
         ri < 0.0 || rho > ri.min(ro - min_wall) + 1e-12
     }
     pub fn scale(&mut self, f: f64) {
-        for q in self.outer.iter_mut().chain(self.inner.iter_mut()) {
+        for q in self.outer.iter_mut().chain(self.inner.iter_mut()).chain(self.poly.iter_mut()) {
             q[0] *= f;
             q[1] *= f;
         }
@@ -160,7 +250,8 @@ impl Projectile {
             }
         }
         let mut next = 1 + self.core.is_some() as u8;
-        let mut void = false;
+        // projétil desenhado: fora de todos os contornos é vazio
+        let mut void = self.regions.iter().any(|r| !r.poly.is_empty());
         for r in &self.regions {
             let idx = if matches!(r.fill, Fill::Mat(_)) {
                 next += 1;
@@ -218,6 +309,8 @@ pub struct Layer {
 pub struct Design {
     pub projectile: Projectile,
     pub layers: Vec<Layer>,
+    /// objetos desenhados do alvo (além das chapas)
+    pub objects: Vec<TargetObject>,
 }
 
 impl Design {
@@ -237,6 +330,9 @@ impl Design {
             }
         }
         v.extend(self.layers.iter().map(|l| l.material.clone()));
+        for o in &self.objects {
+            v.extend(o.materials());
+        }
         v
     }
 }
@@ -322,7 +418,7 @@ impl Preset {
         Config {
             dx: 0.0015,
             horizon_m: 2.5,
-            design: Design { projectile, layers },
+            design: Design { projectile, layers, objects: vec![] },
             velocity,
             obliquity_deg: 0.0,
             clamp_edges: true,
@@ -374,7 +470,8 @@ impl Config {
                 let a = if l.round { std::f64::consts::PI / 4.0 * l.width * l.width } else { l.width * l.height };
                 a * l.thickness / dx3
             })
-            .sum();
+            .sum::<f64>()
+            + self.design.objects.iter().map(|o| o.area() * o.width / dx3).sum::<f64>();
         let p = &self.design.projectile;
         let rm = p.max_radius();
         layers + std::f64::consts::PI * rm * rm * p.length() * 0.7 / dx3
@@ -408,7 +505,16 @@ impl Config {
         self.obliquity_deg.to_radians()
     }
     pub fn target_thickness(&self) -> f64 {
-        self.design.layers.iter().map(|l| l.thickness + l.gap_before).sum()
+        let layers: f64 = self.design.layers.iter().map(|l| l.thickness + l.gap_before).sum();
+        let (mut x0, mut x1) = (0.0f64, layers);
+        for o in &self.design.objects {
+            let b = o.bbox();
+            if b[0] <= b[1] {
+                x0 = x0.min(b[0]);
+                x1 = x1.max(b[1]);
+            }
+        }
+        x1 - x0
     }
     /// Tempo final automático [s].
     pub fn t_end(&self) -> f64 {

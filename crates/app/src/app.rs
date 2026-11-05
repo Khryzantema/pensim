@@ -1,6 +1,7 @@
 use crate::plot::{line_plot, Series};
 use crate::sketch::{self, SketchEditor, Tool};
 use crate::view3d::{self, Camera, View};
+use crate::draw::{self, DTool, DrawEditor, Drawing, Paint};
 use crate::worker::{Job, SweepJob};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use pensim_core::{Ammo, Config, Core, Design, Frame, Layer, Model, Nose, Outcome, OutcomeKind, PackedFrame, Preset, AMMO, LIBRARY};
@@ -220,6 +221,13 @@ pub struct PenSim {
     /// desenha os nós como esferas suaves em vez de quadrados
     round_nodes: bool,
     faces: bool,
+    /// projétil desenhado à mão (substitui o da biblioteca)
+    pdraw: Option<Drawing>,
+    ped: DrawEditor,
+    /// objetos desenhados do alvo (um desenho por objeto) e o que está em edição
+    tdraws: Vec<Drawing>,
+    tedit: Option<usize>,
+    ted: DrawEditor,
     mesh_cache: Option<(MeshKey, Option<Arc<crate::mesh::SurfMesh>>)>,
     topo_cache: Option<((u64, usize, usize, u32, u64), Arc<crate::mesh::Topo>)>,
     disc_tex: Option<egui::TextureHandle>,
@@ -327,6 +335,11 @@ impl PenSim {
             outline: true,
             round_nodes: true,
             faces: false,
+            pdraw: None,
+            ped: DrawEditor::new(Paint::Mat(LIBRARY[11].clone()), 0.5),
+            tdraws: vec![],
+            tedit: None,
+            ted: DrawEditor::new(Paint::Mat(LIBRARY[0].clone()), 1.0),
             mesh_cache: None,
             topo_cache: None,
             disc_tex: Some(view3d::disc_texture(&cc.egui_ctx)),
@@ -403,6 +416,41 @@ impl PenSim {
                 me.ammo_idx = k;
                 me.load_ammo(k, 1.0);
             }
+        }
+        if std::env::var("PENSIM_DRAW").is_ok() {
+            // desenho de exemplo (captura de tela): bala com camisa e núcleo
+            let mut d = Drawing::new("Projétil desenhado", 0.0);
+            let o: Vec<usize> = [[6.0, 3.0], [14.0, 4.0], [30.0, 4.0], [30.0, 0.0]].iter().map(|&p| d.add_point(p)).collect();
+            d.add_edge(0, o[0]);
+            d.add_edge(o[0], o[1]);
+            d.add_edge(o[1], o[2]);
+            d.add_edge(o[2], o[3]);
+            d.add_edge(o[3], 0);
+            let i: Vec<usize> = [[6.0, 0.0], [10.0, 2.5], [28.0, 3.0], [28.0, 0.0]].iter().map(|&p| d.add_point(p)).collect();
+            for k in 0..4 {
+                d.add_edge(i[k], i[(k + 1) % 4]);
+            }
+            d.bucket(20.0, 3.6, Paint::Mat(LIBRARY[13].clone()));
+            d.bucket(20.0, 1.0, Paint::Mat(LIBRARY[6].clone()));
+            me.pdraw = Some(d);
+            me.ws = Ws::Projectile;
+            if std::env::var("PENSIM_FILLET").is_ok() {
+                me.ped.tool = DTool::Fillet;
+                if let Ok(f) = me.pdraw.as_ref().unwrap().start_fillet(o[0]) {
+                    me.ped.fillet = Some(f);
+                }
+            }
+        }
+        if std::env::var("PENSIM_TOBJ").is_ok() {
+            let mut d = Drawing::new("Objeto 1", 100.0);
+            let q: Vec<usize> = [[0.0, -30.0], [20.0, -30.0], [35.0, 30.0], [10.0, 30.0]].iter().map(|&p| d.add_point(p)).collect();
+            for k in 0..4 {
+                d.add_edge(q[k], q[(k + 1) % 4]);
+            }
+            d.bucket(15.0, 0.0, Paint::Mat(LIBRARY[0].clone()));
+            me.tdraws.push(d);
+            me.tedit = Some(0);
+            me.ws = Ws::Target;
         }
         if std::env::var("PENSIM_SIDE").is_ok() {
             me.cam = Camera::front();
@@ -642,6 +690,7 @@ impl PenSim {
             self.res_tab = ResTab::Files;
             self.sheet_tab = 1;
         }
+        self.sync_drawings();
         self.refresh_preview();
         // painel de propriedades acompanha a aba: PROJÉTIL → projétil, ALVO → camada selecionada
         match self.ws {
@@ -825,6 +874,28 @@ impl PenSim {
         }
         self.sketch.selected = None;
         self.sketch.tsel = Some((0, true));
+        self.pdraw = None;
+        self.sync_objects();
+    }
+
+    /// Copia os desenhos para o projeto que é simulado.
+    fn sync_drawings(&mut self) {
+        if let Some(d) = &self.pdraw {
+            if let Some(p) = d.to_projectile(1.0) {
+                if p != self.cfg.design.projectile {
+                    self.cfg.design.projectile = p;
+                }
+            }
+        }
+        self.sync_objects();
+    }
+
+    fn sync_objects(&mut self) {
+        let u = self.ammo_scale.max(1e-6);
+        let objs: Vec<pensim_core::TargetObject> = self.tdraws.iter().map(|d| d.to_object(u)).collect();
+        if objs != self.cfg.design.objects {
+            self.cfg.design.objects = objs;
+        }
     }
 
     fn snapshot_done(&self) -> bool {
@@ -851,7 +922,18 @@ impl PenSim {
     // ------------------------------------------------------------ 1 · munição
 
     fn step_ammo(&mut self, ui: &mut egui::Ui) {
+        if self.pdraw.is_some() {
+            self.step_ammo_drawn(ui);
+            return;
+        }
         let u = self.ammo_scale.max(1e-6);
+        if ui.add_sized([ui.available_width(), 36.0], egui::Button::new(RichText::new("✎ Desenhar um projétil novo").strong()).corner_radius(8.0)).clicked() {
+            self.pdraw = Some(Drawing::new("Projétil desenhado", 0.0));
+            self.ped = DrawEditor::new(Paint::Mat(LIBRARY[11].clone()), 0.5);
+            self.ammo_scale = 1.0;
+            self.peek3d = false;
+        }
+        ui.add_space(6.0);
         card(ui, "Munição", |ui| {
             let name = AMMO[self.ammo_idx].name;
             egui::ComboBox::from_id_salt("ammo").width(ui.available_width() - 8.0).selected_text(name).show_ui(ui, |ui| {
@@ -976,6 +1058,43 @@ impl PenSim {
         self.next_btn(ui, Ws::Target, "Próximo: alvo  →");
     }
 
+    fn step_ammo_drawn(&mut self, ui: &mut egui::Ui) {
+        card(ui, "Desenho do projétil", |ui| {
+            ui.label(RichText::new("Desenhe metade do corte (acima do eixo). Feche cada contorno e encha com o balde: o contorno mais interno vale (ex.: contorno externo = camisa, interno = núcleo).").size(12.5).color(Color32::from_gray(90)));
+            let (d, ed) = (self.pdraw.as_mut().unwrap(), &mut self.ped);
+            draw_tools(ui, d, ed, draw::Mode::Projectile);
+        });
+        let ok = self.pdraw.as_ref().and_then(|d| d.to_projectile(1.0));
+        card(ui, "Projétil", |ui| match &ok {
+            Some(p) => {
+                kv(ui, "Comprimento", format!("{:.1} mm", p.length() * 1e3));
+                kv(ui, "Diâmetro", format!("{:.1} mm", p.max_radius() * 2e3));
+                let m = proj_mass(p);
+                kv(ui, "Massa", if m >= 1.0 { format!("{:.2} kg", m) } else { format!("{:.1} g", m * 1e3) });
+                ui.weak("Peças mais finas que a malha podem sumir: aumente a qualidade se precisar.");
+            }
+            None => {
+                ui.colored_label(WARN, "Ainda não há peça pintada: feche um contorno e use o balde.");
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("🗋 Recomeçar o desenho").clicked() {
+                if let Some(d) = self.pdraw.as_mut() {
+                    self.ped.push(d);
+                    *d = Drawing::new("Projétil desenhado", 0.0);
+                    self.ped.current = Some(0);
+                    self.ped.fit = true;
+                }
+            }
+            if ui.button("← Voltar à biblioteca").clicked() {
+                let i = self.ammo_idx;
+                self.load_ammo(i, 1.0);
+            }
+        });
+        ui.add_space(6.0);
+        self.next_btn(ui, Ws::Target, "Próximo: alvo  →");
+    }
+
     // ------------------------------------------------------------ 2 · alvo
 
     fn step_target(&mut self, ui: &mut egui::Ui) {
@@ -1049,7 +1168,7 @@ impl PenSim {
                         if ui.add_enabled(i + 1 < n, egui::Button::new("▼")).on_hover_text("Mover para trás").clicked() {
                             action = Some((i, 1));
                         }
-                        if ui.add_enabled(n > 1, egui::Button::new("✕ Remover")).clicked() {
+                        if ui.add_enabled(n > 1 || !self.tdraws.is_empty(), egui::Button::new("✕ Remover")).clicked() {
                             action = Some((i, 0));
                         }
                     });
@@ -1071,6 +1190,54 @@ impl PenSim {
                     self.sketch.tsel = Some((i + 1, true));
                 }
             }
+        }
+        // objetos desenhados
+        let mut remove_obj = None;
+        let ntd = self.tdraws.len();
+        for k in 0..ntd {
+            let editing = self.tedit == Some(k);
+            egui::Frame::NONE
+                .fill(Color32::WHITE)
+                .stroke(Stroke::new(if editing { 2.0 } else { 1.0 }, if editing { ACCENT } else { Color32::from_rgb(222, 226, 232) }))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&self.tdraws[k].name).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("✕").on_hover_text("Remover objeto").clicked() {
+                                remove_obj = Some(k);
+                            }
+                            if ui.button(if editing { "✓ Pronto" } else { "✎ Editar" }).clicked() {
+                                self.tedit = if editing { None } else { Some(k) };
+                                self.ted = DrawEditor::new(self.ted.paint.clone(), self.ted.snap_mm);
+                                self.ted.current = None;
+                                self.peek3d = false;
+                            }
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Largura (profundidade)");
+                        ui.add(egui::DragValue::new(&mut self.tdraws[k].width_mm).suffix(" mm").speed(1.0).range(1.0..=f64::MAX).fixed_decimals(0));
+                    });
+                    if editing {
+                        ui.label(RichText::new("Desenhe o objeto visto de lado (o projétil vem da esquerda, pela linha de tiro). Feche os contornos e encha com o balde.").size(12.5).color(Color32::from_gray(90)));
+                        draw_tools(ui, &mut self.tdraws[k], &mut self.ted, draw::Mode::Target);
+                    }
+                });
+            ui.add_space(6.0);
+        }
+        if let Some(k) = remove_obj {
+            self.tdraws.remove(k);
+            self.tedit = None;
+        }
+        if ui.add_sized([ui.available_width(), 34.0], egui::Button::new("✎ + Novo objeto (desenhar)").corner_radius(8.0)).clicked() {
+            let name = format!("Objeto {}", self.tdraws.len() + 1);
+            self.tdraws.push(Drawing::new(&name, 100.0));
+            self.tedit = Some(self.tdraws.len() - 1);
+            self.ted = DrawEditor::new(Paint::Mat(LIBRARY[0].clone()), 1.0);
+            self.peek3d = false;
         }
         if ui.add_sized([ui.available_width(), 34.0], egui::Button::new("+ Adicionar camada").corner_radius(8.0)).clicked() {
             let mut l = self.cfg.design.layers.last().cloned().unwrap_or_else(|| Preset::Rifle762.config().design.layers[0].clone());
@@ -1354,7 +1521,8 @@ impl PenSim {
             return;
         };
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let title = format!("{} · {:.0} m/s{}", AMMO[self.ammo_idx].name, cfg.velocity, if cfg.obliquity_deg > 0.5 { format!(" · {:.0}°", cfg.obliquity_deg) } else { String::new() });
+        let pname = if self.pdraw.is_some() { "Projétil desenhado" } else { AMMO[self.ammo_idx].name };
+        let title = format!("{} · {:.0} m/s{}", pname, cfg.velocity, if cfg.obliquity_deg > 0.5 { format!(" · {:.0}°", cfg.obliquity_deg) } else { String::new() });
         let data = pensim_core::save::SaveData {
             title, velocity: cfg.velocity, obliquity_deg: cfg.obliquity_deg, dx: cfg.dx, scale: self.started_scale, design: cfg.design.clone(),
             n_phys: snap.n, dt: snap.dt, steps: snap.steps, wall: snap.wall, t_end: snap.t_end, back_x: snap.back_x, sym: snap.sym, outcome,
@@ -1377,6 +1545,17 @@ impl PenSim {
         self.job_id += 1;
         self.decoded = None;
         self.cfg.design = d.design.clone();
+        // desenhos à mão voltam a ser editáveis
+        self.tdraws = d.design.objects.iter().map(|o| Drawing::from_polys(&o.name, o.width * 1e3, &o.parts, 1.0)).collect();
+        self.tedit = None;
+        let pr = &d.design.projectile;
+        self.pdraw = if pr.regions.iter().any(|r| !r.poly.is_empty()) {
+            let polys: Vec<(Vec<[f64; 2]>, pensim_core::Fill)> = pr.regions.iter().map(|r| (r.poly.clone(), if matches!(r.fill, pensim_core::Fill::Body) { pensim_core::Fill::Mat(pr.material.clone()) } else { r.fill.clone() })).collect();
+            Some(Drawing::from_polys("Projétil desenhado", 0.0, &polys, 1.0))
+        } else {
+            None
+        };
+        self.ammo_scale = 1.0;
         self.cfg.velocity = d.velocity;
         self.cfg.obliquity_deg = d.obliquity_deg;
         self.cfg.dx = d.dx;
@@ -1560,7 +1739,7 @@ impl PenSim {
             // alterna entre o desenho 2D e a malha 3D
             let r = ui.max_rect();
             let ctx = ui.ctx().clone();
-            egui::Area::new(egui::Id::new("view2d3d")).order(egui::Order::Foreground).fixed_pos(r.left_top() + Vec2::new(8.0, if self.peek3d { 40.0 } else { 26.0 })).show(&ctx, |ui| {
+            egui::Area::new(egui::Id::new("view2d3d")).order(egui::Order::Foreground).fixed_pos(r.right_top() + Vec2::new(-200.0, if self.peek3d { 40.0 } else { 46.0 })).show(&ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.add(egui::Button::new(RichText::new("Desenho 2D").strong()).selected(!self.peek3d).corner_radius(14.0)).clicked() {
                         self.peek3d = false;
@@ -1572,9 +1751,50 @@ impl PenSim {
             });
         }
         if self.ws == Ws::Target && !self.peek3d {
+            let u = self.ammo_scale.max(1e-6);
+            if let Some(k) = self.tedit.filter(|&k| k < self.tdraws.len()) {
+                // referência: chapas, projétil e os outros objetos
+                let layers = self.cfg.design.layers.clone();
+                let prof = self.cfg.design.projectile.profile.clone();
+                let others: Vec<Vec<(Vec<[f64; 2]>, Paint)>> = self.tdraws.iter().enumerate().filter(|(j, _)| *j != k).map(|(_, d)| d.sorted_fills()).collect();
+                let bg = move |p: &egui::Painter, to: &dyn Fn(f64, f64) -> Pos2| {
+                    let mut x = 0.0;
+                    for l in &layers {
+                        x += l.gap_before * 1e3 / u;
+                        let (t, h) = (l.thickness * 1e3 / u, l.height * 1e3 / u);
+                        let c = mat_color(l.material.name);
+                        p.rect_filled(Rect::from_two_pos(to(x, h / 2.0), to(x + t, -h / 2.0)), 0.0, Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 90));
+                        x += t;
+                    }
+                    let pts: Vec<Pos2> = prof.iter().map(|q| to(-3.0 - q[0] * 1e3 / u, q[1] * 1e3 / u)).chain(prof.iter().rev().map(|q| to(-3.0 - q[0] * 1e3 / u, -q[1] * 1e3 / u))).collect();
+                    p.add(egui::Shape::closed_line(pts, Stroke::new(1.0, Color32::from_rgb(120, 130, 150))));
+                    for o in &others {
+                        for (poly, c) in o {
+                            let col = if let Paint::Mat(m) = c { mat_color(m.name) } else { Color32::GRAY };
+                            p.add(egui::Shape::closed_line(poly.iter().map(|q| to(q[0], q[1])).collect(), Stroke::new(1.5, col)));
+                        }
+                    }
+                };
+                draw::show(ui, &mut self.tdraws[k], &mut self.ted, draw::Mode::Target, &|n| mat_color(n), &bg);
+                return;
+            }
             let colors: Vec<Color32> = self.cfg.design.layers.iter().map(|l| mat_color(l.material.name)).collect();
             let proj = self.cfg.design.projectile.profile.clone();
-            sketch::show_target(ui, &mut self.sketch, &mut self.cfg.design.layers, &proj, &colors, self.cfg.obliquity_deg, self.ammo_scale);
+            let objs: Vec<Vec<(Vec<[f64; 2]>, Paint)>> = self.tdraws.iter().map(|d| d.sorted_fills()).collect();
+            let extra = move |p: &egui::Painter, tor: &dyn Fn(f64, f64) -> Pos2| {
+                for o in &objs {
+                    for (poly, c) in o {
+                        let col = if let Paint::Mat(m) = c { mat_color(m.name) } else { Color32::GRAY };
+                        // desenho em mm reais → mm do modelo
+                        p.add(egui::Shape::closed_line(poly.iter().map(|q| tor(q[0] * u, q[1] * u)).collect(), Stroke::new(2.0, col)));
+                    }
+                }
+            };
+            sketch::show_target(ui, &mut self.sketch, &mut self.cfg.design.layers, &proj, &colors, self.cfg.obliquity_deg, self.ammo_scale, &extra);
+            return;
+        }
+        if self.ws == Ws::Projectile && !self.peek3d && self.pdraw.is_some() {
+            draw::show(ui, self.pdraw.as_mut().unwrap(), &mut self.ped, draw::Mode::Projectile, &|n| mat_color(n), &|_, _| {});
             return;
         }
         if self.ws == Ws::Projectile && !self.peek3d {
@@ -1856,6 +2076,182 @@ fn mat_combo(ui: &mut egui::Ui, id: &str, m: &mut pensim_core::Material) {
         }
     });
     ui.weak(format!("ρ={:.0} kg/m³ · E={:.0} GPa · σy={:.3} GPa", m.rho, m.young / 1e9, m.yield_strength / 1e9));
+}
+
+fn paint_combo(ui: &mut egui::Ui, id: &str, p: &mut Paint) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id).width(200.0).selected_text(p.name()).show_ui(ui, |ui| {
+        if ui.selectable_label(*p == Paint::Void, "Vazio (oco)").clicked() {
+            *p = Paint::Void;
+            changed = true;
+        }
+        for m in LIBRARY {
+            if ui.selectable_label(p.name() == m.name, m.name).clicked() {
+                *p = Paint::Mat(m.clone());
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// Ferramentas do editor de desenho livre (painel). Devolve `true` se o desenho mudou.
+fn draw_tools(ui: &mut egui::Ui, d: &mut Drawing, ed: &mut DrawEditor, mode: draw::Mode) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for (t, l) in [(DTool::Line, "✎ Linha"), (DTool::Point, "• Ponto"), (DTool::Move, "✥ Mover"), (DTool::Split, "✂ Dividir"), (DTool::Fillet, "◠ Arredondar"), (DTool::Erase, "⌫ Apagar"), (DTool::Bucket, "▧ Balde")] {
+            if ui.add(egui::Button::new(l).selected(ed.tool == t).corner_radius(14.0)).clicked() {
+                if t != DTool::Fillet {
+                    ed.fillet = None;
+                }
+                ed.tool = t;
+                ed.msg.clear();
+            }
+        }
+    });
+    match ed.tool {
+        DTool::Bucket => {
+            ui.horizontal(|ui| {
+                ui.label("Material do balde:");
+                paint_combo(ui, "bucket", &mut ed.paint);
+            });
+        }
+        DTool::Fillet => {
+            let mut apply = false;
+            let mut cancel = false;
+            if let Some(f) = ed.fillet.as_mut() {
+                ui.add(egui::Slider::new(&mut f.n, 2..=40).text("pontos da curva"));
+                ui.horizontal(|ui| {
+                    apply = ui.button(RichText::new("✓ Aplicar").strong()).clicked();
+                    cancel = ui.button("✕ Cancelar").clicked();
+                });
+            } else {
+                ui.weak("Toque num canto do desenho (um ponto com duas linhas).");
+            }
+            if cancel {
+                ed.fillet = None;
+            }
+            if apply {
+                if let Some(f) = ed.fillet.take() {
+                    ed.push(d);
+                    d.apply_fillet(&f);
+                    changed = true;
+                }
+            }
+        }
+        DTool::Line => {
+            if ed.current.is_some() && ui.button("Soltar (parar de ligar ao último ponto)").clicked() {
+                ed.current = None;
+            }
+        }
+        _ => {}
+    }
+    ui.horizontal_wrapped(|ui| {
+        if ui.add_enabled(!ed.undo.is_empty(), egui::Button::new("↶ Desfazer")).clicked() {
+            changed |= ed.undo(d);
+        }
+        if ui.button("Ajustar vista").clicked() {
+            ed.fit = true;
+        }
+        if ui.button(" − ").clicked() {
+            if let Some(v) = ed.view.as_mut() {
+                v[2] /= 1.3;
+            }
+        }
+        if ui.button(" + ").clicked() {
+            if let Some(v) = ed.view.as_mut() {
+                v[2] *= 1.3;
+            }
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Grade:");
+        for s in [0.1, 0.5, 1.0, 2.0, 5.0, 10.0] {
+            if ui.selectable_label((ed.snap_mm - s).abs() < 1e-9, format!("{s} mm")).clicked() {
+                ed.snap_mm = s;
+            }
+        }
+    });
+    if let Some(i) = ed.selected.filter(|&i| i > 0 && i < d.pts.len()) {
+        let mut q = d.pts[i];
+        ui.horizontal(|ui| {
+            ui.label(format!("Ponto {i}:"));
+            let (l0, l1) = if mode == draw::Mode::Projectile { ("dist. ", "raio ") } else { ("x ", "z ") };
+            let r0 = ui.add(egui::DragValue::new(&mut q[0]).prefix(l0).suffix(" mm").speed(0.1).fixed_decimals(2));
+            let lo = if mode == draw::Mode::Projectile { 0.0 } else { f64::MIN };
+            let r1 = ui.add(egui::DragValue::new(&mut q[1]).prefix(l1).suffix(" mm").speed(0.1).range(lo..=f64::MAX).fixed_decimals(2));
+            if r0.drag_started() || r1.drag_started() || r0.gained_focus() || r1.gained_focus() {
+                ed.push(d);
+            }
+        });
+        if q != d.pts[i] {
+            d.pts[i] = q;
+            changed = true;
+        }
+    }
+    if !d.fills.is_empty() {
+        ui.separator();
+        ui.label(RichText::new("Peças pintadas").strong());
+        let mut remove = None;
+        for k in 0..d.fills.len() {
+            ui.horizontal(|ui| {
+                let col = match &d.fills[k].paint {
+                    Paint::Mat(m) => mat_color(m.name),
+                    Paint::Void => Color32::from_gray(220),
+                };
+                ui.colored_label(col, "■");
+                if paint_combo(ui, &format!("fill{k}"), &mut d.fills[k].paint) {
+                    changed = true;
+                }
+                if ui.small_button("✕").on_hover_text("Tirar a pintura").clicked() {
+                    remove = Some(k);
+                }
+            });
+        }
+        if let Some(k) = remove {
+            ed.push(d);
+            d.fills.remove(k);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Massa do projétil (kg) por amostragem do corte revolvido.
+fn proj_mass(p: &pensim_core::Projectile) -> f64 {
+    let (l, r) = (p.length(), p.max_radius());
+    if l <= 0.0 || r <= 0.0 {
+        return 0.0;
+    }
+    let mats: Vec<f64> = {
+        let mut v = vec![p.material.rho];
+        if let Some(c) = &p.core {
+            v.push(c.material.rho);
+        }
+        for g in &p.regions {
+            if let pensim_core::Fill::Mat(m) = &g.fill {
+                v.push(m.rho);
+            }
+        }
+        v
+    };
+    let (na, nr) = (240usize, 90usize);
+    let (da, dr) = (l / na as f64, r / nr as f64);
+    let mut m = 0.0;
+    for i in 0..na {
+        let a = (i as f64 + 0.5) * da;
+        let ro = p.radius_at(a);
+        for j in 0..nr {
+            let rr = (j as f64 + 0.5) * dr;
+            if rr > ro {
+                break;
+            }
+            if let Some(k) = p.part_at(a, rr, 0.0) {
+                m += mats.get(k as usize).copied().unwrap_or(0.0) * 2.0 * std::f64::consts::PI * rr * da * dr;
+            }
+        }
+    }
+    m
 }
 
 fn fmt_count(n: f64) -> String {

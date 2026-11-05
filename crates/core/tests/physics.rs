@@ -194,3 +194,38 @@ fn save_and_load_roundtrip() {
     assert!((a.e_plastic - b.e_plastic).abs() < 1e-9);
     let _ = std::fs::remove_file(&path);
 }
+
+/// Projétil desenhado (contornos) contra um objeto desenhado do alvo, sem chapas.
+#[test]
+fn drawn_projectile_and_target_object() {
+    let mut c = Preset::Rifle762.config();
+    c.dx = 0.0015;
+    c.n_frames = 4;
+    c.velocity = 800.0;
+    let mm = 1e-3;
+    // bala: camisa de cobre (contorno externo) com núcleo de chumbo (interno)
+    let outer = vec![[0.0, 0.0], [10.0 * mm, 4.0 * mm], [28.0 * mm, 4.0 * mm], [28.0 * mm, 0.0]];
+    let inner = vec![[4.0 * mm, 0.0], [10.0 * mm, 2.8 * mm], [26.0 * mm, 2.8 * mm], [26.0 * mm, 0.0]];
+    let reg = |poly: Vec<[f64; 2]>, fill: Fill| Region { name: "p".into(), outer: vec![], inner: vec![], fill, poly };
+    c.design.projectile = Projectile {
+        profile: vec![[0.0, 0.0], [10.0 * mm, 4.0 * mm], [28.0 * mm, 4.0 * mm]],
+        material: LIBRARY[5].clone(),
+        core: None,
+        regions: vec![reg(outer, Fill::Body), reg(inner, Fill::Mat(LIBRARY[6].clone()))],
+    };
+    // alvo: um bloco desenhado de aço (12 × 40 mm na vista lateral, 40 mm de largura)
+    c.design.layers.clear();
+    c.design.objects.push(TargetObject {
+        name: "bloco".into(),
+        parts: vec![(vec![[0.0, -20.0 * mm], [12.0 * mm, -20.0 * mm], [12.0 * mm, 20.0 * mm], [0.0, 20.0 * mm]], Fill::Mat(LIBRARY[0].clone()))],
+        width: 0.04,
+    });
+    let m = Model::build(&c).unwrap();
+    assert_eq!(m.n_proj as usize, 2);
+    assert!(m.part.iter().any(|&p| p == 1), "sem núcleo");
+    assert!(m.part.iter().any(|&p| p == 2), "sem alvo");
+    let mut s = Sim::new(c).unwrap();
+    s.run_to_end();
+    let o = s.outcome();
+    assert!(o.energy_error_pct.abs() < 5.0, "erro {}%", o.energy_error_pct);
+}
