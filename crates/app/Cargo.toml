@@ -26,10 +26,10 @@ android_logger = "0.14"
 [package.metadata.android]
 package = "dev.pensim.ballistics"
 apk_name = "PenSim"
-build_targets = ["aarch64-linux-android"]
+build_targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android"]
 
 [package.metadata.android.sdk]
-min_sdk_version = 26
+min_sdk_version = 24
 target_sdk_version = 34
 
 [package.metadata.android.application]
