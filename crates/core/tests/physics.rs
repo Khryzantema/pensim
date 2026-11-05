@@ -175,7 +175,7 @@ fn save_and_load_roundtrip() {
     s.run_to_end();
     let frames: Vec<std::sync::Arc<PackedFrame>> = s.frames.drain(..).map(std::sync::Arc::new).collect();
     let data = pensim_core::save::SaveData {
-        title: "teste".into(), velocity: c.velocity, obliquity_deg: c.obliquity_deg, dx: c.dx, design: c.design.clone(),
+        title: "teste".into(), velocity: c.velocity, obliquity_deg: c.obliquity_deg, dx: c.dx, scale: 1.0, design: c.design.clone(),
         n_phys: s.n_physical(), dt: s.dt, steps: s.step_count, wall: 1.0, t_end: s.t_end(), back_x: s.plate_back(), sym: s.symmetry(),
         outcome: s.outcome(), parts: s.part_ids(), surface: s.surface(), normals: s.normals(), ref_pos: s.ref_positions(), frames: frames.clone(),
     };

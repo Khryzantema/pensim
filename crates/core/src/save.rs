@@ -6,13 +6,15 @@ use crate::store::PackedFrame;
 use std::sync::Arc;
 
 const MAGIC: &[u8; 4] = b"PSIM";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 pub struct SaveData {
     pub title: String,
     pub velocity: f64,
     pub obliquity_deg: f64,
     pub dx: f64,
+    /// escala do modelo (medidas reais = modelo ÷ escala)
+    pub scale: f64,
     pub design: Design,
     pub n_phys: usize,
     pub dt: f64,
@@ -75,7 +77,7 @@ pub fn write(path: &std::path::Path, d: &SaveData) -> std::io::Result<u64> {
     w.u32(VERSION);
     w.str(&d.title);
     w.u32(d.frames.len() as u32);
-    for v in [d.velocity, d.obliquity_deg, d.dx, d.dt, d.wall, d.t_end, d.back_x] {
+    for v in [d.velocity, d.obliquity_deg, d.dx, d.dt, d.wall, d.t_end, d.back_x, d.scale] {
         w.f64(v);
     }
     w.u64(d.n_phys as u64);
@@ -141,7 +143,7 @@ pub fn read(path: &std::path::Path) -> Option<SaveData> {
     }
     let title = r.str()?;
     let nframes = r.u32()? as usize;
-    let (velocity, obliquity_deg, dx, dt, wall, t_end, back_x) = (r.f64()?, r.f64()?, r.f64()?, r.f64()?, r.f64()?, r.f64()?, r.f64()?);
+    let (velocity, obliquity_deg, dx, dt, wall, t_end, back_x, scale) = (r.f64()?, r.f64()?, r.f64()?, r.f64()?, r.f64()?, r.f64()?, r.f64()?, r.f64()?);
     let n_phys = r.u64()? as usize;
     let steps = r.u64()?;
     let sym = r.u8()?;
@@ -181,7 +183,7 @@ pub fn read(path: &std::path::Path) -> Option<SaveData> {
         frames.push(Arc::new(PackedFrame::read_from(&mut rest)?));
     }
     Some(SaveData {
-        title, velocity, obliquity_deg, dx,
+        title, velocity, obliquity_deg, dx, scale,
         design: Design { projectile: Projectile { profile, material: pm, core }, layers },
         n_phys, dt, steps, wall, t_end, back_x, sym, outcome, parts, surface, normals, ref_pos, frames,
     })

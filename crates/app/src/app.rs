@@ -18,7 +18,8 @@ fn compact() -> bool {
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-const RES_PRESETS: [(&str, f64); 7] = [("Rascunho", 0.0025), ("Rápida", 0.002), ("Média", 0.0015), ("Fina", 0.001), ("Muito fina", 0.0008), ("Extrema", 0.0005), ("Ultra", 0.00025)];
+/// qualidade da malha: nós no diâmetro do projétil
+const RES_PRESETS: [(&str, f64); 7] = [("Rascunho", 5.0), ("Rápida", 6.0), ("Média", 8.0), ("Fina", 12.0), ("Muito fina", 16.0), ("Extrema", 24.0), ("Ultra", 32.0)];
 /// taxa de reprodução (quadros/s) em velocidade 1×
 const PLAY_FPS: f32 = 25.0;
 const ACCENT: Color32 = Color32::from_rgb(0, 112, 192);
@@ -123,11 +124,12 @@ struct Preview {
     note: Option<String>,
 }
 
-type Key = (Design, [f64; 8], [bool; 2]);
+type Key = (Design, [f64; 9], [bool; 2]);
 
 /// Simulação aberta de um arquivo salvo.
 struct Loaded {
     title: String,
+    scale: f64,
     frames: Vec<Arc<PackedFrame>>,
     parts: Arc<Vec<u8>>,
     surface: Arc<Vec<bool>>,
@@ -189,10 +191,14 @@ pub struct PenSim {
     cfg: Config,
     ammo_idx: usize,
     ammo_scale: f64,
+    /// qualidade da malha: nós no diâmetro do projétil (define a escala interna, invisível)
+    res_nodes: f64,
     show_side: bool,
     show_fps: bool,
     loaded: Option<Loaded>,
     started_cfg: Option<Config>,
+    /// escala do modelo usada na simulação em exibição (para converter resultados em valores reais)
+    started_scale: f64,
     saves: Vec<SaveEntry>,
     saves_dirty: bool,
     save_msg: String,
@@ -283,15 +289,17 @@ impl PenSim {
             s.spacing.slider_width = 150.0;
         });
         let ammo_idx = 4;
-        let cfg = AMMO[ammo_idx].config(AMMO[ammo_idx].scale);
+        let cfg = AMMO[ammo_idx].config(1.0);
         let mut me = PenSim {
             cfg,
             ammo_idx,
-            ammo_scale: AMMO[ammo_idx].scale,
+            ammo_scale: 1.0,
+            res_nodes: 8.0,
             show_side: true,
             show_fps: std::env::var("PENSIM_PROF").is_ok(),
             loaded: None,
             started_cfg: None,
+            started_scale: 1.0,
             saves: vec![],
             saves_dirty: true,
             save_msg: String::new(),
@@ -361,7 +369,7 @@ impl PenSim {
         }
         if let Ok(a) = std::env::var("PENSIM_AMMO") {
             if let Ok(i) = a.parse::<usize>() {
-                me.load_ammo(i.min(AMMO.len() - 1), AMMO[i.min(AMMO.len() - 1)].scale);
+                me.load_ammo(i.min(AMMO.len() - 1), 1.0);
             }
         }
         if std::env::var("PENSIM_OPENLATEST").is_ok() {
@@ -393,11 +401,41 @@ impl PenSim {
 
     fn key(&self) -> Key {
         let c = &self.cfg;
-        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, c.time_factor, c.noise, c.jitter, c.sleep_ratio], [c.clamp_edges, c.symmetry])
+        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, c.time_factor, c.noise, c.jitter, c.sleep_ratio, self.res_nodes], [c.clamp_edges, c.symmetry])
+    }
+
+    /// Escala interna (invisível): faz o diâmetro do projétil ter `res_nodes` nós na malha.
+    /// Vale a similaridade geométrica; tempos e energias são convertidos de volta nos resultados.
+    fn model_scale(&self) -> f64 {
+        let d = self.cfg.design.projectile.max_radius() * 2.0;
+        if d <= 1e-9 { 1.0 } else { (self.res_nodes * self.cfg.dx / d).clamp(0.004, 6.0) }
+    }
+
+    /// Configuração que de fato é simulada/pré-visualizada: o projeto real × escala interna.
+    fn scaled_cfg(&self) -> Config {
+        let f = self.model_scale();
+        let mut c = self.cfg.clone();
+        for q in c.design.projectile.profile.iter_mut() {
+            q[0] *= f;
+            q[1] *= f;
+        }
+        if let Some(core) = c.design.projectile.core.as_mut() {
+            for q in core.profile.iter_mut() {
+                q[0] *= f;
+                q[1] *= f;
+            }
+        }
+        for l in c.design.layers.iter_mut() {
+            l.thickness *= f;
+            l.gap_before *= f;
+            l.width *= f;
+            l.height *= f;
+        }
+        c
     }
 
     fn estimate_nodes(&self) -> f64 {
-        self.cfg.estimate_nodes()
+        self.scaled_cfg().estimate_nodes()
     }
 
     fn refresh_preview(&mut self) {
@@ -409,7 +447,7 @@ impl PenSim {
         // a pré-visualização desenha cada nó; malhas muito finas são mostradas numa malha mais grossa
         const MAX_PREVIEW_NODES: f64 = 120_000.0;
         let est = self.estimate_nodes();
-        let mut pcfg = self.cfg.clone();
+        let mut pcfg = self.scaled_cfg();
         let mut note = None;
         if est > MAX_PREVIEW_NODES {
             let f = (est / MAX_PREVIEW_NODES).cbrt().ceil().max(2.0);
@@ -455,9 +493,10 @@ impl PenSim {
         self.started_at = std::time::Instant::now();
         self.started_key = Some(self.key());
         self.loaded = None;
-        let mut jcfg = self.cfg.clone();
+        let mut jcfg = self.scaled_cfg();
         jcfg.ignore_memory = force;
         self.started_cfg = Some(self.cfg.clone());
+        self.started_scale = self.model_scale();
         self.job = Some(Job::spawn(jcfg, ctx.clone()));
         self.ws = Ws::Results;
         self.field = Field::VonMises;
@@ -749,41 +788,6 @@ impl PenSim {
         }
     }
 
-    /// Reescala **todo** o modelo (projétil, núcleo e camadas do alvo) pelo fator novo/atual,
-    /// preservando as edições. A velocidade não muda (similaridade geométrica).
-    fn rescale(&mut self, new_scale: f64) {
-        let f = new_scale / self.ammo_scale.max(1e-9);
-        if (f - 1.0).abs() < 1e-9 || !f.is_finite() {
-            return;
-        }
-        let d = &mut self.cfg.design;
-        for q in d.projectile.profile.iter_mut() {
-            q[0] *= f;
-            q[1] *= f;
-        }
-        if let Some(c) = d.projectile.core.as_mut() {
-            for q in c.profile.iter_mut() {
-                q[0] *= f;
-                q[1] *= f;
-            }
-        }
-        for l in d.layers.iter_mut() {
-            l.thickness *= f;
-            l.gap_before *= f;
-            l.width *= f;
-            l.height *= f;
-        }
-        self.ammo_scale = new_scale;
-    }
-
-    /// Controle de escala global (vale para projétil e alvo).
-    fn scale_control(&mut self, ui: &mut egui::Ui) {
-        let mut sc = self.ammo_scale;
-        if ui.add(egui::DragValue::new(&mut sc).prefix("escala ×").speed(0.01).range(0.03..=3.0).fixed_decimals(2)).on_hover_text("Escala TUDO (projétil e alvo), mesma velocidade. Todas as medidas na interface são REAIS; o modelo é simulado nesta escala.").changed() {
-            self.rescale(sc);
-        }
-    }
-
     fn load_ammo(&mut self, idx: usize, scale: f64) {
         let keep = (self.cfg.velocity, self.cfg.obliquity_deg, self.cfg.dx, self.cfg.horizon_m, self.cfg.n_frames);
         let a = &AMMO[idx];
@@ -834,9 +838,6 @@ impl PenSim {
                             self.sketch.tsel = None;
                         }
                     });
-                    group(ui, "ESCALA DO MODELO", |ui| {
-                        self.scale_control(ui);
-                    });
                     group(ui, "ÂNGULO DO ALVO", |ui| {
                         ui.add(egui::DragValue::new(&mut self.cfg.obliquity_deg).range(0.0..=75.0).suffix(" °").speed(0.5).fixed_decimals(0));
                         for deg in [0.0, 15.0, 30.0, 45.0, 60.0] {
@@ -845,9 +846,12 @@ impl PenSim {
                             }
                         }
                     });
-                    group(ui, "GRADE", |ui| {
-                        for s in [0.5, 1.0, 2.0] {
-                            ui.selectable_value(&mut self.sketch.snap_mm, s, format!("{s} mm"));
+                    group(ui, "GRADE (mm reais)", |ui| {
+                        let u = self.ammo_scale.max(1e-6);
+                        for s in [1.0, 5.0, 10.0, 25.0] {
+                            if ui.selectable_label((self.sketch.snap_mm / u - s).abs() < 1e-6 * s.max(1.0), format!("{s}")).clicked() {
+                                self.sketch.snap_mm = s * u;
+                            }
                         }
                     });
                     group(ui, "VISTA", |ui| {
@@ -867,11 +871,10 @@ impl PenSim {
                                     last = a.group;
                                 }
                                 if ui.selectable_label(i == self.ammo_idx, a.name).clicked() {
-                                    self.load_ammo(i, a.scale);
+                                    self.load_ammo(i, 1.0);
                                 }
                             }
                         });
-                        self.scale_control(ui);
                     });
                     group(ui, "FERRAMENTAS DE ESBOÇO", |ui| {
                         for (t, i, l) in [(Tool::Move, "✥", "Mover"), (Tool::Add, "+", "Ponto"), (Tool::Delete, "✕", "Excluir")] {
@@ -899,9 +902,12 @@ impl PenSim {
                             }
                         }
                     });
-                    group(ui, "GRADE", |ui| {
-                        for s in [0.1, 0.25, 0.5, 1.0] {
-                            ui.selectable_value(&mut self.sketch.snap_mm, s, format!("{s} mm"));
+                    group(ui, "GRADE (mm reais)", |ui| {
+                        let u = self.ammo_scale.max(1e-6);
+                        for s in [0.5, 1.0, 2.0, 5.0] {
+                            if ui.selectable_label((self.sketch.snap_mm / u - s).abs() < 1e-6 * s.max(1.0), format!("{s}")).clicked() {
+                                self.sketch.snap_mm = s * u;
+                            }
                         }
                     });
                     group(ui, "PONTA", |ui| {
@@ -921,19 +927,16 @@ impl PenSim {
                     });
             }
             Ws::Resolution => {
-                group(ui, "PREDEFINIÇÕES", |ui| {
-                    for (l, dx) in RES_PRESETS {
-                        let on = (self.cfg.dx - dx).abs() < 1e-9;
-                        if tbtn(ui, &format!("{:.1} mm", dx * 1e3), l, on, true, 70.0).clicked() {
-                            self.cfg.dx = dx;
+                group(ui, "QUALIDADE DA MALHA (nós no diâmetro)", |ui| {
+                    for (l, n) in RES_PRESETS {
+                        let on = (self.res_nodes - n).abs() < 0.5;
+                        if tbtn(ui, &format!("{n:.0} nós"), l, on, true, 70.0).clicked() {
+                            self.res_nodes = n;
                         }
                     }
                 });
                 group(ui, "AJUSTE FINO", |ui| {
-                    let mut mm = self.cfg.dx * 1e3;
-                    if ui.add(egui::DragValue::new(&mut mm).range(0.25..=3.0).speed(0.02).suffix(" mm").fixed_decimals(2)).changed() {
-                        self.cfg.dx = mm / 1e3;
-                    }
+                    ui.add(egui::DragValue::new(&mut self.res_nodes).range(3.0..=48.0).speed(0.2).suffix(" nós").fixed_decimals(0));
                 });
                 group(ui, "EXECUTAR", |ui| {
                     if tbtn(ui, "▶", "Simular", false, true, 62.0).clicked() {
@@ -1127,7 +1130,7 @@ impl PenSim {
                     ui.label(format!("⌀ {:.1} × {:.0} mm · {:.1} g · {:.0} m/s", am.caliber_mm, am.length_mm, am.mass_g, am.velocity));
                     ui.end_row();
                     ui.label("Modelo");
-                    ui.label(format!("escala ×{:.2} · {:.1} g (massa × s³)", self.ammo_scale, am.scaled_mass_g(self.ammo_scale)));
+                    ui.label(format!("{:.1} g", am.mass_g));
                     ui.end_row();
                 });
                 ui.weak("Valores aproximados. Camisas finas (cobre/latão) ficam abaixo da resolução da malha e não são modeladas.");
@@ -1179,7 +1182,6 @@ impl PenSim {
                 l.gap_before = g * u / 1e3;
                 l.width = w * u / 1e3;
                 l.height = h * u / 1e3;
-                ui.weak(format!("No modelo (escala ×{:.2}): espessura {:.1} mm.", self.ammo_scale, l.thickness * 1e3));
                 ui.horizontal(|ui| {
                     if ui.add_enabled(i > 0, egui::Button::new("▲ Subir")).clicked() {
                         self.cfg.design.layers.swap(i, i - 1);
@@ -1239,19 +1241,16 @@ impl PenSim {
     }
 
     fn resolution_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.heading("Resolução da simulação");
-        ui.label("Quanto menor o espaçamento entre nós, mais fiel é a fratura e a geometria do projétil, mas o custo cresce rápido.");
+        ui.heading("Qualidade da malha");
+        ui.label("Escolha quantos nós cabem no diâmetro do projétil. Mais nós = fratura e geometria mais fiéis, mas o custo cresce rápido. Todos os valores continuam em medidas reais.");
         ui.add_space(4.0);
         ui.label("Predefinições:");
         ui.horizontal_wrapped(|ui| {
-            for (l, dx) in RES_PRESETS {
-                ui.selectable_value(&mut self.cfg.dx, dx, format!("{l} · {:.1} mm", dx * 1e3));
+            for (l, n) in RES_PRESETS {
+                ui.selectable_value(&mut self.res_nodes, n, format!("{l} · {n:.0}"));
             }
         });
-        let mut mm = self.cfg.dx * 1e3;
-        if ui.add(egui::Slider::new(&mut mm, 0.25..=3.0).logarithmic(true).text("espaçamento mm")).changed() {
-            self.cfg.dx = mm / 1e3;
-        }
+        ui.add(egui::Slider::new(&mut self.res_nodes, 3.0..=48.0).logarithmic(true).text("nós no diâmetro"));
         ui.label("Horizonte (× espaçamento): 2 = rápido · 3 = mais preciso");
         ui.horizontal(|ui| {
             for h in [2.0, 2.5, 3.0] {
@@ -1266,16 +1265,16 @@ impl PenSim {
         ui.separator();
 
         let n = self.estimate_nodes();
-        let bonds = self.cfg.bonds_per_node();
-        let mem = self.cfg.estimate_memory_mb();
+        let sc = self.scaled_cfg();
+        let bonds = sc.bonds_per_node();
+        let mem = sc.estimate_memory_mb();
         let free = pensim_core::usable_memory_mb();
         let base = Preset::Rifle762.config();
         let base_n = 30000.0_f64;
-        let rel = (n / base_n) * (self.cfg.horizon_m / base.horizon_m).powi(3) * (base.dx / self.cfg.dx);
-        let d = self.cfg.design.projectile.max_radius() * 2.0;
-        let thin = self.cfg.design.layers.iter().map(|l| l.thickness).fold(f64::MAX, f64::min);
-        let across_d = d / self.cfg.dx;
-        let across_t = thin / self.cfg.dx;
+        let rel = (n / base_n) * (self.cfg.horizon_m / base.horizon_m).powi(3) * (self.res_nodes / 8.0);
+        let across_d = self.res_nodes;
+        let thin = sc.design.layers.iter().map(|l| l.thickness).fold(f64::MAX, f64::min);
+        let across_t = thin / sc.dx;
         egui::Grid::new("resgrid").num_columns(2).striped(true).show(ui, |ui| {
             ui.label("Nós estimados");
             ui.label(format!("≈ {:.0}", n));
@@ -1302,13 +1301,13 @@ impl PenSim {
         let warn = Color32::from_rgb(190, 120, 0);
         let bad = Color32::from_rgb(200, 50, 40);
         if across_d < 4.0 {
-            ui.colored_label(warn, "Projétil com menos de 4 nós de diâmetro: geometria grosseira. Reduza o espaçamento.");
+            ui.colored_label(warn, "Projétil com menos de 4 nós de diâmetro: geometria grosseira. Aumente a qualidade.");
         }
         if across_t < 3.0 {
             ui.colored_label(warn, "Camada com menos de 3 nós de espessura: perfuração pouco confiável.");
         }
         if free.map_or(false, |f| mem > 0.85 * f) {
-            ui.colored_label(bad, "Não cabe na memória livre: a simulação será recusada. Aumente o espaçamento.");
+            ui.colored_label(bad, "Não cabe na memória livre: a simulação será recusada. Diminua a qualidade da malha.");
         } else if mem > 1500.0 || n > 120_000.0 {
             ui.colored_label(bad, "Muito pesado: pode levar muito tempo e fechar o app por falta de memória. Você decide.");
         } else if mem > 600.0 || n > 50_000.0 {
@@ -1316,6 +1315,7 @@ impl PenSim {
         } else {
             ui.colored_label(Color32::from_rgb(30, 140, 80), "Adequado para celular.");
         }
+        ui.weak("A simulação roda internamente em tamanho conveniente; tempos, energias e penetração são convertidos de volta para valores reais.");
         ui.weak("O viewport mostra a malha atual: ajuste e veja os nós mudarem antes de simular.");
         ui.separator();
         if ui.add_sized([ui.available_width(), 42.0], egui::Button::new(RichText::new("▶ Simular com esta resolução").strong().color(Color32::WHITE)).fill(ACCENT)).clicked() {
@@ -1373,7 +1373,7 @@ impl PenSim {
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let title = format!("{} · {:.0} m/s{}", AMMO[self.ammo_idx].name, cfg.velocity, if cfg.obliquity_deg > 0.5 { format!(" · {:.0}°", cfg.obliquity_deg) } else { String::new() });
         let data = pensim_core::save::SaveData {
-            title, velocity: cfg.velocity, obliquity_deg: cfg.obliquity_deg, dx: cfg.dx, design: cfg.design.clone(),
+            title, velocity: cfg.velocity, obliquity_deg: cfg.obliquity_deg, dx: cfg.dx, scale: self.started_scale, design: cfg.design.clone(),
             n_phys: snap.n, dt: snap.dt, steps: snap.steps, wall: snap.wall, t_end: snap.t_end, back_x: snap.back_x, sym: snap.sym, outcome,
             parts: snap.parts.to_vec(), surface: snap.surface.to_vec(), normals: snap.normals.to_vec(), ref_pos: snap.ref_pos.to_vec(), frames: snap.frames.clone(),
         };
@@ -1398,6 +1398,7 @@ impl PenSim {
         self.cfg.obliquity_deg = d.obliquity_deg;
         self.cfg.dx = d.dx;
         self.started_cfg = Some(self.cfg.clone());
+        self.started_scale = d.scale;
         self.range = [(0.0, 0.0); 7];
         self.view_idx = 0;
         self.autoplayed = false;
@@ -1405,6 +1406,7 @@ impl PenSim {
         self.play_pos = 0.0;
         self.save_msg = format!("Aberto: {}", d.title);
         self.loaded = Some(Loaded {
+            scale: d.scale,
             title: d.title, frames: d.frames, parts: Arc::new(d.parts), surface: Arc::new(d.surface), normals: Arc::new(d.normals), ref_pos: Arc::new(d.ref_pos),
             sym: d.sym, n: d.n_phys, dt: d.dt, steps: d.steps, wall: d.wall, t_end: d.t_end, back_x: d.back_x, outcome: d.outcome,
         });
@@ -1497,6 +1499,9 @@ impl PenSim {
             };
             row("Velocidade de impacto", format!("{:.0} m/s", self.cfg.velocity));
             row("Velocidade residual (CM)", format!("{:.0} m/s", o.v_residual));
+            let rs = self.started_scale.max(1e-6);
+            row("Penetração máx. da ponta (real)", format!("{:.0} mm", o.penetration * 1e3 / rs));
+            row("Duração simulada (real)", format!("{:.0} µs", s.t_end * 1e6 / rs));
             row("Energia absorvida", format!("{:.1} %", o.energy_absorbed_pct));
             row("Projétil atrás do alvo", format!("{:.0} %", o.proj_behind_pct));
             row("Alvo ejetado (tampão)", format!("{:.1} %", o.target_ejected_pct));
@@ -1515,8 +1520,10 @@ impl PenSim {
             return;
         }
         let fr = &s.frames;
-        let mk = |name: &'static str, color, g: &dyn Fn(&PackedFrame) -> f64| Series { name, color, markers: false, pts: fr.iter().map(|f| (f.time * 1e6, g(f))).collect() };
-        line_plot(ui, 190.0, "Balanço de energia", "t [µs]", "J", &[
+        // valores REAIS: tempo ÷ escala, energia ÷ escala³ (similaridade geométrica)
+        let rs = self.started_scale.max(1e-6);
+        let mk = |name: &'static str, color, g: &dyn Fn(&PackedFrame) -> f64| Series { name, color, markers: false, pts: fr.iter().map(|f| (f.time * 1e6 / rs, g(f) / rs.powi(3))).collect() };
+        line_plot(ui, 190.0, "Balanço de energia (valores reais)", "t real [µs]", "J", &[
             mk("Cinética proj.", Color32::from_rgb(30, 110, 220), &|f| f.ke_proj),
             mk("Cinética alvo", Color32::from_rgb(30, 160, 90), &|f| f.ke_target),
             mk("Plástica", Color32::from_rgb(240, 130, 20), &|f| f.e_plastic),
@@ -1525,7 +1532,7 @@ impl PenSim {
             mk("Contato", Color32::GRAY, &|f| f.e_contact),
         ]);
         ui.add_space(8.0);
-        line_plot(ui, 170.0, "Velocidade do projétil (vx do CM)", "t [µs]", "m/s", &[mk("vx", Color32::from_rgb(30, 110, 220), &|f| f.vx_proj)]);
+        line_plot(ui, 170.0, "Velocidade do projétil (vx do CM)", "t real [µs]", "m/s", &[Series { name: "vx", color: Color32::from_rgb(30, 110, 220), markers: false, pts: fr.iter().map(|f| (f.time * 1e6 / rs, f.vx_proj)).collect() }]);
     }
 
     fn ui_limit(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1535,7 +1542,7 @@ impl PenSim {
         ui.add(egui::Slider::new(&mut self.sweep_n, 3..=8).text("pontos"));
         let busy = self.sweep.as_ref().map_or(false, |s| !s.state.lock().unwrap().finished);
         if ui.add_enabled(!busy, egui::Button::new("◎ Calcular limite balístico")).clicked() && self.sweep_range.0 < self.sweep_range.1 {
-            self.sweep = Some(SweepJob::spawn(self.cfg.clone(), self.sweep_range.0, self.sweep_range.1, self.sweep_n, 2, ctx.clone()));
+            self.sweep = Some(SweepJob::spawn(self.scaled_cfg(), self.sweep_range.0, self.sweep_range.1, self.sweep_n, 2, ctx.clone()));
         }
         if let Some(s) = &self.sweep {
             let g = s.state.lock().unwrap();
@@ -1578,7 +1585,7 @@ impl PenSim {
                         self.playing = true;
                     }
                 }
-                let t = s.frames[self.view_idx.min(nf - 1)].time * 1e6;
+                let t = s.frames[self.view_idx.min(nf - 1)].time * 1e6 / self.started_scale.max(1e-6);
                 ui.monospace(format!("t = {t:7.1} µs · {}×", self.speed));
                 let mut i = self.view_idx;
                 let w = (ui.available_width() - 20.0).max(80.0);
@@ -1781,7 +1788,7 @@ impl PenSim {
                     view3d::outline(&painter, &view, dx, &ext_pos, &idx, &|i| if parts[i % n] >= np { 0 } else if f.damage[i % n] >= 0.6 { 2 } else { 1 }, Color32::from_rgb(20, 24, 36));
                 }
             }
-            painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, format!("t = {:.1} µs", f.time * 1e6), FontId::monospace(15.0), Color32::from_gray(30));
+            painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, format!("t = {:.0} µs (tempo real equivalente)", f.time * 1e6 / self.started_scale.max(1e-6)), FontId::monospace(15.0), Color32::from_gray(30));
         } else {
             let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
             let idx: Vec<u32> = if self.section { p.idx.iter().cloned().filter(|&i| in_section(p.pos[i as usize][1])).collect() } else { p.idx.clone() };
