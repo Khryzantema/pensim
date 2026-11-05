@@ -247,7 +247,8 @@ impl Config {
     /// Memória aproximada (MB): ligações + estado dos nós + quadros gravados.
     pub fn estimate_memory_mb(&self) -> f64 {
         let n = self.estimate_nodes();
-        n * (self.bonds_per_node() * 28.0 + 250.0 + 36.0 * self.n_frames as f64) / 1e6
+        let threads = std::thread::available_parallelism().map_or(4, |v| v.get()) as f64;
+        n * (self.bonds_per_node() * 10.0 + 150.0 + 32.0 * threads + 36.0 * self.n_frames as f64) / 1e6
     }
     pub fn obliquity(&self) -> f64 {
         self.obliquity_deg.to_radians()

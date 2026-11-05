@@ -137,6 +137,8 @@ pub struct PenSim {
     ammo_idx: usize,
     ammo_scale: f64,
     show_side: bool,
+    /// margens extras (pt) somadas à área segura automática: [esq, topo, dir, base]
+    extra_inset: [f32; 4],
     ws: Ws,
     sel: Sel,
     res_tab: ResTab,
@@ -213,6 +215,7 @@ impl PenSim {
             ammo_idx,
             ammo_scale: AMMO[ammo_idx].scale,
             show_side: true,
+            extra_inset: [0.0, 0.0, 0.0, 0.0],
             ws: Ws::Design,
             sel: Sel::Projectile,
             res_tab: ResTab::Summary,
@@ -341,6 +344,29 @@ impl PenSim {
     }
 }
 
+/// Margens seguras [esq, topo, dir, base] em pontos: barra de status, recorte da câmera,
+/// barra de navegação e teclado (somente Android; 0 no desktop).
+fn system_insets(ctx: &egui::Context) -> [f32; 4] {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(app) = crate::ANDROID_APP.get() {
+            let r = app.content_rect();
+            if r.right > r.left && r.bottom > r.top {
+                let ppp = ctx.pixels_per_point();
+                let full = ctx.viewport_rect();
+                let (w, h) = (full.width() * ppp, full.height() * ppp);
+                let l = (r.left as f32).clamp(0.0, w * 0.3);
+                let t = (r.top as f32).clamp(0.0, h * 0.3);
+                let rr = (w - r.right as f32).clamp(0.0, w * 0.3);
+                let b = (h - r.bottom as f32).clamp(0.0, h * 0.5);
+                return [l / ppp, t / ppp, rr / ppp, b / ppp];
+            }
+        }
+    }
+    let _ = ctx;
+    [0.0; 4]
+}
+
 impl eframe::App for PenSim {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -381,6 +407,22 @@ impl eframe::App for PenSim {
         self.view_idx = self.view_idx.min(snap.frames.len().saturating_sub(1));
         self.refresh_preview();
 
+        // área segura: mantém a interface fora da barra de status, do recorte da câmera e da navegação
+        let sys = system_insets(&ctx);
+        let inset = [sys[0] + self.extra_inset[0], sys[1] + self.extra_inset[1], sys[2] + self.extra_inset[2], sys[3] + self.extra_inset[3]];
+        let blank = egui::Frame::NONE;
+        if inset[1] > 0.5 {
+            egui::Panel::top("safe_top").exact_size(inset[1]).frame(blank).show_separator_line(false).show(ui, |_| {});
+        }
+        if inset[3] > 0.5 {
+            egui::Panel::bottom("safe_bottom").exact_size(inset[3]).frame(blank).show_separator_line(false).show(ui, |_| {});
+        }
+        if inset[0] > 0.5 {
+            egui::Panel::left("safe_left").exact_size(inset[0]).frame(blank).show_separator_line(false).show(ui, |_| {});
+        }
+        if inset[2] > 0.5 {
+            egui::Panel::right("safe_right").exact_size(inset[2]).frame(blank).show_separator_line(false).show(ui, |_| {});
+        }
         let avail = ui.available_size();
         let is_compact = avail.y < 520.0;
         COMPACT.store(is_compact, Ordering::Relaxed);
@@ -774,6 +816,13 @@ impl PenSim {
                     let t = format!("▭ Extrusão {} · {} · {:.0} mm", i + 1, l.material.name, l.thickness * 1e3);
                     pick(self, ui, Sel::Layer(i), t);
                 }
+            });
+            egui::CollapsingHeader::new("Ajustes de tela").default_open(false).show(ui, |ui| {
+                ui.weak("Se algum botão do topo, lados ou base não responder (barra de status, câmera ou navegação do Android), aumente a margem.");
+                ui.add(egui::Slider::new(&mut self.extra_inset[1], 0.0..=80.0).text("topo"));
+                ui.add(egui::Slider::new(&mut self.extra_inset[3], 0.0..=80.0).text("base"));
+                ui.add(egui::Slider::new(&mut self.extra_inset[0], 0.0..=80.0).text("esquerda"));
+                ui.add(egui::Slider::new(&mut self.extra_inset[2], 0.0..=80.0).text("direita"));
             });
             egui::CollapsingHeader::new("Análise").default_open(true).show(ui, |ui| {
                 pick(self, ui, Sel::Conditions, "⚙ Condições de impacto".into());

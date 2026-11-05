@@ -1,4 +1,7 @@
 mod app;
+#[cfg(target_os = "android")]
+pub(crate) static ANDROID_APP: std::sync::OnceLock<android_activity::AndroidApp> = std::sync::OnceLock::new();
+
 mod plot;
 mod sketch;
 mod view3d;
@@ -43,6 +46,7 @@ fn android_main(app: android_activity::AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
+    let _ = ANDROID_APP.set(app.clone());
     let options = eframe::NativeOptions { android_app: Some(app), ..Default::default() };
     eframe::run_native("PenSim", options, Box::new(|cc| Ok(Box::new(PenSim::new(cc)))))
         .expect("falha ao iniciar a UI");
