@@ -203,6 +203,8 @@ pub struct PenSim {
     /// esconde nós quase totalmente desligados (fragmentos soltos)
     hide_loose: bool,
     hide_proj: bool,
+    /// face do corte colorida pelo contorno (desligado: cor neutra do material)
+    cut_colored: bool,
     hide_target: bool,
     /// contorno escuro na silhueta do projétil
     outline: bool,
@@ -298,6 +300,7 @@ impl PenSim {
             logo_tex: crate::load_logo(&cc.egui_ctx),
             hide_loose: false,
             hide_proj: false,
+            cut_colored: false,
             hide_target: false,
             outline: true,
             round_nodes: true,
@@ -369,6 +372,9 @@ impl PenSim {
             }
             me.res_tab = ResTab::Files;
             me.sheet_tab = 1;
+        }
+        if std::env::var("PENSIM_SIDE").is_ok() {
+            me.cam = Camera::front();
         }
         if std::env::var("PENSIM_HIDETARGET").is_ok() {
             me.hide_target = true;
@@ -963,6 +969,9 @@ impl PenSim {
                 group(ui, "VISTA", |ui| {
                     if tbtn(ui, "◧", if self.section { "Corte\nligado" } else { "Corte\ndesl." }, self.section, true, 62.0).clicked() {
                         self.section = !self.section;
+                    }
+                    if tbtn(ui, "◩", "Corte\ncolorido", self.cut_colored, true, 62.0).clicked() {
+                        self.cut_colored = !self.cut_colored;
                     }
                     if tbtn(ui, "●", "Nós\nredondos", self.round_nodes, true, 62.0).clicked() {
                         self.round_nodes = !self.round_nodes;
@@ -1675,6 +1684,8 @@ impl PenSim {
                 ext_pos.extend(f.pos.iter().map(|&q| flip(q, m)));
             }
             let mut idx: Vec<u32> = Vec::new();
+            // nós que entram só por estarem na face do corte (sem cor de contorno, se desligado)
+            let mut plain = vec![false; n * masks.len()];
             for (mi, &m) in masks.iter().enumerate() {
                 for i in 0..n {
                     let ry = flip(snap.ref_pos[i], m)[1];
@@ -1688,8 +1699,12 @@ impl PenSim {
                     if (is_p && self.hide_proj) || (!is_p && self.hide_target) {
                         continue;
                     }
-                    if snap.surface[i] || (self.section && near_face(ry)) || f.damage[i] > 0.4 {
+                    let surf = snap.surface[i] || f.damage[i] > 0.4;
+                    if surf || (self.section && near_face(ry)) {
                         idx.push((mi * n + i) as u32);
+                        if !surf && !self.cut_colored {
+                            plain[mi * n + i] = true;
+                        }
                     }
                 }
             }
@@ -1738,7 +1753,15 @@ impl PenSim {
                 };
                 let (lo, hi) = (r.0, if r.1 > r.0 { r.1 } else { r.0 + 1.0 });
                 let bands = self.bands;
-                view3d::render(&painter, &view, dx, &ext_pos, &idx, false, Some(&light), round_id, &|i| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands));
+                let mat_cols: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
+                let part_of = snap.parts.clone();
+                view3d::render(&painter, &view, dx, &ext_pos, &idx, false, Some(&light), round_id, &|i| {
+                    if plain[i] {
+                        mat_cols[(part_of[i % n] as usize).min(mat_cols.len() - 1)]
+                    } else {
+                        rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands)
+                    }
+                });
                 legend(&painter, rect, self.field, lo, hi);
                 if self.outline {
                     let (parts, np) = (snap.parts.clone(), self.cfg.design.n_proj_parts() as u8);

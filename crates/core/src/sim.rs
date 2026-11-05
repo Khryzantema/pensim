@@ -594,15 +594,23 @@ impl Sim {
             })
             .collect();
         self.bonds = full.into_iter().map(|b| b.1).collect();
-        // nós de superfície: menos ligações que o máximo da peça
+        // nós de superfície: bem menos ligações que o interior da peça. A referência é o percentil 90
+        // (e não o máximo): com jitter nas posições a contagem varia de nó para nó e o máximo é
+        // um outlier que marcaria o interior como superfície.
         let nparts = self.mats.len();
-        let mut maxb = vec![0u32; nparts];
+        let mut counts: Vec<Vec<u32>> = vec![vec![]; nparts];
         for i in 0..nr {
-            let p = self.part[i] as usize;
-            maxb[p] = maxb[p].max(self.initial_bonds[i]);
+            counts[self.part[i] as usize].push(self.initial_bonds[i]);
         }
+        let refb: Vec<f64> = counts
+            .iter_mut()
+            .map(|c| {
+                c.sort_unstable();
+                c.get(c.len().saturating_mul(9) / 10).copied().unwrap_or(0) as f64
+            })
+            .collect();
         for i in 0..nr {
-            self.surface[i] = (self.initial_bonds[i] as f64) < 0.97 * maxb[self.part[i] as usize] as f64;
+            self.surface[i] = (self.initial_bonds[i] as f64) < 0.90 * refb[self.part[i] as usize];
         }
     }
 
