@@ -169,11 +169,14 @@ fn shell(s: Shell) -> Built {
         // no terço traseiro; atrás dela a espoleta de base (corpo) e o traçante no fundo
         let vol = s.he_g / 1.65 * 1000.0; // mm³ (densidade ~1,65 g/cm³)
         let pi = std::f64::consts::PI;
-        let mut rc = s.he_r.max(0.16) * d;
-        // volume = cilindro (comprimento ≥ rc) + frente ogival (~½ do cilindro equivalente)
-        let vmin = pi * rc * rc * (rc + 0.6 * rc);
-        if vol < vmin {
-            rc *= (vol / vmin).cbrt();
+        // câmara larga e curta: raio ~0,22 calibre, comprimento reto ≤ 2,5 raios (se precisar de
+        // mais volume, alarga até deixar parede de ~0,2 calibre)
+        let mut rc = s.he_r.max(0.22) * d;
+        let vol_at = |rc: f64, lc: f64| pi * rc * rc * (lc + 0.6 * rc);
+        if vol < vol_at(rc, 0.5 * rc) {
+            rc *= (vol / vol_at(rc, 0.5 * rc)).cbrt();
+        } else if vol > vol_at(rc, 2.5 * rc) {
+            rc = ((vol / (pi * 3.1)).cbrt()).min(0.30 * d);
         }
         let lo = 1.2 * rc;
         let lc = ((vol - 0.5 * pi * rc * rc * lo) / (pi * rc * rc)).max(0.3 * rc);
