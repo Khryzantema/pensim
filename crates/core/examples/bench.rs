@@ -1,7 +1,7 @@
 use pensim_core::*;
 fn main() {
     let mut c = Preset::Rifle762.config();
-    c.velocity = 900.0;
+    c.velocity = 1500.0;
     c.n_frames = 6;
     let t = std::time::Instant::now();
     let mut s = Sim::new(c).unwrap();

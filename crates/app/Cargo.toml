@@ -36,5 +36,5 @@ target_sdk_version = 34
 label = "PenSim Balística"
 
 [package.metadata.android.application.activity]
-orientation = "unspecified"
+orientation = "fullSensor"
 config_changes = "orientation|keyboardHidden|screenSize"

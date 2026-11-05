@@ -126,6 +126,8 @@ pub struct Sim {
     gcs: f64,
     ke_hist: Vec<f64>,
     fill: Vec<u32>,
+    n_proj: u8,
+    exit_found: bool,
     soft: Vec<f64>,
     contact_on: Vec<bool>,
 }
@@ -142,6 +144,15 @@ fn cell_coords(c: u32, g: &GridInfo) -> [i64; 3] {
 
 impl Sim {
     pub fn new(cfg: Config) -> Result<Sim, String> {
+        if let Some(av) = crate::config::available_memory_mb() {
+            let need = cfg.estimate_memory_mb();
+            if need > 0.85 * av {
+                return Err(format!(
+                    "Memória insuficiente: esta malha precisa de ≈{:.0} MB e há ≈{:.0} MB livres. Aumente o espaçamento (aba RESOLUÇÃO) ou reduza os quadros gravados.",
+                    need, av
+                ));
+            }
+        }
         let model = Model::build(&cfg)?;
         let dx = cfg.dx;
         let vol = dx * dx * dx;
@@ -154,7 +165,7 @@ impl Sim {
         let p: Vec<P> = (0..n)
             .map(|i| {
                 let q = model.pos[i];
-                let proj = model.part[i] == 0;
+                let proj = model.part[i] < model.n_proj;
                 P {
                     x: q[0], y: q[1], z: q[2], temp: T_REF,
                     vx: if proj { speed * model.dir[0] } else { 0.0 },
@@ -195,6 +206,8 @@ impl Sim {
             gcs: 0.0,
             ke_hist: vec![],
             fill: vec![],
+            n_proj: model.n_proj,
+            exit_found: false,
             soft: vec![1.0; n],
             contact_on: vec![true; n],
             cfg,
@@ -355,7 +368,7 @@ impl Sim {
         self.p
             .iter()
             .enumerate()
-            .filter(|(i, _)| proj.map_or(true, |pr| (self.part[*i] == 0) == pr))
+            .filter(|(i, _)| proj.map_or(true, |pr| (self.part[*i] < self.n_proj) == pr))
             .map(|(i, q)| 0.5 * self.mass[self.part[i] as usize] * (q.vx * q.vx + q.vy * q.vy + q.vz * q.vz))
             .sum()
     }
@@ -521,6 +534,37 @@ impl Sim {
         self.step_count += 1;
     }
 
+    /// Encerra pouco depois de o projétil sair do alvo (por trás, ao perfurar,
+    /// ou pela frente, ao ricochetear), sem calcular até o tempo final.
+    fn check_exit(&mut self) {
+        if self.exit_found {
+            return;
+        }
+        let margin = 0.005f64.max(3.0 * self.cfg.dx);
+        let (mut np, mut behind, mut front, mut vx) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for (i, q) in self.p.iter().enumerate() {
+            if self.part[i] >= self.n_proj {
+                continue;
+            }
+            np += 1.0;
+            vx += q.vx;
+            if q.x > self.back_x + margin {
+                behind += 1.0;
+            }
+            if q.x < -margin {
+                front += 1.0;
+            }
+        }
+        let vm = vx / np.max(1.0);
+        let perforated = behind >= 0.5 * np && vm > 0.0;
+        let rebounded = front >= np && vm < 0.0;
+        if perforated || rebounded {
+            self.exit_found = true;
+            let tail = (0.2 * self.time).max(5e-6);
+            self.t_end = self.t_end.min(self.time + tail);
+        }
+    }
+
     pub fn advance_for(&mut self, budget: Duration) {
         let start = Instant::now();
         while !self.done() {
@@ -530,6 +574,9 @@ impl Sim {
             }
             for _ in 0..2 {
                 self.step();
+            }
+            if self.step_count % 10 == 0 {
+                self.check_exit();
             }
             if start.elapsed() >= budget {
                 break;
@@ -592,9 +639,9 @@ impl Sim {
         let press: Vec<f32> = tens.iter().map(|(s, _, _)| -(s[0] + s[1] + s[2]) / 3.0).collect();
         let (mut ke_p, mut vx_p, mut np) = (0.0f64, 0.0f64, 0.0f64);
         for i in 0..n {
-            if self.part[i] == 0 {
+            if self.part[i] < self.n_proj {
                 let q = self.p[i];
-                ke_p += 0.5 * self.mass[0] * (q.vx * q.vx + q.vy * q.vy + q.vz * q.vz);
+                ke_p += 0.5 * self.mass[self.part[i] as usize] * (q.vx * q.vx + q.vy * q.vy + q.vz * q.vz);
                 vx_p += q.vx;
                 np += 1.0;
             }
@@ -636,7 +683,7 @@ impl Sim {
         let (mut nt, mut ejected) = (0.0f64, 0.0f64);
         for i in 0..n {
             let q = self.p[i];
-            if self.part[i] == 0 {
+            if self.part[i] < self.n_proj {
                 np += 1.0;
                 vx += q.vx;
                 tip = tip.max(q.x);

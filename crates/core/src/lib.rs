@@ -6,13 +6,15 @@
 //! contato por penalidade. O passo de tempo é explícito e **paralelo** (rayon).
 //!
 //! Não é um código validado de engenharia: é um modelo didático/qualitativo.
+pub mod ammo;
 pub mod config;
 pub mod geometry;
 pub mod material;
 pub mod sim;
 pub mod sweep;
 
-pub use config::{Config, Design, Layer, Nose, Preset, Projectile};
+pub use ammo::{Ammo, AMMO};
+pub use config::{available_memory_mb, Config, Core, Design, Layer, Nose, Preset, Projectile};
 pub use geometry::Model;
 pub use material::{Material, LIBRARY};
 pub use sim::{Frame, Outcome, OutcomeKind, Sim};

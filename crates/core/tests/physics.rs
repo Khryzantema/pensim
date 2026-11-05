@@ -78,3 +78,39 @@ fn very_high_speed_stays_stable() {
     assert!(o.v_residual.is_finite());
     assert!(o.energy_error_pct.abs() < 5.0, "erro {}%", o.energy_error_pct);
 }
+
+#[test]
+fn stops_shortly_after_projectile_exits() {
+    let c = cfg(1500.0);
+    let full = c.t_end();
+    let mut s = Sim::new(c).unwrap();
+    s.run_to_end();
+    assert_eq!(s.outcome().kind, OutcomeKind::Perforation);
+    assert!(s.time < 0.85 * full, "parou em {:.1} µs de {:.1} µs", s.time * 1e6, full * 1e6);
+    assert!(s.t_end() + s.dt >= s.time);
+}
+
+#[test]
+fn ammo_library_builds_valid_models() {
+    for a in AMMO {
+        let cfg = a.config(a.scale);
+        let m = Model::build(&cfg).unwrap_or_else(|e| panic!("{}: {e}", a.name));
+        assert!(m.pos.len() > 200 && m.pos.len() < 150_000, "{}: {} nós", a.name, m.pos.len());
+        assert!(m.part.iter().any(|&p| p == 0), "{}", a.name);
+        if a.core.is_some() {
+            assert!(m.part.iter().any(|&p| p == 1), "{}: sem nós de núcleo", a.name);
+            assert_eq!(m.n_proj, 2);
+        }
+    }
+}
+
+#[test]
+fn scaled_projectile_with_core_runs() {
+    let a = AMMO.iter().find(|a| a.name.contains("M61")).unwrap();
+    let mut c = a.config(a.scale);
+    c.n_frames = 6;
+    let mut s = Sim::new(c).unwrap();
+    s.run_to_end();
+    let o = s.outcome();
+    assert!(o.energy_error_pct.abs() < 5.0, "erro {}%", o.energy_error_pct);
+}

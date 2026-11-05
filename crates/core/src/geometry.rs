@@ -10,6 +10,8 @@ pub struct Model {
     pub mats: Vec<Material>,
     pub back_x: f64,
     pub dir: [f64; 3],
+    /// peças [0, n_proj) são o projétil
+    pub n_proj: u8,
 }
 
 impl Model {
@@ -24,7 +26,9 @@ impl Model {
         let mut pos = vec![];
         let mut part = vec![];
         let mut fixed = vec![];
-        let mut mats = vec![cfg.design.projectile.material.clone()];
+        let n_proj = cfg.design.n_proj_parts();
+        let mut mats = cfg.design.materials();
+        mats.truncate(n_proj);
 
         // --- camadas do alvo (eixo x = normal; centradas em y,z)
         let mut cursor = 0.0;
@@ -49,7 +53,7 @@ impl Model {
                             y.abs() > ny as f64 * dx / 2.0 - 2.0 * dx || z.abs() > nz as f64 * dx / 2.0 - 2.0 * dx
                         };
                         pos.push([x, y, z]);
-                        part.push((li + 1) as u8);
+                        part.push((n_proj + li) as u8);
                         fixed.push(cfg.clamp_edges && edge);
                     }
                 }
@@ -68,7 +72,7 @@ impl Model {
         let alpha = cfg.obliquity();
         let d = [alpha.cos(), 0.0, -alpha.sin()];
         let ev = [alpha.sin(), 0.0, alpha.cos()];
-        let mut ploc = vec![];
+        let mut ploc: Vec<(f64, f64, f64, u8)> = vec![];
         for ia in 0..na {
             let a = (ia as f64 + 0.5) * len / na as f64;
             let ra = pr.radius_at(a);
@@ -76,8 +80,10 @@ impl Model {
                 let u = (iu as f64 - (nw as f64 - 1.0) / 2.0) * dx;
                 for iv in 0..nw {
                     let v = (iv as f64 - (nw as f64 - 1.0) / 2.0) * dx;
-                    if (u * u + v * v).sqrt() <= ra + 1e-12 {
-                        ploc.push((a, u, v));
+                    let rho = (u * u + v * v).sqrt();
+                    if rho <= ra + 1e-12 {
+                        let in_core = pr.core.as_ref().map_or(false, |c| rho <= crate::config::profile_radius(&c.profile, a) + 1e-12);
+                        ploc.push((a, u, v, in_core as u8));
                     }
                 }
             }
@@ -87,15 +93,15 @@ impl Model {
         }
         let wp: Vec<[f64; 3]> = ploc
             .iter()
-            .map(|&(a, u, v)| [-d[0] * a + ev[0] * v, u, -d[2] * a + ev[2] * v])
+            .map(|&(a, u, v, _)| [-d[0] * a + ev[0] * v, u, -d[2] * a + ev[2] * v])
             .collect();
         let maxx = wp.iter().map(|p| p[0]).fold(f64::MIN, f64::max);
         let shift = -0.6 * dx - maxx;
-        for p in wp {
+        for (k, p) in wp.into_iter().enumerate() {
             pos.push([p[0] + shift, p[1], p[2]]);
-            part.push(0);
+            part.push(ploc[k].3);
             fixed.push(false);
         }
-        Ok(Model { pos, part, fixed, mats, back_x, dir: d })
+        Ok(Model { pos, part, fixed, mats, back_x, dir: d, n_proj: n_proj as u8 })
     }
 }

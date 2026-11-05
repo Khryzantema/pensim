@@ -1,0 +1,3 @@
+DejaVu Sans — Copyright (c) 2003 Bitstream, Inc.; (c) DejaVu fonts team.
+Distribuída sob a licença livre Bitstream Vera / DejaVu (https://dejavu-fonts.github.io/License.html).
+Usada apenas como fonte de reserva para símbolos da interface.

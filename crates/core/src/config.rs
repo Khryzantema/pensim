@@ -69,6 +69,30 @@ pub struct Projectile {
     /// pontos (distância da ponta `a`, raio `r`) em metros, `a` crescente
     pub profile: Vec<[f64; 2]>,
     pub material: Material,
+    /// região interna de outro material (núcleo de aço, carga, traçante…)
+    pub core: Option<Core>,
+}
+
+/// Região interna do projétil; tem prioridade sobre o material externo.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Core {
+    pub profile: Vec<[f64; 2]>,
+    pub material: Material,
+}
+
+pub fn profile_radius(p: &[[f64; 2]], a: f64) -> f64 {
+    let len = p.last().map_or(0.0, |q| q[0]);
+    if p.is_empty() || a < p[0][0] || a > len {
+        return -1.0;
+    }
+    for w in p.windows(2) {
+        if a <= w[1][0] {
+            let d = (w[1][0] - w[0][0]).max(1e-12);
+            let t = ((a - w[0][0]) / d).clamp(0.0, 1.0);
+            return w[0][1] + t * (w[1][1] - w[0][1]);
+        }
+    }
+    p[p.len() - 1][1]
 }
 
 impl Projectile {
@@ -76,18 +100,7 @@ impl Projectile {
         self.profile.last().map_or(0.0, |p| p[0])
     }
     pub fn radius_at(&self, a: f64) -> f64 {
-        let p = &self.profile;
-        if p.is_empty() || a < 0.0 || a > self.length() {
-            return -1.0;
-        }
-        for w in p.windows(2) {
-            if a <= w[1][0] {
-                let d = (w[1][0] - w[0][0]).max(1e-12);
-                let t = ((a - w[0][0]) / d).clamp(0.0, 1.0);
-                return w[0][1] + t * (w[1][1] - w[0][1]);
-            }
-        }
-        p[p.len() - 1][1]
+        profile_radius(&self.profile, a)
     }
     pub fn max_radius(&self) -> f64 {
         self.profile.iter().map(|p| p[1]).fold(0.0, f64::max)
@@ -111,6 +124,22 @@ pub struct Layer {
 pub struct Design {
     pub projectile: Projectile,
     pub layers: Vec<Layer>,
+}
+
+impl Design {
+    /// Número de peças do projétil (1 ou 2 com núcleo).
+    pub fn n_proj_parts(&self) -> usize {
+        1 + self.projectile.core.is_some() as usize
+    }
+    /// Materiais por peça: projétil, núcleo (se houver), camadas do alvo.
+    pub fn materials(&self) -> Vec<Material> {
+        let mut v = vec![self.projectile.material.clone()];
+        if let Some(c) = &self.projectile.core {
+            v.push(c.material.clone());
+        }
+        v.extend(self.layers.iter().map(|l| l.material.clone()));
+        v
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -161,7 +190,7 @@ impl Preset {
             thickness: t, gap_before: 0.0, width: w, height: w, round: false, material: mat(m),
         };
         let proj = |nose: Nose, d: f64, l: f64, m: usize| Projectile {
-            profile: nose.profile(d, l), material: mat(m),
+            profile: nose.profile(d, l), material: mat(m), core: None,
         };
         let (projectile, layers, velocity) = match self {
             Preset::Rifle762 => (proj(Nose::Ogive, 0.00762, 0.028, 0), vec![layer(0.016, 0.06, 0)], 800.0),
@@ -187,7 +216,39 @@ impl Preset {
     }
 }
 
+/// Memória disponível (MB) lida de /proc/meminfo (Linux/Android), se possível.
+pub fn available_memory_mb() -> Option<f64> {
+    let t = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = t.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kb: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024.0)
+}
+
 impl Config {
+    /// Número aproximado de nós da malha.
+    pub fn estimate_nodes(&self) -> f64 {
+        let dx3 = self.dx.powi(3);
+        let layers: f64 = self
+            .design
+            .layers
+            .iter()
+            .map(|l| {
+                let a = if l.round { std::f64::consts::PI / 4.0 * l.width * l.width } else { l.width * l.height };
+                a * l.thickness / dx3
+            })
+            .sum();
+        let p = &self.design.projectile;
+        let rm = p.max_radius();
+        layers + std::f64::consts::PI * rm * rm * p.length() * 0.7 / dx3
+    }
+    pub fn bonds_per_node(&self) -> f64 {
+        4.19 * self.horizon_m.powi(3)
+    }
+    /// Memória aproximada (MB): ligações + estado dos nós + quadros gravados.
+    pub fn estimate_memory_mb(&self) -> f64 {
+        let n = self.estimate_nodes();
+        n * (self.bonds_per_node() * 28.0 + 250.0 + 36.0 * self.n_frames as f64) / 1e6
+    }
     pub fn obliquity(&self) -> f64 {
         self.obliquity_deg.to_radians()
     }
