@@ -444,6 +444,14 @@ impl PenSim {
                 }
             }
         }
+        if let Ok(img) = std::env::var("PENSIM_IMG") {
+            if me.pdraw.is_none() {
+                me.pdraw = Some(Drawing::new("Projétil desenhado", 0.0));
+            }
+            me.ws = Ws::Projectile;
+            me.ped.pending_load = Some(img);
+            me.ped.tool = DTool::Image;
+        }
         if std::env::var("PENSIM_TOBJ").is_ok() {
             let mut d = Drawing::new("Objeto 1", 100.0);
             let q: Vec<usize> = [[0.0, -30.0], [20.0, -30.0], [35.0, 30.0], [10.0, 30.0]].iter().map(|&p| d.add_point(p)).collect();
@@ -2231,10 +2239,14 @@ fn draw_tools(ui: &mut egui::Ui, d: &mut Drawing, ed: &mut DrawEditor, mode: dra
         DTool::Fillet => "Arredondar",
         DTool::Erase => "Apagar",
         DTool::Bucket => "Balde",
+        DTool::Image => "Imagem de fundo",
     };
     ui.label(RichText::new(format!("Ferramenta: {tname}")).strong().color(ACCENT));
     ui.weak("Escolha a ferramenta na barra sobre o desenho.");
     match ed.tool {
+        DTool::Image => {
+            image_panel(ui, d, ed, &mut changed);
+        }
         DTool::Bucket => {
             ui.horizontal(|ui| {
                 ui.label("Material do balde:");
@@ -2330,6 +2342,103 @@ fn draw_tools(ui: &mut egui::Ui, d: &mut Drawing, ed: &mut DrawEditor, mode: dra
         }
     }
     changed
+}
+
+/// Pasta de imagens de referência (no Android, a pasta do app visível no gerenciador de arquivos).
+fn images_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "android")]
+    let base = crate::ANDROID_APP.get().and_then(|a| a.external_data_path().or_else(|| a.internal_data_path()));
+    #[cfg(not(target_os = "android"))]
+    let base = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share/pensim"));
+    let dir = base.unwrap_or_else(|| std::path::PathBuf::from(".")).join("imagens");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn image_files() -> Vec<std::path::PathBuf> {
+    let mut v: Vec<std::path::PathBuf> = vec![];
+    let mut dirs = vec![images_dir()];
+    #[cfg(not(target_os = "android"))]
+    if let Some(h) = std::env::var_os("HOME") {
+        dirs.push(std::path::PathBuf::from(&h).join("Pictures"));
+        dirs.push(std::path::PathBuf::from(&h).join("Imagens"));
+        dirs.push(std::path::PathBuf::from(&h).join("Downloads"));
+    }
+    for d in dirs {
+        if let Ok(rd) = std::fs::read_dir(d) {
+            for e in rd.filter_map(|e| e.ok()) {
+                let p = e.path();
+                let ext = p.extension().and_then(|x| x.to_str()).map(|x| x.to_lowercase()).unwrap_or_default();
+                if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
+                    v.push(p);
+                }
+            }
+        }
+    }
+    v.sort();
+    v.truncate(60);
+    v
+}
+
+/// Painel da ferramenta Imagem: carregar, ajustar e remover a imagem de fundo.
+fn image_panel(ui: &mut egui::Ui, d: &mut Drawing, ed: &mut DrawEditor, changed: &mut bool) {
+    ui.label(RichText::new("A imagem fica atrás de tudo, só como referência para você desenhar por cima.").size(12.5).color(Color32::from_gray(90)));
+    // caminho digitado (útil no computador)
+    let id = egui::Id::new("img_path");
+    let mut path: String = ui.data_mut(|d| d.get_temp::<String>(id).unwrap_or_default());
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut path).hint_text("caminho da imagem (PNG ou JPEG)").desired_width(ui.available_width() - 84.0));
+        if ui.button("Carregar").clicked() && !path.trim().is_empty() {
+            ed.pending_load = Some(path.trim().trim_matches('"').to_string());
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, path));
+    if !ed.img_err.is_empty() {
+        ui.colored_label(BAD, &ed.img_err);
+    }
+    let files = image_files();
+    egui::CollapsingHeader::new(format!("Imagens encontradas ({})", files.len())).id_salt("img_list").show(ui, |ui| {
+        if files.is_empty() {
+            ui.weak("Nenhuma imagem. Coloque arquivos PNG ou JPEG na pasta abaixo.");
+        }
+        for f in &files {
+            let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            if ui.button(name).clicked() {
+                ed.pending_load = Some(f.to_string_lossy().to_string());
+            }
+        }
+        ui.weak(format!("Pasta do app: {}", images_dir().display()));
+    });
+    if let Some(b) = d.bg.as_mut() {
+        ui.separator();
+        let before = b.clone();
+        ui.add(egui::Slider::new(&mut b.width_mm, 1.0..=2000.0).logarithmic(true).clamping(egui::SliderClamping::Never).text("largura mm"));
+        ui.add(egui::Slider::new(&mut b.rot_deg, -180.0..=180.0).suffix("°").text("giro"));
+        ui.add(egui::Slider::new(&mut b.alpha, 0.1..=1.0).text("opacidade"));
+        ui.horizontal(|ui| {
+            ui.label("Posição:");
+            ui.add(egui::DragValue::new(&mut b.center[0]).prefix("x ").suffix(" mm").speed(0.5));
+            ui.add(egui::DragValue::new(&mut b.center[1]).prefix("y ").suffix(" mm").speed(0.5));
+        });
+        ui.horizontal(|ui| {
+            if ui.button("↔ Espelhar").clicked() {
+                b.flip = !b.flip;
+            }
+            if ui.button("Girar 90°").clicked() {
+                b.rot_deg = (b.rot_deg + 90.0 + 180.0).rem_euclid(360.0) - 180.0;
+            }
+            if ui.button("✕ Remover imagem").clicked() {
+                *changed = true;
+                ed.bg_tex = None;
+            }
+        });
+        if *b != before {
+            *changed = true;
+        }
+        if ed.bg_tex.is_none() {
+            d.bg = None;
+        }
+    }
 }
 
 /// Massa do projétil (kg) por amostragem do corte revolvido.

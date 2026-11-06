@@ -18,6 +18,7 @@ fn main() {
         let a = std::time::Instant::now();
         sim.advance_for(std::time::Duration::from_secs(5));
         let k = sim.step_count - s0;
+        println!("  equilíbrio de carga: 4 thr {:.0}% · 16 thr {:.0}% · 48 thr {:.0}%", 100.0 * sim.chunk_balance(16), 100.0 * sim.chunk_balance(64), 100.0 * sim.chunk_balance(192));
         println!("t={:.1}µs passos={} awake={:.1}% {:.1} ms/passo", sim.time * 1e6, sim.step_count, 100.0 * sim.awake_fraction(), a.elapsed().as_secs_f64() * 1e3 / k.max(1) as f64);
     }
     let k = sim.step_count;

@@ -650,6 +650,21 @@ impl Sim {
         p_tr.max(p_time).min(0.99)
     }
 
+    /// Eficiência de balanceamento da divisão estática em `nch` blocos: trabalho médio ÷ máximo
+    /// (nós ativos por bloco). 1 = perfeito; perto de 0 = quase tudo num só bloco.
+    pub fn chunk_balance(&self, nch: usize) -> f64 {
+        let nr = self.n_real;
+        let per = (nr + nch - 1) / nch;
+        let mut w = vec![0usize; nch];
+        for i in 0..nr {
+            if self.active[i] {
+                w[i / per] += self.bonds[i].len().max(1);
+            }
+        }
+        let (sum, mx) = (w.iter().sum::<usize>() as f64, *w.iter().max().unwrap_or(&1) as f64);
+        if mx <= 0.0 { 1.0 } else { sum / (nch as f64 * mx) }
+    }
+
     /// (andado, meta) da traseira do corpo principal [m]
     pub fn travel_info(&self) -> (f64, f64) {
         (self.travel, self.travel_goal)

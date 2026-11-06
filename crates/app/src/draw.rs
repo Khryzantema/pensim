@@ -34,9 +34,25 @@ pub struct FillRec {
     pub paint: Paint,
 }
 
+/// Imagem de referência colocada atrás do desenho (posição, tamanho e giro ajustáveis).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BgSpec {
+    pub path: String,
+    /// centro no plano do desenho [mm]
+    pub center: [f64; 2],
+    /// largura [mm]; a altura vem da proporção da imagem
+    pub width_mm: f64,
+    pub rot_deg: f64,
+    pub alpha: f32,
+    pub flip: bool,
+    /// altura ÷ largura da imagem
+    pub aspect: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Drawing {
     pub name: String,
+    pub bg: Option<BgSpec>,
     pub pts: Vec<[f64; 2]>,
     pub edges: Vec<[usize; 2]>,
     pub fills: Vec<FillRec>,
@@ -60,6 +76,8 @@ pub enum DTool {
     Bucket,
     Fillet,
     Connect,
+    /// ajustar a imagem de fundo
+    Image,
 }
 
 /// O que está sendo arrastado.
@@ -77,6 +95,8 @@ enum Grab {
     FilletMidV,
     MultiH,
     MultiV,
+    ImgMove,
+    ImgHandle,
     /// retângulo de seleção (canto inicial na tela)
     BoxSel(Pos2),
 }
@@ -135,6 +155,11 @@ pub struct DrawEditor {
     pub fit: bool,
     pub msg: String,
     pub fillet: Option<Fillet>,
+    /// textura da imagem de fundo carregada (caminho, textura)
+    pub bg_tex: Option<(String, egui::TextureHandle)>,
+    /// pedido de carregar uma imagem (tratado no próximo quadro do editor)
+    pub pending_load: Option<String>,
+    pub img_err: String,
     grab: Grab,
     /// posição do dedo e valor (u, v) no início do arraste
     g0: (Pos2, [f64; 2]),
@@ -145,7 +170,7 @@ pub struct DrawEditor {
 
 impl DrawEditor {
     pub fn new(paint: Paint, snap_mm: f64) -> Self {
-        DrawEditor { tool: DTool::Line, current: Some(0), selected: None, paint, undo: vec![], snap_mm, view: None, fit: true, msg: String::new(), fillet: None, grab: Grab::None, g0: (Pos2::ZERO, [0.0; 2]), multi: vec![], m0: vec![] }
+        DrawEditor { tool: DTool::Line, current: Some(0), selected: None, paint, undo: vec![], snap_mm, view: None, fit: true, msg: String::new(), fillet: None, bg_tex: None, pending_load: None, img_err: String::new(), grab: Grab::None, g0: (Pos2::ZERO, [0.0; 2]), multi: vec![], m0: vec![] }
     }
     pub fn push(&mut self, d: &Drawing) {
         self.undo.push(d.clone());
@@ -168,7 +193,7 @@ impl DrawEditor {
 
 impl Drawing {
     pub fn new(name: &str, width_mm: f64) -> Self {
-        Drawing { name: name.into(), pts: vec![[0.0, 0.0]], edges: vec![], fills: vec![], width_mm }
+        Drawing { name: name.into(), bg: None, pts: vec![[0.0, 0.0]], edges: vec![], fills: vec![], width_mm }
     }
 
     pub fn add_point(&mut self, p: [f64; 2]) -> usize {
@@ -534,6 +559,42 @@ fn centroid(d: &Drawing, ids: &[usize]) -> [f64; 2] {
     [x / n, y / n]
 }
 
+/// Lê uma imagem (PNG/JPEG), reduz se for enorme e cria a textura. Devolve (textura, proporção h/w).
+pub fn load_image(ctx: &egui::Context, path: &str) -> Result<(egui::TextureHandle, f64), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Não consegui ler o arquivo: {e}"))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("Imagem inválida (use PNG ou JPEG): {e}"))?;
+    let (w, h) = (img.width().max(1), img.height().max(1));
+    let img = if w.max(h) > 2048 {
+        let f = 2048.0 / w.max(h) as f32;
+        img.resize(((w as f32 * f) as u32).max(1), ((h as f32 * f) as u32).max(1), image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let rgba = img.to_rgba8();
+    let (iw, ih) = (rgba.width() as usize, rgba.height() as usize);
+    let ci = egui::ColorImage::from_rgba_unmultiplied([iw, ih], rgba.as_raw());
+    let tex = ctx.load_texture(format!("bg:{path}"), ci, egui::TextureOptions::LINEAR);
+    Ok((tex, ih as f64 / iw as f64))
+}
+
+impl BgSpec {
+    /// cantos (no plano do desenho) na ordem: sup-esq, sup-dir, inf-dir, inf-esq (da imagem)
+    /// `sx` = −1 quando o eixo horizontal do desenho está espelhado na tela (editor do projétil):
+    /// a imagem e o giro seguem a ORIENTAÇÃO DA TELA, como na foto original.
+    pub fn corners(&self, sx: f64) -> [[f64; 2]; 4] {
+        let (hw, hh) = (self.width_mm * 0.5, self.width_mm * self.aspect * 0.5);
+        let (sn, cs) = self.rot_deg.to_radians().sin_cos();
+        let pts = [[-hw, hh], [hw, hh], [hw, -hh], [-hw, -hh]];
+        pts.map(|q| [self.center[0] + sx * (cs * q[0] - sn * q[1]), self.center[1] + sn * q[0] + cs * q[1]])
+    }
+    /// alça de escala/giro (meio do lado direito)
+    pub fn handle(&self, sx: f64) -> [f64; 2] {
+        let (sn, cs) = self.rot_deg.to_radians().sin_cos();
+        let hw = self.width_mm * 0.5;
+        [self.center[0] + sx * cs * hw, self.center[1] + sn * hw]
+    }
+}
+
 /// Setas de arraste horizontal e vertical, afastadas do ponto para o dedo não cobri-lo.
 fn gizmo(p: Pos2, rect: Rect) -> (Pos2, Pos2) {
     let hx = if p.x + 84.0 > rect.right() { -58.0 } else { 58.0 };
@@ -614,6 +675,41 @@ pub fn show(
     let c = rect.center();
     let to = |u: f64, v: f64| Pos2::new(c.x + (sx * (u - cu) * s) as f32, c.y - ((v - cv) * s) as f32);
     let from = |p: Pos2| (cu + sx * (p.x - c.x) as f64 / s, cv - (p.y - c.y) as f64 / s);
+
+    // imagem de fundo: carrega sob demanda (pedido novo, ou o desenho aponta para outra imagem)
+    if let Some(path) = ed.pending_load.take() {
+        match load_image(ui.ctx(), &path) {
+            Ok((tex, aspect)) => {
+                let w = if d.bg.is_none() { ((rect.width() as f64 / s) * 0.6).max(1.0) } else { d.bg.as_ref().unwrap().width_mm };
+                let center = d.bg.as_ref().map_or([cu, cv], |b| b.center);
+                let (rot, alpha, flip) = d.bg.as_ref().map_or((0.0, 0.55, false), |b| (b.rot_deg, b.alpha, b.flip));
+                if d.bg.is_none() {
+                    ed.push(d);
+                }
+                d.bg = Some(BgSpec { path: path.clone(), center, width_mm: w, rot_deg: rot, alpha, flip, aspect });
+                ed.bg_tex = Some((path, tex));
+                ed.img_err.clear();
+                ed.tool = DTool::Image;
+            }
+            Err(e) => ed.img_err = e,
+        }
+    }
+    if let Some(b) = &d.bg {
+        if ed.bg_tex.as_ref().map(|t| t.0.as_str()) != Some(b.path.as_str()) {
+            ed.pending_load = Some(b.path.clone());
+        }
+    }
+    if let (Some(b), Some((_, tex))) = (&d.bg, &ed.bg_tex) {
+        let cn = b.corners(sx);
+        let uvs = if b.flip { [[1.0, 0.0], [0.0, 0.0], [0.0, 1.0], [1.0, 1.0]] } else { [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]] };
+        let tint = Color32::from_white_alpha((b.alpha.clamp(0.05, 1.0) * 255.0) as u8);
+        let mut mesh = egui::Mesh::with_texture(tex.id());
+        for (q, uv) in cn.iter().zip(uvs) {
+            mesh.vertices.push(egui::epaint::Vertex { pos: Pos2::new(c.x + (sx * (q[0] - cu) * s) as f32, c.y - ((q[1] - cv) * s) as f32), uv: Pos2::new(uv[0], uv[1]), color: tint });
+        }
+        mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+        painter.add(egui::Shape::mesh(mesh));
+    }
 
     // grade
     let mut step = ed.snap_mm.max(0.1);
@@ -809,6 +905,7 @@ pub fn show(
                         changed = true;
                     }
                 }
+                DTool::Image => {}
                 DTool::Fillet => {
                     if let Some(i) = hp {
                         match d.start_fillet(i) {
@@ -870,6 +967,15 @@ pub fn show(
         if let Some(p) = resp.interact_pointer_pos() {
             let near = |q: Pos2| q.distance(p) < 24.0;
             ed.grab = Grab::Pan;
+            // ferramenta Imagem: arrastar o fundo move a imagem; a alça verde escala e gira
+            if ed.tool == DTool::Image {
+                if let Some(b) = &d.bg {
+                    let h = b.handle(sx);
+                    let hp = Pos2::new(c.x + (sx * (h[0] - cu) * s) as f32, c.y - ((h[1] - cv) * s) as f32);
+                    ed.grab = if hp.distance(p) < 28.0 { Grab::ImgHandle } else { Grab::ImgMove };
+                    ed.push(d);
+                }
+            }
             if let Some((hs, he, _hq, gh, gv)) = fh {
                 ed.grab = if near(gh) { Grab::FilletMidH } else if near(gv) { Grab::FilletMidV } else if near(hs) { Grab::FilletStart } else if near(he) { Grab::FilletEnd } else { Grab::Pan };
             }
@@ -982,6 +1088,21 @@ pub fn show(
                         }
                     }
                 }
+                Grab::ImgMove => {
+                    let dl = resp.drag_delta();
+                    if let Some(b) = d.bg.as_mut() {
+                        b.center[0] += sx * dl.x as f64 / s;
+                        b.center[1] -= dl.y as f64 / s;
+                    }
+                }
+                Grab::ImgHandle => {
+                    let (u, v) = from(p);
+                    if let Some(b) = d.bg.as_mut() {
+                        let (dx, dy) = (u - b.center[0], v - b.center[1]);
+                        b.width_mm = (2.0 * (dx * dx + dy * dy).sqrt()).max(1.0);
+                        b.rot_deg = dy.atan2(sx * dx).to_degrees();
+                    }
+                }
                 Grab::MultiH | Grab::MultiV => {
                     let horiz = ed.grab == Grab::MultiH;
                     for (k, &i) in ed.multi.iter().enumerate() {
@@ -1072,6 +1193,18 @@ pub fn show(
         let (gh, gv) = gizmo(hq, rect);
         draw_gizmo(&painter, hq, gh, gv, matches!(ed.grab, Grab::FilletMidH), matches!(ed.grab, Grab::FilletMidV));
     }
+    if let (DTool::Image, Some(b)) = (ed.tool, &d.bg) {
+        let cn: Vec<Pos2> = b.corners(sx).iter().map(|q| Pos2::new(c.x + (sx * (q[0] - cu) * s) as f32, c.y - ((q[1] - cv) * s) as f32)).collect();
+        painter.add(egui::Shape::closed_line(cn, Stroke::new(1.5, Color32::from_rgb(0, 112, 192))));
+        let h = b.handle(sx);
+        let hp = Pos2::new(c.x + (sx * (h[0] - cu) * s) as f32, c.y - ((h[1] - cv) * s) as f32);
+        let cp = Pos2::new(c.x + (sx * (b.center[0] - cu) * s) as f32, c.y - ((b.center[1] - cv) * s) as f32);
+        painter.line_segment([cp, hp], Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 112, 192, 140)));
+        painter.circle_filled(cp, 5.0, Color32::from_rgb(0, 112, 192));
+        painter.circle_filled(hp, 13.0, Color32::from_rgba_unmultiplied(255, 255, 255, 235));
+        painter.circle_stroke(hp, 13.0, Stroke::new(2.0, Color32::from_rgb(40, 150, 70)));
+        painter.text(hp, Align2::CENTER_CENTER, "⟲", FontId::proportional(14.0), Color32::from_rgb(40, 150, 70));
+    }
     if let Some(r) = boxsel {
         painter.rect_filled(r, 2.0, Color32::from_rgba_unmultiplied(0, 112, 192, 30));
         painter.rect_stroke(r, 2.0, Stroke::new(1.5, Color32::from_rgb(0, 112, 192)), egui::StrokeKind::Inside);
@@ -1102,6 +1235,7 @@ pub fn show(
         DTool::Bucket => "Balde: toque dentro de um contorno fechado para encher com o material",
         DTool::Fillet => "Arredondar: toque num canto; as setas nas linhas ajustam início e fim, as setas do círculo verde ajustam a forma; depois toque em Aplicar",
         DTool::Connect => "Ligar: toque em dois pontos para fazer uma linha entre eles",
+        DTool::Image => "Imagem: arraste o fundo para mover a imagem; arraste a bolinha verde para mudar o tamanho e girar",
     };
     let g = painter.layout(hint.to_string(), FontId::proportional(12.0), Color32::from_rgb(80, 90, 110), rect.width() - 16.0);
     painter.galley(rect.left_top() + Vec2::new(8.0, 6.0), g, Color32::from_rgb(80, 90, 110));
@@ -1110,7 +1244,7 @@ pub fn show(
     }
     // faixa de ferramentas na base do desenho (ícone em cima, nome embaixo)
     let ctx = ui.ctx().clone();
-    let list: [(DTool, &str, &str); 8] = [
+    let list: [(DTool, &str, &str); 9] = [
         (DTool::Line, "✎", "Desenhar"),
         (DTool::Connect, "↔", "Ligar"),
         (DTool::Point, "•", "Ponto"),
@@ -1119,6 +1253,7 @@ pub fn show(
         (DTool::Fillet, "◠", "Arredondar"),
         (DTool::Erase, "⌫", "Apagar"),
         (DTool::Bucket, "▧", "Balde"),
+        (DTool::Image, "▣", "Imagem"),
     ];
     let strip = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 50.0), rect.right_bottom());
     painter.rect_filled(strip, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 240));
