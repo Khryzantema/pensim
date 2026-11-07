@@ -50,6 +50,8 @@ pub struct SurfMesh {
     /// nó que dá a cor de cada vértice, e se ele está numa face de corte
     pub vcell: Vec<u32>,
     pub vcut: Vec<bool>,
+    /// até 4 nós que compartilham o vértice (a cor é a média deles: sem aspecto pixelado)
+    pub vcells: Vec<[u32; 4]>,
     pub quads: Vec<Quad>,
     /// fragmentos de um nó só (sem vizinho preso): desenhados como nós redondos
     pub loose: Vec<u32>,
@@ -402,8 +404,15 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
                     out.verts.push(turn(p));
                     out.vcell.push(f.cell);
                     out.vcut.push(f.cut);
+                    out.vcells.push([f.cell, NONE, NONE, NONE]);
                     (out.verts.len() - 1) as u32
                 });
+                let cs = &mut out.vcells[vi[q] as usize];
+                if !cs.contains(&f.cell) {
+                    if let Some(slot) = cs.iter_mut().find(|c| **c == NONE) {
+                        *slot = f.cell;
+                    }
+                }
             }
             outward.push(turn(f.outward));
             out.quads.push(Quad { v: vi, cell: f.cell, cut: f.cut });
