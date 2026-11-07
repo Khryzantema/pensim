@@ -223,6 +223,30 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
     };
     let live = |v: u32| v != NONE && vis[v as usize] == 1;
 
+    // célula "presa": pelo menos um vizinho vivo ainda junto dela (senão é fragmento solto)
+    let att: Vec<bool> = (0..total)
+        .into_par_iter()
+        .with_min_len(4096)
+        .map(|e| {
+            if vis[e] != 1 {
+                return false;
+            }
+            let g = &t.grids[t.grp[e] as usize];
+            let k = t.key[e];
+            for ax in 0..3 {
+                for sgn in [-1i32, 1] {
+                    let mut nk = k;
+                    nk[ax] += sgn;
+                    let v = g.at(nk);
+                    if live(v) && together(e, v as usize) {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .collect();
+
     let per_cell = |e: usize| -> (Vec<Face>, bool) {
         let g = &t.grids[t.grp[e] as usize];
         let k = t.key[e];
@@ -252,8 +276,8 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
                     false
                 } else if vis[v as usize] == 2 {
                     true
-                } else if !together(e, v as usize) {
-                    false // trinca: face exposta
+                } else if !together(e, v as usize) || !att[v as usize] {
+                    false // trinca (ou vizinho solto, que vira disco): face exposta
                 } else {
                     continue;
                 };

@@ -2164,8 +2164,22 @@ impl PenSim {
                 let mat_cols: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
                 let part_of = snap.parts.clone();
                 if let Some(sm) = &faces_mesh {
+                    // zona danificada: além das faces, nós redondos tapam qualquer fresta da cratera
+                    let mut lidx: Vec<u32> = sm.loose.clone();
+                    {
+                        let mut has = vec![false; n * masks.len()];
+                        for &e in &sm.loose {
+                            has[e as usize] = true;
+                        }
+                        for &e in &idx {
+                            let e = e as usize;
+                            if !has[e] && f.damage[e % n] > 0.4 && !(self.hide_loose && f.damage[e % n] >= 0.9) {
+                                lidx.push(e as u32);
+                            }
+                        }
+                    }
                     let lc = |i: usize| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands);
-                    let loose = view3d::Loose { pos: &ext_pos, idx: &sm.loose, node_size: dx, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
+                    let loose = view3d::Loose { pos: &ext_pos, idx: &lidx, node_size: dx, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
                     view3d::render_surf(&painter, &view, sm, ld, &|e, cut| {
                         if cut && !self.cut_colored {
                             mat_cols[(part_of[e % n] as usize).min(mat_cols.len() - 1)]
@@ -2191,8 +2205,22 @@ impl PenSim {
                 let parts = snap.parts.clone();
                 let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
                 if let Some(sm) = &faces_mesh {
+                    // zona danificada: além das faces, nós redondos tapam qualquer fresta da cratera
+                    let mut lidx: Vec<u32> = sm.loose.clone();
+                    {
+                        let mut has = vec![false; n * masks.len()];
+                        for &e in &sm.loose {
+                            has[e as usize] = true;
+                        }
+                        for &e in &idx {
+                            let e = e as usize;
+                            if !has[e] && f.damage[e % n] > 0.4 && !(self.hide_loose && f.damage[e % n] >= 0.9) {
+                                lidx.push(e as u32);
+                            }
+                        }
+                    }
                     let lc = |i: usize| mats[(parts[i % n] as usize).min(mats.len() - 1)];
-                    let loose = view3d::Loose { pos: &ext_pos, idx: &sm.loose, node_size: dx, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
+                    let loose = view3d::Loose { pos: &ext_pos, idx: &lidx, node_size: dx, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
                     view3d::render_surf(&painter, &view, sm, ld, &|e, _| mats[(parts[e % n] as usize).min(mats.len() - 1)], Some(loose));
                 } else {
                     view3d::render(&painter, &view, dx, &ext_pos, &idx, true, Some(&light), round_id, &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);
