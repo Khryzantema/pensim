@@ -2014,7 +2014,9 @@ impl PenSim {
                 }
             };
             let f = &*fr;
-            let n = f.pos.len();
+            // quadro e geometria de referência podem ser de simulações diferentes por um instante
+            // (simulação nova começando): usa só o trecho em que os dois existem
+            let n = f.pos.len().min(snap.ref_pos.len()).min(snap.parts.len()).min(snap.surface.len()).min(f.damage.len());
             // a simulação calcula só 1/2 ou 1/4 do modelo (simetria); as demais cópias são espelhadas aqui
             let masks: Vec<u8> = match snap.sym {
                 0 => vec![0],
@@ -2029,7 +2031,7 @@ impl PenSim {
             let (sa, ca) = (self.started_obl.to_radians().sin() as f32, self.started_obl.to_radians().cos() as f32);
             let turn = |q: [f32; 3]| [ca * q[0] - sa * q[2], q[1], -(sa * q[0] + ca * q[2])];
             for &m in &masks {
-                ext_pos.extend(f.pos.iter().map(|&q| turn(flip(q, m))));
+                ext_pos.extend(f.pos[..n].iter().map(|&q| turn(flip(q, m))));
             }
             let mut idx: Vec<u32> = Vec::new();
             // nós que entram só por estarem na face do corte (sem cor de contorno, se desligado)
