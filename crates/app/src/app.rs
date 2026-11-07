@@ -194,6 +194,8 @@ pub struct PenSim {
     cfg: Config,
     ammo_idx: usize,
     ammo_scale: f64,
+    /// mostra as partículas (nós soltos) no modo faces
+    particles: bool,
     /// duração simulada em µs reais (a simulação para neste tempo)
     dur_us: f64,
     /// qualidade da malha: nós no diâmetro do projétil (define a escala interna, invisível)
@@ -320,6 +322,7 @@ impl PenSim {
             cfg,
             ammo_idx,
             ammo_scale: 1.0,
+            particles: false,
             dur_us: 1000.0,
             res_nodes: 8.0,
             show_side: true,
@@ -1544,6 +1547,9 @@ impl PenSim {
                 chip(ui, &mut self.hide_target, "alvo");
                 chip(ui, &mut self.hide_loose, "fragmentos");
             });
+            ui.horizontal_wrapped(|ui| {
+                chip(ui, &mut self.particles, "Partículas (modo faces)");
+            });
         });
         egui::CollapsingHeader::new(RichText::new("Gráficos").strong()).id_salt("charts").show(ui, |ui| self.ui_charts(ui, snap));
         egui::CollapsingHeader::new(RichText::new("Salvar e abrir").strong()).id_salt("files").default_open(self.res_tab == ResTab::Files).show(ui, |ui| self.ui_files(ui, snap));
@@ -2164,20 +2170,8 @@ impl PenSim {
                 let mat_cols: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
                 let part_of = snap.parts.clone();
                 if let Some(sm) = &faces_mesh {
-                    // zona danificada: além das faces, nós redondos tapam qualquer fresta da cratera
-                    let mut lidx: Vec<u32> = sm.loose.clone();
-                    {
-                        let mut has = vec![false; n * masks.len()];
-                        for &e in &sm.loose {
-                            has[e as usize] = true;
-                        }
-                        for &e in &idx {
-                            let e = e as usize;
-                            if !has[e] && f.damage[e % n] > 0.4 && !(self.hide_loose && f.damage[e % n] >= 0.9) {
-                                lidx.push(e as u32);
-                            }
-                        }
-                    }
+                    // partículas (nós soltos) só aparecem se ligadas
+                    let lidx: Vec<u32> = if self.particles { sm.loose.clone() } else { Vec::new() };
                     let lc = |i: usize| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands);
                     let loose = view3d::Loose { pos: &ext_pos, idx: &lidx, node_size: dx, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
                     view3d::render_surf(&painter, &view, sm, ld, &|e, cut| {
@@ -2205,20 +2199,7 @@ impl PenSim {
                 let parts = snap.parts.clone();
                 let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
                 if let Some(sm) = &faces_mesh {
-                    // zona danificada: além das faces, nós redondos tapam qualquer fresta da cratera
-                    let mut lidx: Vec<u32> = sm.loose.clone();
-                    {
-                        let mut has = vec![false; n * masks.len()];
-                        for &e in &sm.loose {
-                            has[e as usize] = true;
-                        }
-                        for &e in &idx {
-                            let e = e as usize;
-                            if !has[e] && f.damage[e % n] > 0.4 && !(self.hide_loose && f.damage[e % n] >= 0.9) {
-                                lidx.push(e as u32);
-                            }
-                        }
-                    }
+                    let lidx: Vec<u32> = if self.particles { sm.loose.clone() } else { Vec::new() };
                     let lc = |i: usize| mats[(parts[i % n] as usize).min(mats.len() - 1)];
                     let loose = view3d::Loose { pos: &ext_pos, idx: &lidx, node_size: dx, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
                     view3d::render_surf(&painter, &view, sm, ld, &|e, _| mats[(parts[e % n] as usize).min(mats.len() - 1)], Some(loose));
