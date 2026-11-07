@@ -568,9 +568,8 @@ impl PenSim {
 
     /// Cancela a simulação em andamento (a thread de cálculo para) e volta ao modelo.
     fn cancel_job(&mut self) {
-        self.job = None; // Drop cancela a thread
+        self.clear_sim_cache(); // cancela, espera a thread acabar e libera a memória
         self.job_id += 1;
-        self.decoded = None;
         self.playing = false;
         self.save_msg = "Simulação cancelada.".into();
         if self.ws == Ws::Results {
@@ -579,10 +578,21 @@ impl PenSim {
     }
 
     /// `force`: ignora a verificação de memória (o usuário escolheu continuar mesmo assim).
-    fn start_with(&mut self, ctx: &egui::Context, force: bool) {
-        self.job = None;
-        self.job_id += 1;
+    /// Libera tudo o que a simulação anterior deixou na memória (cálculo, quadros, caches de
+    /// desenho). Não mexe nas simulações SALVAS em arquivo.
+    fn clear_sim_cache(&mut self) {
+        self.job = None; // Drop espera o cálculo antigo acabar e liberar a memória
+        self.loaded = None;
         self.decoded = None;
+        self.mesh_cache = None;
+        self.topo_cache = None;
+        self.sweep = None;
+        self.range = [(0.0, 0.0); 7];
+    }
+
+    fn start_with(&mut self, ctx: &egui::Context, force: bool) {
+        self.clear_sim_cache();
+        self.job_id += 1;
         self.range = [(0.0, 0.0); 7];
         self.view_idx = 0;
         self.autoplayed = false;
@@ -1654,9 +1664,8 @@ impl PenSim {
             self.save_msg = "Arquivo inválido ou de outra versão.".into();
             return;
         };
-        self.job = None;
+        self.clear_sim_cache();
         self.job_id += 1;
-        self.decoded = None;
         self.cfg.design = d.design.clone();
         // desenhos à mão voltam a ser editáveis
         self.tdraws = d.design.objects.iter().map(|o| Drawing::from_polys(&o.name, o.width * 1e3, &o.parts, 1.0)).collect();

@@ -33,11 +33,17 @@ pub struct Job {
     /// encerrar agora e mostrar o resultado com o que já foi calculado
     pub finish: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for Job {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);
+        // espera o cálculo antigo terminar de verdade: só assim a memória dele (malha, ligações,
+        // quadros) é devolvida antes de a próxima simulação alocar a dela
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -48,7 +54,7 @@ impl Job {
         let cancel = Arc::new(AtomicBool::new(false));
         let finish = Arc::new(AtomicBool::new(false));
         let (s, p, c, fin) = (shared.clone(), paused.clone(), cancel.clone(), finish.clone());
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let mut sim = match Sim::new(cfg) {
                 Ok(s) => s,
                 Err(e) => {
@@ -113,7 +119,7 @@ impl Job {
                 ctx.request_repaint();
             }
         });
-        Job { shared, paused, finish, cancel }
+        Job { shared, paused, finish, cancel, handle: Some(handle) }
     }
 }
 
