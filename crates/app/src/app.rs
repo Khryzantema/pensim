@@ -1516,6 +1516,14 @@ impl PenSim {
                 }
             });
             ui.horizontal_wrapped(|ui| {
+                ui.label("Vista:");
+                for (l, c) in [("ISO", Camera::iso()), ("Lado", Camera::front()), ("Topo", Camera::top()), ("Frente", Camera::right())] {
+                    if ui.button(l).clicked() {
+                        self.cam = c;
+                    }
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
                 chip(ui, &mut self.section, "◧ Corte");
                 chip(ui, &mut self.faces, "◆ Faces");
                 chip(ui, &mut self.bands, "▤ Faixas de cor");
@@ -2220,21 +2228,6 @@ impl PenSim {
             });
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
-
-        // ViewCube simplificado
-        let ctx = ui.ctx().clone();
-        egui::Area::new(egui::Id::new("viewcube")).fixed_pos(rect.right_top() + Vec2::new(-246.0, 8.0)).show(&ctx, |ui| {
-            ui.horizontal(|ui| {
-                for (l, c) in [("ISO", Camera::iso()), ("Lado", Camera::front()), ("Topo", Camera::top()), ("Frente", Camera::right())] {
-                    if ui.small_button(l).clicked() {
-                        self.cam = c;
-                    }
-                }
-                if ui.small_button(if self.section { "Corte ✔" } else { "Corte" }).clicked() {
-                    self.section = !self.section;
-                }
-            });
-        });
     }
 }
 
