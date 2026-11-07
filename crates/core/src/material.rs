@@ -52,6 +52,9 @@ pub const LIBRARY: &[Material] = &[
     // capuz perfurante (APC/APCBC): face dura, mais tenaz que a ponta do corpo; evita que a
     // ponta se estilhace no impacto
     m("Aço de capuz (APC)", 7850.0, 205e9, 1.25e9, 1.2e9, 0.10, 1.0, 477.0, 1800.0, 0.014),
+    // Glass Textolite (G-10/FR-4, laminado de fibra de vidro e epóxi): ρ ≈ 1,85 g/cm³,
+    // E ≈ 24 GPa, ruptura ~0,35 GPa, frágil, sem escoamento plástico; delamina/decompõe ~650 K
+    m("Glass Textolite (G-10)", 1850.0, 24e9, 0.35e9, 0.0, 0.018, 1.6, 1100.0, 650.0, 0.0),
 ];
 
 impl Material {

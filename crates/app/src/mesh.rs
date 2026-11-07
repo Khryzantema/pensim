@@ -242,6 +242,11 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
                 }
             }
         }
+        // projétil: sempre redondo (nós em disco) e só a superfície; sem malha de faces
+        if t.grp[e] == 1 {
+            let exposed = nb.iter().any(|&v| !live(v) || !together(e, v as usize));
+            return (faces, exposed);
+        }
         if !attached {
             return (faces, true);
         }
@@ -318,6 +323,54 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
         return None;
     }
 
+    // estilo "elemento erodido": entulho solto do alvo encostado no projétil some, para a
+    // munição tocar direto na cratera (como nos solvers de elementos finitos)
+    let results = {
+        let h = 3.0 * dx;
+        let pos = |e: u32| {
+            let (r, d) = (t.refx[e as usize], disp[e as usize]);
+            [r[0] + d[0], r[1] + d[1], r[2] + d[2]]
+        };
+        let key = |p: [f32; 3]| [(p[0] / h).floor() as i32, (p[1] / h).floor() as i32, (p[2] / h).floor() as i32];
+        let mut hash: FxMap<[i32; 3], Vec<[f32; 3]>> = FxMap::default();
+        for (_, loose) in &results {
+            for &e in loose {
+                if t.grp[e as usize] == 1 {
+                    let p = pos(e);
+                    hash.entry(key(p)).or_default().push(p);
+                }
+            }
+        }
+        let r2 = (2.6 * dx) * (2.6 * dx);
+        results
+            .into_iter()
+            .map(|(f, loose)| {
+                let keep: Vec<u32> = loose
+                    .into_iter()
+                    .filter(|&e| {
+                        if t.grp[e as usize] == 1 {
+                            return true;
+                        }
+                        let p = pos(e);
+                        let k = key(p);
+                        for a in -1..=1 {
+                            for b in -1..=1 {
+                                for c in -1..=1 {
+                                    if let Some(v) = hash.get(&[k[0] + a, k[1] + b, k[2] + c]) {
+                                        if v.iter().any(|q| (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2) < r2) {
+                                            return false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        true
+                    })
+                    .collect();
+                (f, keep)
+            })
+            .collect::<Vec<_>>()
+    };
     let mut out = SurfMesh::default();
     out.quads.reserve(nq);
     let mut vmap: FxMap<u64, u32> = FxMap::default();

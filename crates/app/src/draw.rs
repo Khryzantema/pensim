@@ -196,6 +196,62 @@ impl Drawing {
         Drawing { name: name.into(), bg: None, pts: vec![[0.0, 0.0]], edges: vec![], fills: vec![], width_mm }
     }
 
+    /// Texto simples e estável para guardar o desenho (a imagem de fundo não entra).
+    pub fn to_text(&self) -> String {
+        let mut o = String::from("PENSIM-DESENHO 1\n");
+        o += &format!("N {}\nW {}\n", self.name.replace('\n', " "), self.width_mm);
+        for p in &self.pts {
+            o += &format!("P {} {}\n", p[0], p[1]);
+        }
+        for e in &self.edges {
+            o += &format!("E {} {}\n", e[0], e[1]);
+        }
+        for f in &self.fills {
+            let c: Vec<String> = f.cycle.iter().map(|i| i.to_string()).collect();
+            o += &format!("F {}|{}\n", f.paint.name(), c.join(" "));
+        }
+        o
+    }
+
+    pub fn from_text(t: &str) -> Option<Drawing> {
+        let mut l = t.lines();
+        if !l.next()?.starts_with("PENSIM-DESENHO") {
+            return None;
+        }
+        let mut d = Drawing { name: String::new(), bg: None, pts: vec![], edges: vec![], fills: vec![], width_mm: 0.0 };
+        for ln in l {
+            let (k, r) = ln.split_at(ln.find(' ').unwrap_or(ln.len()));
+            let r = r.trim_start();
+            match k {
+                "N" => d.name = r.into(),
+                "W" => d.width_mm = r.parse().ok()?,
+                "P" => {
+                    let v: Vec<f64> = r.split(' ').filter_map(|x| x.parse().ok()).collect();
+                    d.pts.push([*v.first()?, *v.get(1)?]);
+                }
+                "E" => {
+                    let v: Vec<usize> = r.split(' ').filter_map(|x| x.parse().ok()).collect();
+                    d.edges.push([*v.first()?, *v.get(1)?]);
+                }
+                "F" => {
+                    let (nm, c) = r.split_once('|')?;
+                    let paint = match pensim_core::LIBRARY.iter().find(|m| m.name == nm) {
+                        Some(m) => Paint::Mat(m.clone()),
+                        None => Paint::Void,
+                    };
+                    let cycle: Vec<usize> = c.split(' ').filter_map(|x| x.parse().ok()).collect();
+                    d.fills.push(FillRec { cycle, paint });
+                }
+                _ => {}
+            }
+        }
+        let n = d.pts.len();
+        if n == 0 || d.edges.iter().any(|e| e[0] >= n || e[1] >= n) || d.fills.iter().any(|f| f.cycle.iter().any(|&i| i >= n)) {
+            return None;
+        }
+        Some(d)
+    }
+
     pub fn add_point(&mut self, p: [f64; 2]) -> usize {
         self.pts.push(p);
         self.pts.len() - 1

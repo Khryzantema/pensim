@@ -15,6 +15,11 @@ fn jc_damage(m: &crate::material::Material) -> Option<(f64, f64, f64)> {
     let n = m.name;
     if m.comp_factor >= 5.0 || n.contains("Enchimento") {
         None
+    } else if n.contains("projétil AP") {
+        // aço temperado de núcleo/ogiva: pouca ductilidade, trinca e lasca sob cisalhamento/tração
+        Some((0.012, 0.16, -1.6))
+    } else if n.contains("capuz") {
+        Some((0.02, 0.4, -1.6))
     } else if n.contains("Aço doce") {
         Some((0.05, 2.1, -1.0))
     } else if n.contains("Aço") || n.contains("RHA") {
@@ -38,7 +43,7 @@ fn jc_damage(m: &crate::material::Material) -> Option<(f64, f64, f64)> {
 /// Coeficiente de Poisson típico pelo nome do material (o state-based usa o real; o bond-based fixa 1/4).
 fn poisson(m: &crate::material::Material) -> f64 {
     let n = m.name;
-    if n.contains("Chumbo") { 0.44 } else if n.contains("Concreto") { 0.2 } else if n.contains("Cerâmica") || n.contains("Carboneto") { 0.22 } else if n.contains("Alum") || n.contains("Cobre") || n.contains("Latão") { 0.34 } else if n.contains("Enchimento") { 0.35 } else if n.contains("tungst") { 0.28 } else { 0.3 }
+    if n.contains("Chumbo") { 0.44 } else if n.contains("Concreto") { 0.2 } else if n.contains("Cerâmica") || n.contains("Carboneto") { 0.22 } else if n.contains("Alum") || n.contains("Cobre") || n.contains("Latão") { 0.34 } else if n.contains("Enchimento") { 0.35 } else if n.contains("Textolite") { 0.2 } else if n.contains("tungst") { 0.28 } else { 0.3 }
 }
 /// 1 / deformação de saturação do encruamento (o ganho máximo é `hardening × HSAT`)
 const INV_HSAT: f64 = 1.0 / 0.4;
@@ -1632,7 +1637,7 @@ impl Sim {
                         if let (Some((d1, d2, d3)), true) = (jcd[b], dep > 0.0) {
                             let svm = (mcur[i] as f64 * *osbv.3.add(i) as f64 / 5.0).max(0.0).sqrt().max(1e3);
                             let tri = (kbulk[b] * th / svm).clamp(-3.0, 3.0);
-                            let ef = (d1 + d2 * (d3 * tri).exp()).clamp(0.02, 10.0);
+                            let ef = (d1 + d2 * (d3 * tri).exp()).clamp(0.008, 10.0);
                             *dmgp.0.add(i) += (dep / ef) as f32;
                         }
                         let _ = mu;

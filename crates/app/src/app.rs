@@ -280,6 +280,7 @@ fn mat_color(name: &str) -> Color32 {
     else if name.contains("Chumbo") { c(86, 92, 104) }
     else if name.contains("Concreto") { c(184, 172, 150) }
     else if name.contains("Cer") { c(236, 230, 214) }
+    else if name.contains("Textolite") { c(170, 190, 110) }
     else { c(160, 160, 160) }
 }
 
@@ -968,6 +969,32 @@ impl PenSim {
             self.ammo_scale = 1.0;
             self.peek3d = false;
         }
+        let saved = saved_files();
+        if !saved.is_empty() {
+            ui.add_space(6.0);
+            card(ui, "Meus projéteis salvos", |ui| {
+                let mut del = None;
+                for p in &saved {
+                    ui.horizontal(|ui| {
+                        let nm = p.file_stem().and_then(|x| x.to_str()).unwrap_or("?");
+                        if ui.add_sized([ui.available_width() - 40.0, 28.0], egui::Button::new(format!("✎ {nm}")).corner_radius(6.0)).clicked() {
+                            if let Some(d) = std::fs::read_to_string(p).ok().and_then(|t| Drawing::from_text(&t)) {
+                                self.pdraw = Some(d);
+                                self.ped = DrawEditor::new(Paint::Mat(LIBRARY[11].clone()), 0.5);
+                                self.ammo_scale = 1.0;
+                                self.peek3d = false;
+                            }
+                        }
+                        if ui.small_button("🗑").clicked() {
+                            del = Some(p.clone());
+                        }
+                    });
+                }
+                if let Some(p) = del {
+                    let _ = std::fs::remove_file(p);
+                }
+            });
+        }
         ui.add_space(6.0);
         card(ui, "Munição", |ui| {
             let name = AMMO[self.ammo_idx].name;
@@ -1111,6 +1138,25 @@ impl PenSim {
             ui.label(RichText::new("Desenhe metade do corte (acima do eixo). Feche cada contorno e encha com o balde: o contorno mais interno vale (ex.: contorno externo = camisa, interno = núcleo).").size(12.5).color(Color32::from_gray(90)));
             let (d, ed) = (self.pdraw.as_mut().unwrap(), &mut self.ped);
             draw_tools(ui, d, ed, draw::Mode::Projectile);
+        });
+        card(ui, "Salvar este projétil", |ui| {
+            let d = self.pdraw.as_mut().unwrap();
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(ui.available_width() - 90.0));
+                if ui.button("💾 Salvar").clicked() {
+                    let nm: String = d.name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
+                    let nm = nm.trim();
+                    let nm = if nm.is_empty() { "projetil" } else { nm };
+                    let path = saved_dir().join(format!("{nm}.pdes"));
+                    self.save_msg = match std::fs::write(&path, d.to_text()) {
+                        Ok(_) => format!("Salvo em {}", path.display()),
+                        Err(e) => format!("Erro ao salvar: {e}"),
+                    };
+                }
+            });
+            if !self.save_msg.is_empty() {
+                ui.weak(&self.save_msg);
+            }
         });
         let ok = self.pdraw.as_ref().and_then(|d| d.to_projectile(1.0));
         card(ui, "Projétil", |ui| match &ok {
@@ -2362,6 +2408,18 @@ fn images_dir() -> std::path::PathBuf {
     let dir = base.unwrap_or_else(|| std::path::PathBuf::from(".")).join("imagens");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+fn saved_dir() -> std::path::PathBuf {
+    let d = images_dir().parent().map(|p| p.join("projeteis")).unwrap_or_else(|| std::path::PathBuf::from("projeteis"));
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+fn saved_files() -> Vec<std::path::PathBuf> {
+    let mut v: Vec<_> = std::fs::read_dir(saved_dir()).into_iter().flatten().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "pdes")).collect();
+    v.sort();
+    v
 }
 
 fn image_files() -> Vec<std::path::PathBuf> {
