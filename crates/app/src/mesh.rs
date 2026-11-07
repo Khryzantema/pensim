@@ -242,11 +242,6 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
                 }
             }
         }
-        // projétil: sempre redondo (nós em disco) e só a superfície; sem malha de faces
-        if t.grp[e] == 1 {
-            let exposed = nb.iter().any(|&v| !live(v) || !together(e, v as usize));
-            return (faces, exposed);
-        }
         if !attached {
             return (faces, true);
         }
@@ -333,15 +328,13 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
         };
         let key = |p: [f32; 3]| [(p[0] / h).floor() as i32, (p[1] / h).floor() as i32, (p[2] / h).floor() as i32];
         let mut hash: FxMap<[i32; 3], Vec<[f32; 3]>> = FxMap::default();
-        for (_, loose) in &results {
-            for &e in loose {
-                if t.grp[e as usize] == 1 {
-                    let p = pos(e);
-                    hash.entry(key(p)).or_default().push(p);
-                }
+        for e in 0..total {
+            if t.grp[e] == 1 && vis[e] == 1 {
+                let p = pos(e as u32);
+                hash.entry(key(p)).or_default().push(p);
             }
         }
-        let r2 = (2.6 * dx) * (2.6 * dx);
+        let r2 = (1.3 * dx) * (1.3 * dx);
         results
             .into_iter()
             .map(|(f, loose)| {

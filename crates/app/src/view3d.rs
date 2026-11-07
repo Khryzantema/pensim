@@ -319,7 +319,7 @@ pub fn render_surf(painter: &egui::Painter, v: &View, m: &crate::mesh::SurfMesh,
         })
         .collect();
     mesh.indices.reserve(order.len() * 6);
-    let half = loose.as_ref().map_or(1.0, |l| (l.node_size * v.scale() * if l.tex.is_some() { 0.74 } else { 0.62 }).max(0.6));
+    let half = loose.as_ref().map_or(1.0, |l| (l.node_size * v.scale() * if l.tex.is_some() { 0.95 } else { 0.7 }).max(0.6));
     let full_uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
     for (d, k) in order {
         if k < nq {
