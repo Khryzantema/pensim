@@ -194,6 +194,8 @@ pub struct PenSim {
     cfg: Config,
     ammo_idx: usize,
     ammo_scale: f64,
+    /// duração simulada em µs reais (a simulação para neste tempo)
+    dur_us: f64,
     /// qualidade da malha: nós no diâmetro do projétil (define a escala interna, invisível)
     res_nodes: f64,
     show_side: bool,
@@ -318,6 +320,7 @@ impl PenSim {
             cfg,
             ammo_idx,
             ammo_scale: 1.0,
+            dur_us: 1000.0,
             res_nodes: 8.0,
             show_side: true,
             show_fps: std::env::var("PENSIM_PROF").is_ok(),
@@ -487,7 +490,7 @@ impl PenSim {
 
     fn key(&self) -> Key {
         let c = &self.cfg;
-        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, c.time_factor, c.noise, c.jitter, c.sleep_ratio, self.res_nodes], [c.clamp_edges, c.symmetry, c.state_based])
+        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, self.dur_us, c.noise, c.jitter, c.sleep_ratio, self.res_nodes], [c.clamp_edges, c.symmetry, c.state_based])
     }
 
     /// Escala interna (invisível): faz o diâmetro do projétil ter `res_nodes` nós na malha.
@@ -501,6 +504,7 @@ impl PenSim {
     fn scaled_cfg(&self) -> Config {
         let f = self.model_scale();
         let mut c = self.cfg.clone();
+        c.duration = self.dur_us.max(1.0) * 1e-6 * f;
         // RHA: dureza pela espessura real da chapa (chapas grossas são mais macias)
         let u = self.ammo_scale.max(1e-6);
         for l in c.design.layers.iter_mut() {
@@ -1388,6 +1392,10 @@ impl PenSim {
                 "Peridinâmica bond-based (modelo antigo): bem mais rápido, menos realista em metais."
             });
         });
+        card(ui, "Duração da simulação", |ui| {
+            ui.add(egui::Slider::new(&mut self.dur_us, 10.0..=20000.0).logarithmic(true).suffix(" µs").fixed_decimals(0).clamping(egui::SliderClamping::Never));
+            ui.weak("A simulação roda exatamente este tempo (tempo real do impacto) e para; \"■ Parar aqui\" encerra antes.");
+        });
         egui::CollapsingHeader::new(RichText::new("Avançado").strong()).id_salt("adv").show(ui, |ui| {
             ui.label("Horizonte (alcance das ligações, × espaçamento)");
             ui.horizontal(|ui| {
@@ -1399,7 +1407,6 @@ impl PenSim {
             if ui.add(egui::Slider::new(&mut secs, 1.0..=16.0).text("duração da repetição s")).changed() {
                 self.cfg.n_frames = (secs * PLAY_FPS).round() as usize;
             }
-            ui.add(egui::Slider::new(&mut self.cfg.time_factor, 0.5..=3.0).text("tempo máximo ×"));
             let mut noise = (self.cfg.noise * 100.0) as f32;
             if ui.add(egui::Slider::new(&mut noise, 0.0..=40.0).text("variação do material %")).on_hover_text("Variação aleatória de resistência por ligação; 0 = material ideal").changed() {
                 self.cfg.noise = noise as f64 / 100.0;

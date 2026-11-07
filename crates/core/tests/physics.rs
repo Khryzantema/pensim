@@ -80,14 +80,13 @@ fn very_high_speed_stays_stable() {
 }
 
 #[test]
-fn stops_shortly_after_projectile_exits() {
-    let c = cfg(1500.0);
-    let full = c.t_end();
+fn stops_at_user_duration() {
+    let mut c = cfg(1500.0);
+    let auto = c.t_end();
+    c.duration = 0.5 * auto;
     let mut s = Sim::new(c).unwrap();
     s.run_to_end();
-    assert_eq!(s.outcome().kind, OutcomeKind::Perforation);
-    assert!(s.time < 0.85 * full, "parou em {:.1} µs de {:.1} µs", s.time * 1e6, full * 1e6);
-    assert!(s.t_end() + 3.0 * s.dt >= s.time);
+    assert!((s.time - 0.5 * auto).abs() <= 3.0 * s.dt, "parou em {:.1} µs, pedido {:.1} µs", s.time * 1e6, 0.5 * auto * 1e6);
 }
 
 #[test]

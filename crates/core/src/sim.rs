@@ -544,7 +544,7 @@ impl Sim {
             travel: 0.0,
             travel_goal: 1.0,
             // o evento real dura ~1/3 do tempo máximo (a simulação termina na separação + 25%)
-            frame_dt: cfg.t_end() / (3.0 * cfg.n_frames.max(1) as f64),
+            frame_dt: cfg.t_end() / cfg.n_frames.max(1) as f64,
             captured: 0,
             xcm0: 0.0,
             x_exit: 1.0,
@@ -650,7 +650,7 @@ impl Sim {
             return 1.0;
         }
         // quanto a traseira do corpo principal já andou da distância de fim (ou do tempo máximo)
-        let p_tr = (self.travel / self.travel_goal.max(1e-12)).clamp(0.0, 1.0);
+        let p_tr = 0.0f64;
         let p_time = (self.time / self.t_end).clamp(0.0, 1.0);
         p_tr.max(p_time).min(0.99)
     }
@@ -1818,9 +1818,6 @@ impl Sim {
                 }
             }
             self.travel = (acc / n_main as f64).max(0.0);
-            if self.travel >= self.travel_goal {
-                self.t_end = self.t_end.min(self.time);
-            }
         }
     }
 

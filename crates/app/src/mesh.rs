@@ -392,8 +392,9 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
         let nv = out.verts.len();
         let mut acc = vec![[0.0f32; 3]; nv];
         let mut cnt = vec![0.0f32; nv];
-        for (lam, it) in [(0.55f32, 0), (-0.58, 1), (0.55, 2), (-0.58, 3), (0.55, 4), (-0.58, 5)] {
-            let _ = it;
+        let iters = if out.quads.len() < 150_000 { 24 } else { 8 };
+        for it in 0..iters {
+            let lam = if it % 2 == 0 { 0.55f32 } else { -0.58 };
             acc.iter_mut().for_each(|a| *a = [0.0; 3]);
             cnt.iter_mut().for_each(|c| *c = 0.0);
             for q in &out.quads {

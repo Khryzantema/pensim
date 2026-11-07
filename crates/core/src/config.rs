@@ -349,6 +349,8 @@ pub struct Config {
     pub obliquity_deg: f64,
     pub clamp_edges: bool,
     pub time_factor: f64,
+    /// duração da simulação [s, no tempo do modelo]; 0 = automática
+    pub duration: f64,
     pub n_frames: usize,
     /// simula só 1/2 (obliquidade ≠ 0) ou 1/4 (impacto normal) do modelo, com nós-fantasma
     pub symmetry: bool,
@@ -426,6 +428,7 @@ impl Preset {
             obliquity_deg: 0.0,
             clamp_edges: true,
             time_factor: 1.0,
+            duration: 0.0,
             n_frames: 100,
             symmetry: true,
             sleep_ratio: 0.05,
@@ -522,6 +525,9 @@ impl Config {
     }
     /// Tempo final automático [s].
     pub fn t_end(&self) -> f64 {
+        if self.duration > 0.0 {
+            return self.duration;
+        }
         // tempo MÁXIMO de segurança (o fim normal é quando o projétil anda o comprimento dele + 5× a
         // espessura do alvo): 3× o tempo que levaria em velocidade constante, contando a folga inicial
         let p = &self.design.projectile;

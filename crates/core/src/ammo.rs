@@ -376,6 +376,7 @@ impl Ammo {
             obliquity_deg: 0.0,
             clamp_edges: true,
             time_factor: 1.0,
+            duration: 0.0,
             n_frames: 100,
             symmetry: true,
             sleep_ratio: 0.05,
