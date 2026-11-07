@@ -386,6 +386,40 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
         }
     }
 
+    // arredonda a malha em degraus (Taubin: encolhe e re-expande, sem murchar a forma);
+    // vértices de corte de seção ficam fixos
+    {
+        let nv = out.verts.len();
+        let mut acc = vec![[0.0f32; 3]; nv];
+        let mut cnt = vec![0.0f32; nv];
+        for (lam, it) in [(0.55f32, 0), (-0.58, 1), (0.55, 2), (-0.58, 3), (0.55, 4), (-0.58, 5)] {
+            let _ = it;
+            acc.iter_mut().for_each(|a| *a = [0.0; 3]);
+            cnt.iter_mut().for_each(|c| *c = 0.0);
+            for q in &out.quads {
+                for k in 0..4 {
+                    let (a, b) = (q.v[k] as usize, q.v[(k + 1) % 4] as usize);
+                    let (pa, pb) = (out.verts[a], out.verts[b]);
+                    for c in 0..3 {
+                        acc[a][c] += pb[c];
+                        acc[b][c] += pa[c];
+                    }
+                    cnt[a] += 1.0;
+                    cnt[b] += 1.0;
+                }
+            }
+            for v in 0..nv {
+                if out.vcut[v] || cnt[v] == 0.0 {
+                    continue;
+                }
+                for c in 0..3 {
+                    let avg = acc[v][c] / cnt[v];
+                    out.verts[v][c] += lam * (avg - out.verts[v][c]);
+                }
+            }
+        }
+    }
+
     // normais suaves: soma das normais geométricas das faces em cada canto
     let mut nrm = vec![[0.0f32; 3]; out.verts.len()];
     for (qi, q) in out.quads.iter().enumerate() {
