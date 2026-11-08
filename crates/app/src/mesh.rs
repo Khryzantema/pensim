@@ -223,6 +223,75 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
         let (l0, l1) = (r0[0] * r0[0] + r0[1] * r0[1] + r0[2] * r0[2], r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2]);
         l1 < 9.0 * l0.max(1e-30)
     };
+    // "elemento erodido": cascas do alvo rachadas e coladas no projétil (entulho que escorre pela
+    // lateral) somem, como num solver de elementos finitos, e a munição toca a cratera limpa
+    let near_proj: Vec<bool> = {
+        let h = 3.0 * dx;
+        let key = |p: [f32; 3]| [(p[0] / h).floor() as i32, (p[1] / h).floor() as i32, (p[2] / h).floor() as i32];
+        let pos = |e: usize| {
+            let (r, d) = (t.refx[e], disp[e]);
+            [r[0] + d[0], r[1] + d[1], r[2] + d[2]]
+        };
+        let mut hash: FxMap<[i32; 3], Vec<[f32; 3]>> = FxMap::default();
+        for e in 0..total {
+            if t.grp[e] == 1 && vis[e] == 1 {
+                let p = pos(e);
+                hash.entry(key(p)).or_default().push(p);
+            }
+        }
+        let r2 = (2.2 * dx) * (2.2 * dx);
+        (0..total)
+            .into_par_iter()
+            .with_min_len(4096)
+            .map(|e| {
+                if t.grp[e] == 1 || vis[e] != 1 {
+                    return false;
+                }
+                let p = pos(e);
+                let k = key(p);
+                for a in -1..=1 {
+                    for b in -1..=1 {
+                        for c in -1..=1 {
+                            if let Some(v) = hash.get(&[k[0] + a, k[1] + b, k[2] + c]) {
+                                if v.iter().any(|q| (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2) < r2) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                false
+            })
+            .collect()
+    };
+    let vis0 = vis;
+    let vis_new: Vec<u8> = {
+        let live0 = |v: u32| v != NONE && vis0[v as usize] == 1;
+        (0..total)
+            .into_par_iter()
+            .with_min_len(4096)
+            .map(|e| {
+                if vis0[e] != 1 || !near_proj[e] {
+                    return vis0[e];
+                }
+                let g = &t.grids[t.grp[e] as usize];
+                let k = t.key[e];
+                let mut cracked = false;
+                for ax in 0..3 {
+                    for sgn in [-1i32, 1] {
+                        let mut nk = k;
+                        nk[ax] += sgn;
+                        let v = g.at(nk);
+                        if live0(v) && !together(e, v as usize) {
+                            cracked = true;
+                        }
+                    }
+                }
+                if cracked { 0 } else { 1 }
+            })
+            .collect()
+    };
+    let vis: &[u8] = &vis_new;
     let live = |v: u32| v != NONE && vis[v as usize] == 1;
 
     // célula "presa": pelo menos um vizinho vivo ainda junto dela (senão é fragmento solto)
@@ -347,52 +416,6 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
         return None;
     }
 
-    // estilo "elemento erodido": entulho solto do alvo encostado no projétil some, para a
-    // munição tocar direto na cratera (como nos solvers de elementos finitos)
-    let results = {
-        let h = 3.0 * dx;
-        let pos = |e: u32| {
-            let (r, d) = (t.refx[e as usize], disp[e as usize]);
-            [r[0] + d[0], r[1] + d[1], r[2] + d[2]]
-        };
-        let key = |p: [f32; 3]| [(p[0] / h).floor() as i32, (p[1] / h).floor() as i32, (p[2] / h).floor() as i32];
-        let mut hash: FxMap<[i32; 3], Vec<[f32; 3]>> = FxMap::default();
-        for e in 0..total {
-            if t.grp[e] == 1 && vis[e] == 1 {
-                let p = pos(e as u32);
-                hash.entry(key(p)).or_default().push(p);
-            }
-        }
-        let r2 = (1.3 * dx) * (1.3 * dx);
-        results
-            .into_iter()
-            .map(|(f, loose)| {
-                let keep: Vec<u32> = loose
-                    .into_iter()
-                    .filter(|&e| {
-                        if t.grp[e as usize] == 1 {
-                            return true;
-                        }
-                        let p = pos(e);
-                        let k = key(p);
-                        for a in -1..=1 {
-                            for b in -1..=1 {
-                                for c in -1..=1 {
-                                    if let Some(v) = hash.get(&[k[0] + a, k[1] + b, k[2] + c]) {
-                                        if v.iter().any(|q| (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2) < r2) {
-                                            return false;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        true
-                    })
-                    .collect();
-                (f, keep)
-            })
-            .collect::<Vec<_>>()
-    };
     let mut out = SurfMesh::default();
     out.quads.reserve(nq);
     let mut vmap: FxMap<u64, u32> = FxMap::default();
