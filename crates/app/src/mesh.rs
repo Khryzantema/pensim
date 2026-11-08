@@ -221,7 +221,7 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
         let r0 = [rb[0] - ra[0], rb[1] - ra[1], rb[2] - ra[2]];
         let r1 = [r0[0] + db[0] - da[0], r0[1] + db[1] - da[1], r0[2] + db[2] - da[2]];
         let (l0, l1) = (r0[0] * r0[0] + r0[1] * r0[1] + r0[2] * r0[2], r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2]);
-        l1 < 2.56 * l0.max(1e-30)
+        l1 < 9.0 * l0.max(1e-30)
     };
     let live = |v: u32| v != NONE && vis[v as usize] == 1;
 
@@ -235,17 +235,18 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
             }
             let g = &t.grids[t.grp[e] as usize];
             let k = t.key[e];
+            let mut c = 0;
             for ax in 0..3 {
                 for sgn in [-1i32, 1] {
                     let mut nk = k;
                     nk[ax] += sgn;
                     let v = g.at(nk);
                     if live(v) && together(e, v as usize) {
-                        return true;
+                        c += 1;
                     }
                 }
             }
-            false
+            c >= 3
         })
         .collect();
 
@@ -256,6 +257,7 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
         let mut faces = Vec::new();
         // fragmento isolado: nenhum dos 6 vizinhos continua preso a ele
         let mut attached = false;
+        let mut n_att = 0;
         let mut nb = [NONE; 6];
         for ax in 0..3 {
             for (si, sgn) in [-1i32, 1].into_iter().enumerate() {
@@ -264,7 +266,8 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
                 let v = g.at(nk);
                 nb[ax * 2 + si] = v;
                 if live(v) && together(e, v as usize) {
-                    attached = true;
+                    n_att += 1;
+                    attached = n_att >= 3;
                 }
             }
         }
@@ -425,7 +428,7 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
         let nv = out.verts.len();
         let mut acc = vec![[0.0f32; 3]; nv];
         let mut cnt = vec![0.0f32; nv];
-        let iters = if out.quads.len() < 150_000 { 24 } else { 8 };
+        let iters = if out.quads.len() < 150_000 { 40 } else { 10 };
         for it in 0..iters {
             let lam = if it % 2 == 0 { 0.55f32 } else { -0.58 };
             acc.iter_mut().for_each(|a| *a = [0.0; 3]);
