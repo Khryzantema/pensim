@@ -277,8 +277,9 @@ pub fn render_surf(painter: &egui::Painter, v: &View, m: &crate::mesh::SurfMesh,
             dep += d;
             inside |= clip.contains(p);
         }
-        if !inside || dot(nn, e) < -0.2 {
-            continue; // fora da tela ou de costas
+        let _ = nn;
+        if !inside {
+            continue; // fora da tela
         }
         order.push((dep * 0.25, qi as u32));
     }
@@ -309,7 +310,7 @@ pub fn render_surf(painter: &egui::Painter, v: &View, m: &crate::mesh::SurfMesh,
         .enumerate()
         .map(|(i, _)| {
             let n = m.normals[i];
-            let dif = dot(n, ld).max(0.0);
+            let dif = dot(n, ld).abs();
             let sp = (dot(n, h) / hm).max(0.0).powi(24);
             let depth_t = 0.78 + 0.22 * ((proj[i].1 - dmin) / (dmax - dmin).max(1e-9)).clamp(0.0, 1.0);
             let t = depth_t * (0.34 + 0.80 * dif + 0.22 * sp);
