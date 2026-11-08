@@ -322,7 +322,7 @@ impl PenSim {
             cfg,
             ammo_idx,
             ammo_scale: 1.0,
-            particles: false,
+            particles: true,
             dur_us: 1000.0,
             res_nodes: 8.0,
             show_side: true,
