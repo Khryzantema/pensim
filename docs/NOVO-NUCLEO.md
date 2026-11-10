@@ -40,10 +40,20 @@ trecho, citar o arquivo de origem no comentário.
 
 ### Critério de escolha entre alternativas
 
-Pedido do dono: **o que for mais rápido para a qualidade que entrega.** Na dúvida entre duas
-opções, vale a de melhor razão qualidade/tempo de cálculo, não a mais sofisticada. Por isso:
-hexaedro de 1 ponto (não integração completa), contato pinball (não nó-contra-superfície),
-`f32`, erosão simples. Só trocar por algo mais caro se um teste da seção 6 falhar por causa disso.
+Pedido do dono: **meio-termo entre qualidade e rapidez, puxando para a qualidade.** Na dúvida
+entre duas opções, vale a mais fiel, desde que não custe mais que ~2× o tempo da alternativa
+barata. Acima disso, fica a barata e a cara vira opção "Preciso" na interface.
+
+Escolhas que isso fixa (valem sobre o resto do documento onde houver conflito):
+- **Elemento**: hexaedro de 1 ponto com hourglass por rigidez (é o padrão da indústria para
+  impacto; integração completa trava em plasticidade e não é "mais qualidade"). Integração
+  completa só em peças com 1 elemento de espessura.
+- **Contato projétil-alvo**: nó-contra-superfície (tipo TYPE7 do Radioss), que não deixa folga
+  nem penetração visível. Pinball fica para partículas e autocontato do alvo.
+- **Precisão**: estado em `f32`, somas de força e energia em `f64`.
+- **Malha**: encaixe da borda no perfil real sempre ligado.
+- **Falha**: Johnson-Cook completo (5 parâmetros) com regularização pela malha; nada de
+  critério simplificado de deformação máxima.
 
 ## 2. O que fica e o que sai
 
@@ -209,8 +219,9 @@ o que deixou a versão atual difícil de corrigir.
 - **Rodar o OpenRadioss neste ambiente.** O classificador de permissões já bloqueou a execução
   de um binário baixado (`appimagetool`). Saídas: compilar do código-fonte com gfortran, ou o
   dono do projeto rodar os decks na máquina dele e commitar os CSV.
-- **Contato é a parte que mais dá errado.** Se o pinball deixar penetração visível, trocar por
-  nó-contra-superfície (interface TYPE7 do Radioss) só no par projétil-alvo.
+- **Contato é a parte que mais dá errado.** Nó-contra-superfície com erosão exige refazer a
+  lista de faces expostas a cada elemento apagado; se isso atrasar a fase 2, começar com pinball
+  em tudo e trocar o par projétil-alvo antes da fase 3.
 - **Erosão subestima penetração em chapa grossa** (massa some da frente do projétil). É por isso
   que a massa fica nos nós; conferir no caso de 2 D de espessura.
 - **Hexaedro de 1 ponto em casca fina** (camisa com 1 elemento) trava ou faz hourglass. Se
