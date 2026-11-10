@@ -1,0 +1,3 @@
+caso,material,espessura_mm,angulo_graus,v_impacto,nd,pensim_vx,pensim_vy,pensim_vz,pensim_erodidos,pensim_erro_energia_pct,pensim_s,oc_vx,oc_vy,oc_vz,oc_s
+esf_al_5.0mm_0g_300ms,al,5.0,0,300,12,54.532,-0.502,-0.596,70,0.3452,2.59,41.022,0.027,0.321,3.4
+esf_al_5.0mm_0g_500ms,al,5.0,0,500,12,350.381,-0.199,-0.168,226,0.1635,2.62,266.486,-0.765,-0.975,4.3
