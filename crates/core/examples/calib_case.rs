@@ -56,7 +56,13 @@ fn main() {
     let v0: Vec<[f64; 3]> = (0..n).map(|i| if i < ns { [v, 0.0, 0.0] } else { [0.0; 3] }).collect();
     let mats = vec![lib::steel_4340(), plate_mat];
     let name = format!("esf_{}_{:.1}mm_{:.0}g_{:.0}ms", std::env::var("MAT").unwrap_or("al".into()), t / mm, ang, v);
-    let (st, en) = radioss::write(&radioss::DeckInput { name: &name, mesh: &m, mats: &mats, v0: &v0, friction: 0.1, t_end: dur, th_dt: 0.5e-6, isolid: env("ISOLID", 24.0) as i32, th_nodes: &(0..ns as u32).collect::<Vec<_>>() });
+    // passo inicial do PenSim: o OpenCourant apaga elementos abaixo de 10% dele (mesma regra)
+    let dt0 = {
+        let mut md = FemModel::new(m.clone(), mats.clone(), v0.clone());
+        md.contact = true;
+        Fem::new(md).dt
+    };
+    let (st, en) = radioss::write(&radioss::DeckInput { name: &name, mesh: &m, mats: &mats, v0: &v0, friction: env("FRIC", 0.1), t_end: dur, th_dt: 0.5e-6, isolid: env("ISOLID", 24.0) as i32, th_nodes: &(0..ns as u32).collect::<Vec<_>>(), dt_del: env("DTFRAC", 0.1) * dt0 });
     std::fs::write(format!("{out}/{name}_0000.rad"), st).unwrap();
     std::fs::write(format!("{out}/{name}_0001.rad"), en).unwrap();
     println!("NAME {name}");
@@ -78,7 +84,7 @@ fn main() {
     }
     let mut md = FemModel::new(m, mats, v0);
     md.contact = true;
-    md.friction = 0.1;
+    md.friction = env("FRIC", 0.1);
     let t0 = std::time::Instant::now();
     let mut sim = Fem::new(md);
     sim.run_until(dur);

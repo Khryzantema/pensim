@@ -37,7 +37,7 @@ fn main() {
     std::fs::create_dir_all(&out).unwrap();
     let short: String = a.name.split_whitespace().take(2).collect::<Vec<_>>().join("").chars().filter(|ch| ch.is_ascii_alphanumeric()).collect();
     let name = format!("mun_{}_{:.0}mm_{:.0}g_{:.0}ms", short, plate_mm, c.obliquity_deg, c.velocity);
-    let (sd, ed) = radioss::write(&radioss::DeckInput { name: &name, mesh: &st.mesh, mats: &st.mats, v0: &st.v0, friction: 0.1, t_end: dur, th_dt: dur / 200.0, isolid: 24, th_nodes: &pnodes });
+    let (sd, ed) = radioss::write(&radioss::DeckInput { name: &name, mesh: &st.mesh, mats: &st.mats, v0: &st.v0, friction: 0.1, t_end: dur, th_dt: dur / 200.0, isolid: 24, th_nodes: &pnodes, dt_del: 0.0 });
     std::fs::write(format!("{out}/{name}_0000.rad"), sd).unwrap();
     std::fs::write(format!("{out}/{name}_0001.rad"), ed).unwrap();
     println!("NAME {name}");

@@ -67,7 +67,7 @@ with open(OUT, "a", newline="") as fo:
         for t in THICK:
             for a in ANG:
                 for v in VEL[mat]:
-                    e2 = dict(env, MAT=mat, T=str(t), A=str(a), V=str(v), OUT=WORK, ND=ND, DUR=str(max(40.0, 40.0 * t / 5.0)))
+                    e2 = dict(env, MAT=mat, T=str(t), A=str(a), V=str(v), OUT=WORK, ND=ND, DTFRAC=os.environ.get("DTFRAC", "0.2"), DUR=str(max(40.0, 40.0 * t / 5.0)))
                     r = subprocess.run([exe], env=e2, capture_output=True, text=True)
                     name = next(l.split()[1] for l in r.stdout.splitlines() if l.startswith("NAME"))
                     if name in done:

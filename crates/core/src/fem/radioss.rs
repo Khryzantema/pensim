@@ -24,6 +24,9 @@ pub struct DeckInput<'a> {
     /// nós com histórico de velocidade (para medir o projétil nó a nó, inclusive o que sobra
     /// de elementos apagados: a massa da peça no histórico do Radioss perde os elementos apagados)
     pub th_nodes: &'a [u32],
+    /// passo mínimo [s]: elemento abaixo dele é apagado e nó de contato abaixo dele sai do
+    /// contato (mesma regra de erosão por distorção do PenSim). 0 = desligado
+    pub dt_del: f64,
 }
 
 fn f(v: f64) -> String {
@@ -159,8 +162,9 @@ pub fn write(d: &DeckInput) -> (String, String) {
     }
     let _ = writeln!(s, "/END");
     let ms = |t: f64| t * 1e3;
+    let del = if d.dt_del > 0.0 { format!("/DT/BRICK/DEL\n{}{}\n/DT/INTER/DEL\n{}{}\n", f(0.9), f(ms(d.dt_del)), f(0.9), f(ms(d.dt_del))) } else { String::new() };
     let eng = format!(
-        "#RADIOSS ENGINE\n/RUN/{}/1/\n{}\n/TFILE/0\n{}\n/ANIM/DT\n{}{}\n/PRINT/-1000\n/END\n",
+        "#RADIOSS ENGINE\n/RUN/{}/1/\n{}\n{del}/TFILE/0\n{}\n/ANIM/DT\n{}{}\n/PRINT/-1000\n/END\n",
         d.name,
         f(ms(d.t_end)),
         f(ms(d.th_dt)),
