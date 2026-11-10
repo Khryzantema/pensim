@@ -265,17 +265,30 @@ Entra na fase 4, junto com a ligação do app ao núcleo novo.
   nos testes, mas **não foi conferido em captura de tela**. Vai ser descartado com o `mesh.rs`.
 - AppImage: não gerado, bloqueado pelo classificador. Entrega atual é `.tar.gz`.
 
-## 11. Progresso da fase 1
+## 11. Progresso da fase 1 — concluída
 
-Passam: onda confinada (erro 0,42%), onda em barra livre (0,25%), tração elástica (0,05%),
-tração plástica perfeita (0,00%), energia em corpo livre com Johnson-Cook + Mie-Grüneisen
-(1,6%, hourglass 2,1% da interna).
+Todos os testes de `crates/core/tests/fem_verify.rs` passam:
 
-Falham, por causa da malha (o solver nem rodou nesses casos):
-- **Encaixe da borda gera elementos achatados.** Jacobiano mínimo 0,02 na esfera e 0,05 no
-  cilindro (critério > 0,2). Causa: células em degrau com duas faces expostas têm cantos
-  projetados quase em cima um do outro. Próximo passo: trocar o encaixe por malha
-  "butterfly"/O-grid (núcleo cúbico + 6 blocos projetados), que é o padrão para esfera e
-  cilindro, ou no mínimo projetar só nós de faces cuja normal está a menos de ~45° da normal
-  real e suavizar mais.
-- Depois disso: rodar `rigid_wall_symmetry_and_energy` (Taylor inteiro/½/¼).
+| Teste | Resultado |
+|---|---|
+| Onda confinada (√((K+4G/3)/ρ)) | erro 0,42% |
+| Onda em barra livre (√(E/ρ)) | erro 0,25% |
+| Tração elástica (σ = Eε) | erro 0,05%, σyy/σxx 7e-7 |
+| Tração plástica perfeita (σ = σy) | erro 0,00% |
+| Corpo livre, Johnson-Cook + Mie-Grüneisen, εp até 0,69 | energia 1,6%, hourglass 2,1% da interna |
+| Cilindro de cobre a 190 m/s contra parede (geometria de Taylor), inteiro / ½ / ¼ | idênticos; energia 0,04%; hourglass 1,7% |
+| Malha da esfera, 8 a 24 no diâmetro | jacobiano escalonado mín. 0,67–0,68; volume −0,75% com 24 |
+
+Malha: **em O** (núcleo cúbico arredondado + blocos de casca costurados nas diagonais), em
+`mesh::sphere` e `mesh::revolution_x` (seção em O extrudada, raio por camada). A primeira
+tentativa (grade em degraus com encaixe, depois um cubo único mapeado na bola) dava elementos
+achatados ou invertidos: um cubo único deixa nós da superfície com ângulo de 180°.
+
+Taylor deu L = 17,11 mm e raio máximo 6,55 mm (10 elementos no diâmetro). A comparação com o
+OpenRadioss, que é o critério da tabela 6.1, fica para a fase 3; ainda não foi feita.
+
+Pendências conhecidas para a fase 2:
+- `revolution_x` usa raio mínimo de ¼ do passo na ponta; conferir com ogivas agudas.
+- Interfaces internas (camisa/núcleo) ainda não: a casca do O tem de ter uma camada exatamente
+  no raio da interface.
+- Estado em `f64`; `f32` só na fase 6.

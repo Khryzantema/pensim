@@ -77,6 +77,8 @@ struct Elem {
     eps_p: f64,
     eps_rate: f64,
     temp: f64,
+    /// dano de Johnson-Cook acumulado (usado a partir da fase 2)
+    #[allow(dead_code)]
     dmg: f64,
     /// forças generalizadas de hourglass (4 modos × 3)
     hg: [[f64; 3]; 4],
