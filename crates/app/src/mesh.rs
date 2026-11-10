@@ -656,3 +656,132 @@ mod ammo_faces {
         }
     }
 }
+
+// ------------------------------------------------------------- núcleo de elementos finitos
+
+/// Vizinho de cada hexaedro por face (u32::MAX na borda). Fixo por simulação.
+pub fn hex_neighbors(hex: &[[u32; 8]]) -> Vec<[u32; 6]> {
+    let mut nb = vec![[NONE; 6]; hex.len()];
+    let mut seen: FxMap<[u32; 4], (u32, u8)> = FxMap::default();
+    seen.reserve(hex.len() * 3);
+    for (e, h) in hex.iter().enumerate() {
+        for (f, fl) in pensim_core::fem::mesh::FACES.iter().enumerate() {
+            let mut k = fl.map(|l| h[l]);
+            k.sort_unstable();
+            if let Some((e2, f2)) = seen.remove(&k) {
+                nb[e][f] = e2;
+                nb[e2 as usize][f2 as usize] = e as u32;
+            } else {
+                seen.insert(k, (e as u32, f as u8));
+            }
+        }
+    }
+    nb
+}
+
+/// Superfície do núcleo de elementos finitos: faces externas dos elementos vivos e visíveis,
+/// em todas as cópias espelhadas. Não há reconstrução: a malha é contínua por construção.
+///
+/// `pos`: posições já na tela, por nó estendido (cópia·n + nó). `state(mi, e)`: 0 = oculto,
+/// 1 = visível, 2 = removido pelo corte de seção. `mirror(f_nodes)`: máscara do plano de
+/// simetria em que a face está (0 = nenhum) — o vizinho é a cópia espelhada.
+pub fn from_hex(
+    hex: &[[u32; 8]],
+    nb: &[[u32; 6]],
+    n: usize,
+    masks: &[u8],
+    pos: &[[f32; 3]],
+    state: &(dyn Fn(usize, usize) -> u8 + Sync),
+    mirror: &(dyn Fn(&[u32; 4]) -> u8 + Sync),
+    particles: &[u32],
+) -> SurfMesh {
+    use pensim_core::fem::mesh::FACES;
+    let ne = hex.len();
+    let mi_of = |m: u8| masks.iter().position(|&x| x == m);
+    // faces por cópia (em paralelo)
+    let faces: Vec<([u32; 4], bool, [f32; 3])> = (0..masks.len() * ne)
+        .into_par_iter()
+        .with_min_len(4096)
+        .flat_map_iter(|ce| {
+            let (mi, e) = (ce / ne, ce % ne);
+            let mut out = Vec::new();
+            if state(mi, e) != 1 {
+                return out;
+            }
+            let h = &hex[e];
+            let base = (mi * n) as u32;
+            let cen = {
+                let mut c = [0.0f32; 3];
+                for &k in h {
+                    let p = pos[base as usize + k as usize];
+                    for a in 0..3 {
+                        c[a] += p[a] / 8.0;
+                    }
+                }
+                c
+            };
+            for (f, fl) in FACES.iter().enumerate() {
+                let o = nb[e][f];
+                let fnodes = fl.map(|l| h[l]);
+                let other = if o != NONE {
+                    state(mi, o as usize)
+                } else {
+                    let mm = mirror(&fnodes);
+                    match (mm != 0).then(|| mi_of(masks[mi] ^ mm)).flatten() {
+                        Some(mj) => state(mj, e),
+                        None => 0,
+                    }
+                };
+                if other == 1 {
+                    continue;
+                }
+                out.push((fnodes.map(|k| base + k), other == 2, cen));
+            }
+            out
+        })
+        .collect();
+    let mut sm = SurfMesh::default();
+    let mut vid = vec![NONE; n * masks.len()];
+    let mut nrm: Vec<[f32; 3]> = Vec::new();
+    for (q, cut, cen) in &faces {
+        let mut vi = [0u32; 4];
+        for (j, &g) in q.iter().enumerate() {
+            if vid[g as usize] == NONE {
+                vid[g as usize] = sm.verts.len() as u32;
+                sm.verts.push(pos[g as usize]);
+                sm.vcell.push(g);
+                sm.vcut.push(*cut);
+                sm.vcells.push([g, NONE, NONE, NONE]);
+                nrm.push([0.0; 3]);
+            }
+            vi[j] = vid[g as usize];
+            if *cut {
+                sm.vcut[vi[j] as usize] = true;
+            }
+        }
+        // normal da face, para fora do elemento
+        let p = q.map(|g| pos[g as usize]);
+        let d1 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+        let d2 = [p[3][0] - p[1][0], p[3][1] - p[1][1], p[3][2] - p[1][2]];
+        let mut c = [d1[1] * d2[2] - d1[2] * d2[1], d1[2] * d2[0] - d1[0] * d2[2], d1[0] * d2[1] - d1[1] * d2[0]];
+        let fc = [0, 1, 2].map(|a| 0.25 * (p[0][a] + p[1][a] + p[2][a] + p[3][a]));
+        if (fc[0] - cen[0]) * c[0] + (fc[1] - cen[1]) * c[1] + (fc[2] - cen[2]) * c[2] < 0.0 {
+            c = [-c[0], -c[1], -c[2]];
+        }
+        for &v in &vi {
+            for a in 0..3 {
+                nrm[v as usize][a] += c[a];
+            }
+        }
+        sm.quads.push(Quad { v: vi, cell: q[0], cut: *cut });
+    }
+    sm.normals = nrm
+        .into_iter()
+        .map(|v| {
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-30);
+            [v[0] / l, v[1] / l, v[2] / l]
+        })
+        .collect();
+    sm.loose = particles.to_vec();
+    sm
+}

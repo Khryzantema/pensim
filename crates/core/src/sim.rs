@@ -102,6 +102,8 @@ pub struct Frame {
     pub e_contact: f64,
     pub e_plastic: f64,
     pub e_fracture: f64,
+    /// núcleo de elementos finitos: elementos vivos (bits); None no simulador antigo
+    pub alive: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2000,6 +2002,7 @@ impl Sim {
             e_contact: e_ct * self.gfac,
             e_plastic: self.e_pl * self.gfac,
             e_fracture: self.e_fr * self.gfac,
+            alive: None,
         };
         self.frames.push(crate::store::PackedFrame::pack(&frame, self.compress_frames));
     }

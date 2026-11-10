@@ -14,6 +14,8 @@ pub struct PackedFrame {
     pub e_contact: f64,
     pub e_plastic: f64,
     pub e_fracture: f64,
+    /// elementos vivos (núcleo de elementos finitos); não vai para o arquivo salvo
+    pub alive: Option<Arc<Vec<u8>>>,
     kind: Kind,
 }
 
@@ -49,6 +51,7 @@ impl PackedFrame {
                 e_contact: f.e_contact,
                 e_plastic: f.e_plastic,
                 e_fracture: f.e_fracture,
+                alive: f.alive.clone(),
                 kind: Kind::Raw(Arc::new(f.clone())),
             };
         }
@@ -87,6 +90,7 @@ impl PackedFrame {
             e_contact: f.e_contact,
             e_plastic: f.e_plastic,
             e_fracture: f.e_fracture,
+            alive: f.alive.clone(),
             kind: Kind::Zstd { n, pos_min, pos_step, f_min, f_step, data },
         }
     }
@@ -145,6 +149,7 @@ impl PackedFrame {
             e_contact: sc[5],
             e_plastic: sc[6],
             e_fracture: sc[7],
+            alive: None,
             kind: Kind::Zstd { n, pos_min, pos_step, f_min, f_step, data },
         })
     }
@@ -202,6 +207,7 @@ impl PackedFrame {
             e_contact: self.e_contact,
             e_plastic: self.e_plastic,
             e_fracture: self.e_fracture,
+            alive: self.alive.clone(),
         })
     }
 }

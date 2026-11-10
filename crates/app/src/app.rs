@@ -125,7 +125,7 @@ struct Preview {
     note: Option<String>,
 }
 
-type Key = (Design, [f64; 9], [bool; 3]);
+type Key = (Design, [f64; 9], [bool; 4]);
 
 /// Simulação aberta de um arquivo salvo.
 struct Loaded {
@@ -188,6 +188,7 @@ struct Snap {
     parts: Arc<Vec<u8>>,
     surface: Arc<Vec<bool>>,
     ref_pos: Arc<Vec<[f32; 3]>>,
+    hex: Option<Arc<Vec<[u32; 8]>>>,
 }
 
 pub struct PenSim {
@@ -236,6 +237,8 @@ pub struct PenSim {
     ted: DrawEditor,
     mesh_cache: Option<(MeshKey, Option<Arc<crate::mesh::SurfMesh>>)>,
     topo_cache: Option<((u64, usize, usize, u32, u64), Arc<crate::mesh::Topo>)>,
+    /// vizinhos por face dos hexaedros (núcleo de elementos finitos), por simulação
+    hexnb_cache: Option<(u64, Arc<Vec<[u32; 6]>>)>,
     disc_tex: Option<egui::TextureHandle>,
     /// margens extras (pt) somadas à área segura automática: [esq, topo, dir, base]
     extra_inset: [f32; 4],
@@ -343,7 +346,7 @@ impl PenSim {
             hide_target: false,
             outline: true,
             round_nodes: true,
-            faces: false,
+            faces: true,
             res_more: false,
             pdraw: None,
             ped: DrawEditor::new(Paint::Mat(LIBRARY[11].clone()), 0.5),
@@ -352,6 +355,7 @@ impl PenSim {
             ted: DrawEditor::new(Paint::Mat(LIBRARY[0].clone()), 1.0),
             mesh_cache: None,
             topo_cache: None,
+            hexnb_cache: None,
             disc_tex: Some(view3d::disc_texture(&cc.egui_ctx)),
             extra_inset: [0.0, 0.0, 0.0, 0.0],
             ws: Ws::Projectile,
@@ -485,6 +489,9 @@ impl PenSim {
         if std::env::var("PENSIM_FACES").is_ok() {
             me.faces = true;
         }
+        if std::env::var("PENSIM_NOPART").is_ok() {
+            me.particles = false;
+        }
         if std::env::var("PENSIM_DEMO").is_ok() {
             me.start(&cc.egui_ctx);
             if std::env::var("PENSIM_ISO").is_ok() {
@@ -499,7 +506,7 @@ impl PenSim {
 
     fn key(&self) -> Key {
         let c = &self.cfg;
-        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, self.dur_us, c.noise, c.jitter, c.sleep_ratio, self.res_nodes], [c.clamp_edges, c.symmetry, c.state_based])
+        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, self.dur_us, c.noise, c.jitter, c.sleep_ratio, self.res_nodes], [c.clamp_edges, c.symmetry, c.state_based, c.fem])
     }
 
     /// Escala interna (invisível): faz o diâmetro do projétil ter `res_nodes` nós na malha.
@@ -600,6 +607,7 @@ impl PenSim {
         self.decoded = None;
         self.mesh_cache = None;
         self.topo_cache = None;
+        self.hexnb_cache = None;
         self.sweep = None;
         self.range = [(0.0, 0.0); 7];
     }
@@ -628,14 +636,14 @@ impl PenSim {
 
     fn snapshot(&self) -> Snap {
         if let (None, Some(l)) = (&self.job, &self.loaded) {
-            return Snap { frames: l.frames.clone(), back_x: l.back_x, live: Some(l.outcome.clone()), done: true, error: None, n: l.n, dt: l.dt, steps: l.steps, wall: l.wall, sim_time: l.t_end, progress: 1.0, t_end: l.t_end, sym: l.sym, normals: l.normals.clone(), parts: l.parts.clone(), surface: l.surface.clone(), ref_pos: l.ref_pos.clone() };
+            return Snap { frames: l.frames.clone(), back_x: l.back_x, live: Some(l.outcome.clone()), done: true, error: None, n: l.n, dt: l.dt, steps: l.steps, wall: l.wall, sim_time: l.t_end, progress: 1.0, t_end: l.t_end, sym: l.sym, normals: l.normals.clone(), parts: l.parts.clone(), surface: l.surface.clone(), ref_pos: l.ref_pos.clone(), hex: None };
         }
         match &self.job {
             Some(j) => {
                 let g = j.shared.lock().unwrap();
-                Snap { frames: g.frames.clone(), back_x: g.back_x, live: g.live.clone(), done: g.done, error: g.error.clone(), n: g.n, dt: g.dt, steps: g.steps, wall: g.wall, sim_time: g.sim_time, progress: g.progress, t_end: g.t_end, sym: g.sym, normals: g.normals.clone(), parts: g.parts.clone(), surface: g.surface.clone(), ref_pos: g.ref_pos.clone() }
+                Snap { frames: g.frames.clone(), back_x: g.back_x, live: g.live.clone(), done: g.done, error: g.error.clone(), n: g.n, dt: g.dt, steps: g.steps, wall: g.wall, sim_time: g.sim_time, progress: g.progress, t_end: g.t_end, sym: g.sym, normals: g.normals.clone(), parts: g.parts.clone(), surface: g.surface.clone(), ref_pos: g.ref_pos.clone(), hex: g.hex.clone() }
             }
-            None => Snap { frames: vec![], back_x: 0.0, live: None, done: false, error: None, n: 0, dt: 0.0, steps: 0, wall: 0.0, sim_time: 0.0, progress: 0.0, t_end: 1.0, sym: 0, normals: Default::default(), parts: Default::default(), surface: Default::default(), ref_pos: Default::default() },
+            None => Snap { frames: vec![], back_x: 0.0, live: None, done: false, error: None, n: 0, dt: 0.0, steps: 0, wall: 0.0, sim_time: 0.0, progress: 0.0, t_end: 1.0, sym: 0, normals: Default::default(), parts: Default::default(), surface: Default::default(), ref_pos: Default::default(), hex: None },
         }
     }
 
@@ -1388,6 +1396,18 @@ impl PenSim {
         card(ui, "Qualidade", |ui| self.quality_section(ui));
         card(ui, "Modelo físico", |ui| {
             ui.horizontal_wrapped(|ui| {
+                if ui.add(egui::Button::new("Elementos finitos (novo)").selected(self.cfg.fem).corner_radius(14.0)).clicked() {
+                    self.cfg.fem = true;
+                }
+                if ui.add(egui::Button::new("Peridinâmica (antigo)").selected(!self.cfg.fem).corner_radius(14.0)).clicked() {
+                    self.cfg.fem = false;
+                }
+            });
+            if self.cfg.fem {
+                ui.weak("Elementos finitos explícitos com erosão (tipo Autodyn/LS-DYNA): Johnson-Cook, Mie-Grüneisen, contato com atrito. Materiais ainda não calibrados contra ensaios.");
+                return;
+            }
+            ui.horizontal_wrapped(|ui| {
                 if ui.add(egui::Button::new("Preciso").selected(self.cfg.state_based).corner_radius(14.0)).clicked() {
                     self.cfg.state_based = true;
                 }
@@ -2090,6 +2110,68 @@ impl PenSim {
                 let key: MeshKey = (self.job_id, self.view_idx, self.section, keep_pos, cut.to_bits(), self.hide_loose, self.hide_proj, self.hide_target, dx.to_bits(), self.started_obl.to_bits());
                 match &self.mesh_cache {
                     Some((k, m)) if *k == key => m.clone(),
+                    _ if snap.hex.is_some() && f.alive.is_some() => {
+                        // núcleo de elementos finitos: faces externas dos elementos vivos
+                        let hex = snap.hex.clone().unwrap();
+                        let alive = f.alive.clone().unwrap();
+                        let nb = match &self.hexnb_cache {
+                            Some((j, v)) if *j == self.job_id => v.clone(),
+                            _ => {
+                                let v = Arc::new(crate::mesh::hex_neighbors(&hex));
+                                self.hexnb_cache = Some((self.job_id, v.clone()));
+                                v
+                            }
+                        };
+                        let np8 = self.cfg.design.n_proj_parts() as u8;
+                        let (hl, hp, ht, sec) = (self.hide_loose, self.hide_proj, self.hide_target, self.section);
+                        let parts = snap.parts.clone();
+                        let refp = snap.ref_pos.clone();
+                        let masks2 = masks.clone();
+                        let state = |mi: usize, e: usize| -> u8 {
+                            if alive[e / 8] & (1 << (e % 8)) == 0 {
+                                return 0;
+                            }
+                            let h = &hex[e];
+                            let is_p = parts[h[0] as usize] < np8;
+                            if (is_p && hp) || (!is_p && ht) {
+                                return 0;
+                            }
+                            if sec {
+                                let cy = h.iter().map(|&k| flip(refp[k as usize], masks2[mi])[1]).sum::<f32>() / 8.0;
+                                if !in_section(cy) {
+                                    return 2;
+                                }
+                            }
+                            1
+                        };
+                        let symb = snap.sym;
+                        let mirror = |q: &[u32; 4]| -> u8 {
+                            let mut m = 0;
+                            if symb & 1 != 0 && q.iter().all(|&k| refp[k as usize][1] == 0.0) {
+                                m |= 1;
+                            }
+                            if symb & 2 != 0 && q.iter().all(|&k| refp[k as usize][2] == 0.0) {
+                                m |= 2;
+                            }
+                            m
+                        };
+                        let mut parts_idx: Vec<u32> = Vec::new();
+                        for (mi, &mm) in masks.iter().enumerate() {
+                            for i in 0..n {
+                                if f.damage[i] < 1.0 || hl {
+                                    continue;
+                                }
+                                let is_p = snap.parts[i] < np8;
+                                if (is_p && hp) || (!is_p && ht) || (sec && !in_section(flip(snap.ref_pos[i], mm)[1])) {
+                                    continue;
+                                }
+                                parts_idx.push((mi * n + i) as u32);
+                            }
+                        }
+                        let m = Some(Arc::new(crate::mesh::from_hex(&hex, &nb, n, &masks, &ext_pos, &state, &mirror, &parts_idx)));
+                        self.mesh_cache = Some((key, m.clone()));
+                        m
+                    }
                     _ => {
                         let np8 = self.cfg.design.n_proj_parts() as u8;
                         let (sa, ca) = (self.started_obl.to_radians().sin() as f32, self.started_obl.to_radians().cos() as f32);
@@ -2179,7 +2261,7 @@ impl PenSim {
                     // partículas (nós soltos) só aparecem se ligadas
                     let lidx: Vec<u32> = if self.particles { sm.loose.clone() } else { Vec::new() };
                     let lc = |i: usize| rainbow((data[i % n] * sc_f - lo) / (hi - lo), bands);
-                    let loose = view3d::Loose { pos: &ext_pos, idx: &lidx, node_size: dx, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
+                    let loose = view3d::Loose { pos: &ext_pos, idx: &lidx, node_size: if snap.hex.is_some() { 0.5 * dx } else { dx }, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
                     view3d::render_surf(&painter, &view, sm, ld, &|e, cut| {
                         if cut && !self.cut_colored {
                             mat_cols[(part_of[e % n] as usize).min(mat_cols.len() - 1)]
@@ -2207,7 +2289,7 @@ impl PenSim {
                 if let Some(sm) = &faces_mesh {
                     let lidx: Vec<u32> = if self.particles { sm.loose.clone() } else { Vec::new() };
                     let lc = |i: usize| mats[(parts[i % n] as usize).min(mats.len() - 1)];
-                    let loose = view3d::Loose { pos: &ext_pos, idx: &lidx, node_size: dx, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
+                    let loose = view3d::Loose { pos: &ext_pos, idx: &lidx, node_size: if snap.hex.is_some() { 0.5 * dx } else { dx }, tex: self.disc_tex.as_ref().map(|t| t.id()), color: &lc };
                     view3d::render_surf(&painter, &view, sm, ld, &|e, _| mats[(parts[e % n] as usize).min(mats.len() - 1)], Some(loose));
                 } else {
                     view3d::render(&painter, &view, dx, &ext_pos, &idx, true, Some(&light), round_id, &|i| mats[(parts[i % n] as usize).min(mats.len() - 1)]);

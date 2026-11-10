@@ -1,7 +1,7 @@
 //! Threads de trabalho: a simulação nunca roda na thread de UI.
 //! Cada passo do solver ainda é paralelizado internamente com rayon.
 use pensim_core::sweep::{self, SweepPoint};
-use pensim_core::{Config, Outcome, PackedFrame, Sim};
+use pensim_core::{Config, Outcome, PackedFrame, Solver};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,6 +25,8 @@ pub struct Shared {
     pub parts: Arc<Vec<u8>>,
     pub surface: Arc<Vec<bool>>,
     pub ref_pos: Arc<Vec<[f32; 3]>>,
+    /// hexaedros (núcleo de elementos finitos): as faces vêm deles
+    pub hex: Option<Arc<Vec<[u32; 8]>>>,
 }
 
 pub struct Job {
@@ -55,7 +57,7 @@ impl Job {
         let finish = Arc::new(AtomicBool::new(false));
         let (s, p, c, fin) = (shared.clone(), paused.clone(), cancel.clone(), finish.clone());
         let handle = std::thread::spawn(move || {
-            let mut sim = match Sim::new(cfg) {
+            let mut sim = match Solver::new(cfg) {
                 Ok(s) => s,
                 Err(e) => {
                     let mut g = s.lock().unwrap();
@@ -70,7 +72,8 @@ impl Job {
                 g.n = sim.n_physical();
                 g.sym = sim.symmetry();
                 g.normals = Arc::new(sim.normals());
-                g.dt = sim.dt;
+                g.dt = sim.dt();
+                g.hex = sim.hex().map(Arc::new);
                 g.t_end = sim.t_end();
                 g.back_x = sim.plate_back();
                 g.parts = Arc::new(sim.part_ids());
@@ -82,16 +85,16 @@ impl Job {
                 if fin.load(Ordering::SeqCst) {
                     // parar aqui: grava o quadro atual e encerra como se tivesse terminado
                     sim.finish_now();
-                    let new: Vec<Arc<PackedFrame>> = sim.frames.drain(..).map(Arc::new).collect();
+                    let new: Vec<Arc<PackedFrame>> = sim.take_frames().into_iter().map(Arc::new).collect();
                     let live = sim.outcome();
                     let mut g = s.lock().unwrap();
                     g.frames.extend(new);
                     g.live = Some(live);
-                    g.steps = sim.step_count;
-                    g.sim_time = sim.time;
+                    g.steps = sim.steps();
+                    g.sim_time = sim.time();
                     g.progress = 1.0;
                     g.wall = wall;
-                    g.t_end = sim.time;
+                    g.t_end = sim.time();
                     g.done = true;
                     drop(g);
                     ctx.request_repaint();
@@ -104,13 +107,13 @@ impl Job {
                 let t = Instant::now();
                 sim.advance_for(Duration::from_millis(60));
                 wall += t.elapsed().as_secs_f64();
-                let new: Vec<Arc<PackedFrame>> = sim.frames.drain(..).map(Arc::new).collect();
+                let new: Vec<Arc<PackedFrame>> = sim.take_frames().into_iter().map(Arc::new).collect();
                 let live = sim.outcome();
                 let mut g = s.lock().unwrap();
                 g.frames.extend(new);
                 g.live = Some(live);
-                g.steps = sim.step_count;
-                g.sim_time = sim.time;
+                g.steps = sim.steps();
+                g.sim_time = sim.time();
                 g.progress = sim.progress();
                 g.wall = wall;
                 g.t_end = sim.t_end();

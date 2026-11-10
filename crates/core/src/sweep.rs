@@ -1,6 +1,6 @@
 //! Varredura de velocidades (paralela) e estimativa do limite balístico.
 use crate::config::Config;
-use crate::sim::{Outcome, OutcomeKind, Sim};
+use crate::sim::{Outcome, OutcomeKind};
 use rayon::prelude::*;
 
 #[derive(Clone, Debug)]
@@ -13,8 +13,10 @@ pub fn run_one(cfg: &Config, velocity: f64) -> SweepPoint {
     let mut c = cfg.clone();
     c.velocity = velocity;
     c.n_frames = 2;
-    let mut s = Sim::new(c).expect("configuração inválida");
-    s.run_to_end();
+    let mut s = crate::Solver::new(c).expect("configuração inválida");
+    while !s.done() {
+        s.advance_for(std::time::Duration::from_millis(500));
+    }
     SweepPoint { velocity, outcome: s.outcome() }
 }
 

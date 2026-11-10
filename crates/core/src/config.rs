@@ -351,6 +351,8 @@ pub struct Config {
     pub time_factor: f64,
     /// duração da simulação [s, no tempo do modelo]; 0 = automática
     pub duration: f64,
+    /// núcleo novo de elementos finitos (false = peridinâmica antiga)
+    pub fem: bool,
     pub n_frames: usize,
     /// simula só 1/2 (obliquidade ≠ 0) ou 1/4 (impacto normal) do modelo, com nós-fantasma
     pub symmetry: bool,
@@ -429,6 +431,7 @@ impl Preset {
             clamp_edges: true,
             time_factor: 1.0,
             duration: 0.0,
+            fem: true,
             n_frames: 100,
             symmetry: true,
             sleep_ratio: 0.05,

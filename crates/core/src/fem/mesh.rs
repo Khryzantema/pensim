@@ -481,7 +481,7 @@ fn apply_symmetry(mut m: HexMesh, sym: Symmetry) -> HexMesh {
 }
 
 /// Põe o hexaedro com volume positivo (espelha a ordem se precisar).
-fn orient(x: &[[f64; 3]], h: [u32; 8]) -> [u32; 8] {
+pub fn orient(x: &[[f64; 3]], h: [u32; 8]) -> [u32; 8] {
     let c: [[f64; 3]; 8] = std::array::from_fn(|k| x[h[k] as usize]);
     if hex_volume(&c) >= 0.0 {
         h

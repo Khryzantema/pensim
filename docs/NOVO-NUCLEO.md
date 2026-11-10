@@ -1,7 +1,7 @@
 # PenSim — projeto do novo núcleo de simulação
 
 Documento de passagem. Quem continuar deve conseguir trabalhar só com este arquivo e o código.
-Estado: **fases 1 e 2 concluídas** (`crates/core/src/fem/`, testes em `crates/core/tests/fem_verify.rs` e `fem_impact.rs`). Próxima: fase 3.
+Estado: **fases 1 e 2 concluídas; fase 4 adiantada** (app já usa o núcleo novo) a pedido do dono, para poder testar. Fase 3 (OpenRadioss) pendente: precisa liberar github.com na rede do ambiente.
 
 ## 1. Decisão
 
@@ -327,3 +327,28 @@ experimentos.
 Desempenho medido (4 núcleos, `f64`): 64 mil elementos, 1471 passos em 27 s.
 
 Os números de velocidade residual ainda **não foram comparados com nada externo**; isso é a fase 3.
+
+## 13. Fase 4 adiantada — app ligado ao núcleo novo
+
+O dono pediu para testar antes da validação; a fase 3 está parada porque o proxy de rede bloqueia
+o download do OpenRadioss (github.com/codeload.github.com). Feito:
+- `fem/build.rs`: `Config` → malha (projétil por revolução em O no eixo de voo, peças pelo
+  `part_at` do projeto, vazio removido; camadas em blocos, discos em degraus; objetos desenhados em
+  degraus; borda presa; ângulo e simetria com as mesmas convenções do simulador antigo).
+- `fem/material.rs::from_library`: material da biblioteca → Johnson-Cook + EOS (valores típicos
+  de literatura por tipo; **não calibrados**).
+- `fem/run.rs::FemSim`: mesma interface do `Sim` antigo; `lib.rs::Solver` escolhe pelo
+  `Config::fem` (padrão: novo). Varredura de V50 também usa o `Solver`.
+- Quadro ganhou `alive` (bits dos elementos vivos). App: no modo faces, com hexaedros, a superfície
+  sai de `mesh::from_hex` (faces externas dos elementos vivos visíveis, cópias espelhadas, corte de
+  seção), sem a reconstrução antiga. Faces ligadas por padrão. Partículas = nós sem elemento vivo.
+- Aba Simular: "Elementos finitos (novo)" / "Peridinâmica (antigo)".
+
+Medido: 75 mm PzGr 39/42, 16 no diâmetro, 1000 µs: 36 mil elementos (¼), 50 s em 4 núcleos,
+energia 0,16%.
+
+Falta da fase 4:
+- Arquivo salvo não guarda `alive` nem os hexaedros: simulação do núcleo novo aberta de arquivo
+  aparece só em modo de nós.
+- A pré-visualização da geometria (antes de simular) ainda usa a voxelização antiga.
+- Pack de munições (`.ppack`).

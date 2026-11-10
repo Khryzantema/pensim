@@ -6,7 +6,9 @@
 //! condições de simetria. Ainda sem contato entre corpos e sem erosão.
 //!
 //! Estado em `f64` nesta fase (correção primeiro); a troca para `f32` é da fase 6.
+pub mod build;
 pub mod contact;
+pub mod run;
 pub mod material;
 pub mod mesh;
 
@@ -679,6 +681,60 @@ impl Fem {
     }
 
     // ----------------------------------------------------------------- consultas
+
+    /// Campos por nó (média dos elementos vivos em volta): von Mises, pressão, def. plástica,
+    /// temperatura, dano. Nó sem elemento vivo (partícula) fica com dano 1.
+    pub fn node_fields(&self) -> [Vec<f32>; 5] {
+        let (ptr, adj, el) = (&self.adj_ptr, &self.adj, &self.elem);
+        let r: Vec<[f32; 5]> = (0..self.x.len())
+            .into_par_iter()
+            .map(|i| {
+                let (mut acc, mut n) = ([0.0f64; 5], 0.0);
+                let mut t_any = 0.0f64;
+                for &a in &adj[ptr[i] as usize..ptr[i + 1] as usize] {
+                    let st = &el[(a / 8) as usize];
+                    t_any = t_any.max(st.temp);
+                    if !st.alive {
+                        continue;
+                    }
+                    let s = &st.s;
+                    let vm = (1.5 * (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]) + 3.0 * (s[3] * s[3] + s[4] * s[4] + s[5] * s[5])).sqrt();
+                    acc[0] += vm;
+                    acc[1] += st.p;
+                    acc[2] += st.eps_p;
+                    acc[3] += st.temp;
+                    acc[4] += st.dmg.min(1.0);
+                    n += 1.0;
+                }
+                if n == 0.0 {
+                    [0.0, 0.0, 0.0, t_any as f32, 1.0]
+                } else {
+                    acc.map(|v| (v / n) as f32)
+                }
+            })
+            .collect();
+        let mut out: [Vec<f32>; 5] = Default::default();
+        for (k, o) in out.iter_mut().enumerate() {
+            *o = r.iter().map(|v| v[k]).collect();
+        }
+        out
+    }
+
+    /// Elementos vivos como bits (bit e de `out[e / 8]`).
+    pub fn alive_bits(&self) -> Vec<u8> {
+        let mut b = vec![0u8; self.elem.len().div_ceil(8)];
+        for (e, st) in self.elem.iter().enumerate() {
+            if st.alive {
+                b[e / 8] |= 1 << (e % 8);
+            }
+        }
+        b
+    }
+
+    /// Massa dos nós (por nó).
+    pub fn masses(&self) -> &[f64] {
+        &self.mass
+    }
 
     /// Elementos erodidos por motivo: [dano, frágil, distorção, volume].
     pub fn erosion_reasons(&self) -> [usize; 4] {
