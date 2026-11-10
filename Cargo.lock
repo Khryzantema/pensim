@@ -1689,6 +1689,7 @@ dependencies = [
  "pensim-core",
  "png 0.17.16",
  "rayon",
+ "zstd",
 ]
 
 [[package]]

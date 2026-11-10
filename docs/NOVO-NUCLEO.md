@@ -347,8 +347,20 @@ o download do OpenRadioss (github.com/codeload.github.com). Feito:
 Medido: 75 mm PzGr 39/42, 16 no diâmetro, 1000 µs: 36 mil elementos (¼), 50 s em 4 núcleos,
 energia 0,16%.
 
-Falta da fase 4:
-- Arquivo salvo não guarda `alive` nem os hexaedros: simulação do núcleo novo aberta de arquivo
-  aparece só em modo de nós.
-- A pré-visualização da geometria (antes de simular) ainda usa a voxelização antiga.
-- Pack de munições (`.ppack`).
+Feito depois:
+- Arquivo salvo v5: guarda hexaedros e elementos vivos por quadro; simulação aberta de arquivo
+  aparece com faces (teste `crates/core/tests/save_fem.rs`).
+- Pré-visualização ("Malha 3D") mostra a malha de hexaedros real com faces.
+- Pack de munições `.ppack` (`crates/app/src/pack.rs`, formato no cabeçalho do arquivo): pasta
+  `packs/` ao lado de `projeteis/`; cada pack vira um cartão na aba Munição; "Exportar como pack"
+  junta os projéteis salvos com nome, autor e licença. O `.pdes` passou a guardar a velocidade.
+
+## 14. Fase 3 — estado do OpenRadioss
+
+- Código: fork do dono em `khryzantema/openradioss`, clonado em `/home/user/khryzantema/openradioss`
+  (o GitHub da sessão só serve repositórios do dono; o original de terceiros é recusado).
+- **Bloqueio**: a compilação baixa `extlib.zip` (bibliotecas prontas, incluindo o leitor de
+  decks `hm_reader`, binário da Altair) de um release de `OpenRadioss/OpenRadioss_extlib`
+  (`EXTLIB_VERSION.json`). O download é recusado pelo mesmo motivo, e fork não leva releases.
+  Saídas: o dono baixar `extlib.zip` (ou o OpenRadioss já compilado para Linux) e colocar no fork
+  dele num commit; ou rodar os decks na máquina dele e commitar os CSV em `calib/ref/`.

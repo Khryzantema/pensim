@@ -58,6 +58,8 @@ pub struct Drawing {
     pub fills: Vec<FillRec>,
     /// largura da extrusão (objetos do alvo) [mm]
     pub width_mm: f64,
+    /// velocidade de boca guardada com o projétil [m/s] (0 = não definida)
+    pub velocity: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -193,13 +195,16 @@ impl DrawEditor {
 
 impl Drawing {
     pub fn new(name: &str, width_mm: f64) -> Self {
-        Drawing { name: name.into(), bg: None, pts: vec![[0.0, 0.0]], edges: vec![], fills: vec![], width_mm }
+        Drawing { name: name.into(), bg: None, pts: vec![[0.0, 0.0]], edges: vec![], fills: vec![], width_mm, velocity: 0.0 }
     }
 
     /// Texto simples e estável para guardar o desenho (a imagem de fundo não entra).
     pub fn to_text(&self) -> String {
         let mut o = String::from("PENSIM-DESENHO 1\n");
         o += &format!("N {}\nW {}\n", self.name.replace('\n', " "), self.width_mm);
+        if self.velocity > 0.0 {
+            o += &format!("V {}\n", self.velocity);
+        }
         for p in &self.pts {
             o += &format!("P {} {}\n", p[0], p[1]);
         }
@@ -218,13 +223,14 @@ impl Drawing {
         if !l.next()?.starts_with("PENSIM-DESENHO") {
             return None;
         }
-        let mut d = Drawing { name: String::new(), bg: None, pts: vec![], edges: vec![], fills: vec![], width_mm: 0.0 };
+        let mut d = Drawing { name: String::new(), bg: None, pts: vec![], edges: vec![], fills: vec![], width_mm: 0.0, velocity: 0.0 };
         for ln in l {
             let (k, r) = ln.split_at(ln.find(' ').unwrap_or(ln.len()));
             let r = r.trim_start();
             match k {
                 "N" => d.name = r.into(),
                 "W" => d.width_mm = r.parse().ok()?,
+                "V" => d.velocity = r.parse().unwrap_or(0.0),
                 "P" => {
                     let v: Vec<f64> = r.split(' ').filter_map(|x| x.parse().ok()).collect();
                     d.pts.push([*v.first()?, *v.get(1)?]);

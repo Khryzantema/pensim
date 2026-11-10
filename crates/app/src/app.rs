@@ -236,6 +236,9 @@ pub struct PenSim {
     res_more: bool,
     /// projétil desenhado à mão (substitui o da biblioteca)
     pdraw: Option<Drawing>,
+    /// exportar pack: nome, autor, licença
+    pack_meta: [String; 3],
+    packs: Option<Vec<crate::pack::Pack>>,
     ped: DrawEditor,
     /// objetos desenhados do alvo (um desenho por objeto) e o que está em edição
     tdraws: Vec<Drawing>,
@@ -355,6 +358,8 @@ impl PenSim {
             faces: true,
             res_more: false,
             pdraw: None,
+            pack_meta: ["Meu pack".into(), String::new(), "Uso pessoal. Não redistribuir.".into()],
+            packs: None,
             ped: DrawEditor::new(Paint::Mat(LIBRARY[11].clone()), 0.5),
             tdraws: vec![],
             tedit: None,
@@ -1035,6 +1040,40 @@ impl PenSim {
             self.ammo_scale = 1.0;
             self.peek3d = false;
         }
+        if self.packs.is_none() {
+            self.packs = Some(crate::pack::list(&packs_dir()));
+        }
+        let packs = self.packs.clone().unwrap_or_default();
+        for pk in &packs {
+            ui.add_space(6.0);
+            let title = if pk.author.is_empty() { format!("Pack · {}", pk.name) } else { format!("Pack · {} ({})", pk.name, pk.author) };
+            card(ui, &title, |ui| {
+                for a in &pk.ammo {
+                    let label = if a.caliber_mm > 0.0 { format!("{} · {:.1} mm", a.name, a.caliber_mm) } else { a.name.clone() };
+                    let mut b = ui.add_sized([ui.available_width(), 28.0], egui::Button::new(label).corner_radius(6.0));
+                    if !a.note.is_empty() {
+                        b = b.on_hover_text(&a.note);
+                    }
+                    if b.clicked() {
+                        if let Some(mut d) = Drawing::from_text(&a.drawing) {
+                            if d.name.is_empty() {
+                                d.name = a.name.clone();
+                            }
+                            if a.velocity > 0.0 {
+                                self.cfg.velocity = a.velocity;
+                            }
+                            self.pdraw = Some(d);
+                            self.ped = DrawEditor::new(Paint::Mat(LIBRARY[11].clone()), 0.5);
+                            self.ammo_scale = 1.0;
+                            self.peek3d = false;
+                        }
+                    }
+                }
+                if !pk.license.is_empty() {
+                    ui.weak(&pk.license);
+                }
+            });
+        }
         let saved = saved_files();
         if !saved.is_empty() {
             ui.add_space(6.0);
@@ -1045,6 +1084,9 @@ impl PenSim {
                         let nm = p.file_stem().and_then(|x| x.to_str()).unwrap_or("?");
                         if ui.add_sized([ui.available_width() - 40.0, 28.0], egui::Button::new(format!("✎ {nm}")).corner_radius(6.0)).clicked() {
                             if let Some(d) = std::fs::read_to_string(p).ok().and_then(|t| Drawing::from_text(&t)) {
+                                if d.velocity > 0.0 {
+                                    self.cfg.velocity = d.velocity;
+                                }
                                 self.pdraw = Some(d);
                                 self.ped = DrawEditor::new(Paint::Mat(LIBRARY[11].clone()), 0.5);
                                 self.ammo_scale = 1.0;
@@ -1059,6 +1101,41 @@ impl PenSim {
                 if let Some(p) = del {
                     let _ = std::fs::remove_file(p);
                 }
+                egui::CollapsingHeader::new("Exportar como pack de munição").id_salt("pack_export").show(ui, |ui| {
+                    ui.weak("Junta todos os projéteis salvos acima num arquivo .ppack para distribuir. O pack é seu: escolha a licença.");
+                    for (k, l) in ["Nome do pack", "Autor", "Licença"].iter().enumerate() {
+                        ui.label(*l);
+                        if k == 2 {
+                            ui.add(egui::TextEdit::multiline(&mut self.pack_meta[k]).desired_rows(2).desired_width(f32::INFINITY));
+                        } else {
+                            ui.add(egui::TextEdit::singleline(&mut self.pack_meta[k]).desired_width(f32::INFINITY));
+                        }
+                    }
+                    if ui.button("📦 Exportar pack").clicked() {
+                        let mut pk = crate::pack::Pack { name: self.pack_meta[0].trim().to_string(), author: self.pack_meta[1].trim().to_string(), license: self.pack_meta[2].trim().to_string(), ..Default::default() };
+                        for p in &saved {
+                            let Some(t) = std::fs::read_to_string(p).ok() else { continue };
+                            let Some(d) = Drawing::from_text(&t) else { continue };
+                            let name = if d.name.is_empty() { p.file_stem().and_then(|x| x.to_str()).unwrap_or("?").to_string() } else { d.name.clone() };
+                            let (cal, mass) = match d.to_projectile(1.0) {
+                                Some(pr) => (pr.max_radius() * 2e3, proj_mass(&pr) * 1e3),
+                                None => (0.0, 0.0),
+                            };
+                            pk.ammo.push(crate::pack::PackAmmo { name, group: pk.name.clone(), caliber_mm: cal, velocity: d.velocity, mass_g: mass, note: String::new(), drawing: t });
+                        }
+                        let file: String = pk.name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
+                        let file = if file.trim().is_empty() { "pack".to_string() } else { file.trim().to_string() };
+                        let path = packs_dir().join(format!("{file}.ppack"));
+                        self.save_msg = match crate::pack::write(&path, &pk) {
+                            Ok(_) => format!("Pack com {} munições salvo em {}", pk.ammo.len(), path.display()),
+                            Err(e) => format!("Erro ao exportar: {e}"),
+                        };
+                        self.packs = None;
+                    }
+                    if !self.save_msg.is_empty() {
+                        ui.weak(&self.save_msg);
+                    }
+                });
             });
         }
         ui.add_space(6.0);
@@ -1214,6 +1291,7 @@ impl PenSim {
                     let nm = nm.trim();
                     let nm = if nm.is_empty() { "projetil" } else { nm };
                     let path = saved_dir().join(format!("{nm}.pdes"));
+                    d.velocity = self.cfg.velocity;
                     self.save_msg = match std::fs::write(&path, d.to_text()) {
                         Ok(_) => format!("Salvo em {}", path.display()),
                         Err(e) => format!("Erro ao salvar: {e}"),
@@ -2587,6 +2665,12 @@ fn images_dir() -> std::path::PathBuf {
 
 fn saved_dir() -> std::path::PathBuf {
     let d = images_dir().parent().map(|p| p.join("projeteis")).unwrap_or_else(|| std::path::PathBuf::from("projeteis"));
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+fn packs_dir() -> std::path::PathBuf {
+    let d = images_dir().parent().map(|p| p.join("packs")).unwrap_or_else(|| std::path::PathBuf::from("packs"));
     let _ = std::fs::create_dir_all(&d);
     d
 }
