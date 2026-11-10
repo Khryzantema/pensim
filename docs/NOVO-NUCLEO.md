@@ -409,3 +409,24 @@ desliga a simetria. Controle no app (aba Munição, junto da velocidade) em mil 
 com 170 mil rpm o projétil perdeu ~14% mais elementos e o desvio lateral trocou de lado. Indício,
 não conclusão: repetir com malha fina e vários ângulos, e comparar com o OpenCourant (giro entra
 no deck pela velocidade inicial por nó).
+
+## 17. Calibração no PC do dono — baseline (10/11/2026)
+
+Máquina com 36 núcleos (18 para cada solver). OpenCourant `latest-20261011` em
+`~/claude/oc_pkg/x/OpenCourant` (SHA-256 do zip conferido). 80 casos, ND=12, 25 min no total
+(~19 s por caso), resultado em `calib/ref/baseline_pc.csv`.
+
+- **OpenCourant**: os 80 resultados saem idênticos (<1%) aos de `esfera_chapa.csv`. Determinístico.
+- **PenSim**: 51 dos 80 diferem mais de 1% da referência anterior (perto do limite balístico
+  até ~30–80 m/s; ex.: Al 10 mm 500 m/s: 97 → 67; RHA 10 mm 1500 m/s: 84 → 8). O PenSim **não é
+  reprodutível entre máquinas/número de núcleos** (soma em ordem diferente + erosão caótica).
+  Em escala agregada o resultado é o mesmo: com a mesma métrica (perfuração se vx > 30 m/s;
+  erro só quando os dois > 100 m/s), referência anterior = 67/80 mesmo desfecho, erro médio 20,0%
+  (n=42); baseline = 68/80, 19,8% (n=42). (Esta métrica é mais larga que a da seção 15, por isso
+  os números absolutos diferem; o que vale é comparar um arquivo com o outro.)
+- Consequência para as tarefas seguintes: uma diferença de poucos % num caso perto do limite
+  balístico é ruído do PenSim, não efeito. Os testes de hipótese precisam de vários casos ou de
+  fixar `PENSIM_THREADS`.
+- Pegadinha: `calib/one.sh` usa `nproc` núcleos no OpenCourant (36) e deu +57 m/s no Al 10 mm
+  700 m/s, contra −60 da referência (18 núcleos): o OpenCourant também varia com o número de
+  núcleos nesse caso limite.
