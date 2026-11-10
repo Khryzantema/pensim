@@ -372,3 +372,40 @@ pacotes Linux prontos (`OpenCourant_linux64.zip`, release latest-20261011) que j
 extlib v82, e imagens Docker/Apptainer. É a referência da fase 3 daqui em diante. Nesta sessão
 de nuvem o download não passa (GitHub só serve repositórios do dono, e rodar binário baixado é
 bloqueado); a fase 3 roda na máquina do dono (ver `docs/PROMPT-CLI.md`).
+
+## 15. Fase 3 — primeira comparação completa (10/11/2026)
+
+Referência: OpenCourant `latest-20261011` (pacote Linux), rodando aqui. Ferramentas:
+`fem/radioss.rs` (exporta a MESMA malha e materiais para deck `.rad`), `examples/calib_case.rs`,
+`examples/calib_ammo.rs`, `calib/run_calib.py`, `calib/run_ammo.py`, `calib/one.sh`.
+Resultados em `calib/ref/esfera_chapa.csv` (80 casos, 12 elementos no diâmetro).
+
+Achados de método (importantes para quem continuar):
+- A massa por peça no histórico do Radioss perde os elementos apagados; XMOM/MASS inflava a
+  velocidade (chegou a dar 1859 m/s num tiro de 1800). Medir **por nó** (`/TH/NODE`, massas
+  nodais exportadas em `.mass`).
+- O OpenCourant abortava ("NODAL VELOCITY IS TOO HIGH FOR INTERFACE") em 10 casos oblíquos com
+  elementos muito distorcidos. Com `/DT/BRICK/DEL` e `/DT/INTER/DEL` a 20% do passo inicial do
+  PenSim (o PenSim apaga a 10%), nenhum aborto, e o resultado varia pouco entre 20% e 30%.
+- O atrito (0,1 × 0) quase não muda nada nos dois.
+
+Resultado (80 casos): mesmo desfecho em 63/80; nos 23 casos de perfuração clara, erro médio de
+9,6% na velocidade residual (12 dentro de 5%, 14 dentro de 10%). Energia do PenSim < 1,1%.
+
+Desvios que sobram:
+1. **Perto do limite balístico a chapa do PenSim cede antes** (Al 10 mm 500–700 m/s, RHA 5 mm
+   1200 m/s, RHA 10 mm 1500–1800 m/s): o limite balístico do PenSim sai baixo. Hipóteses a testar,
+   uma de cada vez: (a) elemento/hourglass — rodar o OpenCourant com Isolid=1 ou o PenSim com
+   `PENSIM_HG` maior; (b) dano/erosão — erosão por distorção do PenSim a 10% vs 20%; (c) EOS/energia.
+2. **RHA a 60°**: o PenSim dá 500–600 m/s, o OpenCourant 640–780 (ricochete).
+- Munições: o OpenCourant aborta por causa dos elementos minúsculos da ponta da ogiva (raio mínimo
+  de ¼ do passo em `revolution_x`). Engrossar a ponta antes de refazer `run_ammo.py`.
+
+## 16. Rotação do projétil
+
+`Config::spin` [rad/s no tempo do modelo]: velocidade inicial ω d × r em torno do eixo de voo;
+desliga a simetria. Controle no app (aba Munição, junto da velocidade) em mil rpm reais com botão
+"típico" (passo de 30 calibres). Teste único (.50 BMG × 20 mm RHA a 45°, 8 no diâmetro, PenSim):
+com 170 mil rpm o projétil perdeu ~14% mais elementos e o desvio lateral trocou de lado. Indício,
+não conclusão: repetir com malha fina e vários ângulos, e comparar com o OpenCourant (giro entra
+no deck pela velocidade inicial por nó).

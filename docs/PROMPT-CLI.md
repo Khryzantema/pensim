@@ -37,6 +37,10 @@ ESTADO ATUAL
   PENSIM_NODES, PENSIM_DUR, PENSIM_AT, PENSIM_WS, PENSIM_PEEK, PENSIM_NOPART (ver app.rs).
   O dono usa 16 nós no diâmetro e partículas ligadas: teste assim.
 
+ATUALIZAÇÃO: a fase 3 já começou — leia as seções 15 e 16 de docs/NOVO-NUCLEO.md (OpenCourant
+rodando, 80 casos comparados, desvios que sobram, rotação do projétil). O dono prefere fazer
+UMA coisa de cada vez. No Xeon dele (18 núcleos, 64 GB) os lotes podem rodar casos em paralelo.
+
 O QUE FALTA, NESTA ORDEM
 1. Fase 3 — validação contra o OpenRadioss (docs/NOVO-NUCLEO.md, seções 6.2 e 14).
    a. Instalar o solver de referência. O OpenRadioss foi descontinuado pela Siemens em
