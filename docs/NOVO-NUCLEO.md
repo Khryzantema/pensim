@@ -40,9 +40,10 @@ trecho, citar o arquivo de origem no comentário.
 
 ### Critério de escolha entre alternativas
 
-Pedido do dono: **meio-termo entre qualidade e rapidez, puxando para a qualidade.** Na dúvida
-entre duas opções, vale a mais fiel, desde que não custe mais que ~2× o tempo da alternativa
-barata. Acima disso, fica a barata e a cara vira opção "Preciso" na interface.
+Pedido do dono: **70% qualidade, 30% velocidade.** Na dúvida entre duas opções, vale a mais
+fiel, desde que não custe mais que ~3× o tempo da alternativa barata. Acima disso, fica a
+barata e a cara vira opção "Preciso" na interface. Ganho de velocidade que piore um resultado
+da seção 6 em mais de 2–3% não entra.
 
 Escolhas que isso fixa (valem sobre o resto do documento onde houver conflito):
 - **Elemento**: hexaedro de 1 ponto com hourglass por rigidez (é o padrão da indústria para
