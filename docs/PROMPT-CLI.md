@@ -39,16 +39,19 @@ ESTADO ATUAL
 
 O QUE FALTA, NESTA ORDEM
 1. Fase 3 — validação contra o OpenRadioss (docs/NOVO-NUCLEO.md, seções 6.2 e 14).
-   a. Compilar o OpenRadioss nesta máquina: código em github.com/OpenRadioss/OpenRadioss
-      (o dono tem um fork em Khryzantema/openradioss). A compilação precisa de extlib
-      (bibliotecas prontas; ver EXTLIB_VERSION.json e Compiling_tools/script/load_extlib.py).
-      O link oficial do extlib não abriu para o dono. Há uma cópia pública não oficial em
-      github.com/xupeiwust/OpenRadioss_extlib (versão 59; o código pede 82) — é binário de
-      terceiro não verificado: PERGUNTE ao dono antes de usar. Use a opção -open_reader
-      (leitor aberto, dispensa o hm_reader da Altair):
-        cd starter && ./build_script.sh -arch=linux64_gf -release -open_reader -no-python -nt=N
-        cd engine  && ./build_script.sh -arch=linux64_gf -release -nt=N   (ver HOWTO.md)
-      Se não compilar, alternativa: a versão já compilada para Linux nos releases oficiais.
+   a. Instalar o solver de referência. O OpenRadioss foi descontinuado pela Siemens em
+      01/10/2026 (repositório removido; por isso links antigos dão 404). A continuação
+      comunitária é o OpenCourant (https://opencourant.org, código em
+      github.com/OpenCourant/OpenCourant, AGPL v3), com pacotes prontos:
+        https://github.com/OpenCourant/OpenCourant/releases (release latest-20261011:
+        OpenCourant_linux64.zip; também imagem docker.io/opencourant/opencourant:latest-20261011)
+      Linux: descompactar e
+        export OPENCOURANT_PATH=/caminho/OpenCourant
+        export LD_LIBRARY_PATH=$OPENCOURANT_PATH/extlib/hm_reader/linux64:$OPENCOURANT_PATH/extlib/h3d/lib/linux64:$LD_LIBRARY_PATH
+        export RAD_CFG_PATH=$OPENCOURANT_PATH/hm_cfg_files
+      Executáveis em exec/ (starter e engine, precisão simples e dupla, SMP e OpenMPI, mais
+      os conversores anim_to_vtk e th_to_csv). Confira na página de downloads se há release
+      mais nova. NÃO use a cópia não oficial de extlib (xupeiwust): não é mais necessária.
    b. Escrever um gerador de decks .rad a partir do mesmo Config/malha do PenSim (mesmos nós
       e elementos, mesmos materiais JC + Mie-Grüneisen, contato TYPE7, erosão), para os 80
       casos: esfera de aço 4340 Ø10 mm × chapas RHA e Al 6061-T6, espessura 0,5D e 1D,

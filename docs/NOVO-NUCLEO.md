@@ -364,3 +364,11 @@ Feito depois:
   (`EXTLIB_VERSION.json`). O download é recusado pelo mesmo motivo, e fork não leva releases.
   Saídas: o dono baixar `extlib.zip` (ou o OpenRadioss já compilado para Linux) e colocar no fork
   dele num commit; ou rodar os decks na máquina dele e commitar os CSV em `calib/ref/`.
+
+**Atualização (10/11/2026):** o OpenRadioss foi descontinuado pela Siemens em 01/10/2026 e o
+repositório oficial saiu do GitHub (por isso o extlib dava 404). Continuação comunitária:
+**OpenCourant** (https://opencourant.org, github.com/OpenCourant/OpenCourant, AGPL v3), com
+pacotes Linux prontos (`OpenCourant_linux64.zip`, release latest-20261011) que já trazem o
+extlib v82, e imagens Docker/Apptainer. É a referência da fase 3 daqui em diante. Nesta sessão
+de nuvem o download não passa (GitHub só serve repositórios do dono, e rodar binário baixado é
+bloqueado); a fase 3 roda na máquina do dono (ver `docs/PROMPT-CLI.md`).
