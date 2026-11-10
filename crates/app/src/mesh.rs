@@ -225,7 +225,7 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
     };
     // "elemento erodido": cascas do alvo rachadas e coladas no projétil (entulho que escorre pela
     // lateral) somem, como num solver de elementos finitos, e a munição toca a cratera limpa
-    let near_proj: Vec<bool> = {
+    let (near_proj, near_far): (Vec<bool>, Vec<bool>) = {
         let h = 3.0 * dx;
         let key = |p: [f32; 3]| [(p[0] / h).floor() as i32, (p[1] / h).floor() as i32, (p[2] / h).floor() as i32];
         let pos = |e: usize| {
@@ -239,30 +239,32 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
                 hash.entry(key(p)).or_default().push(p);
             }
         }
-        let r2 = (2.2 * dx) * (2.2 * dx);
-        (0..total)
+        let (r2, rf2) = ((2.2 * dx) * (2.2 * dx), (5.0 * dx) * (5.0 * dx));
+        let flags: Vec<(bool, bool)> = (0..total)
             .into_par_iter()
             .with_min_len(4096)
             .map(|e| {
                 if t.grp[e] == 1 || vis[e] != 1 {
-                    return false;
+                    return (false, false);
                 }
                 let p = pos(e);
                 let k = key(p);
-                for a in -1..=1 {
-                    for b in -1..=1 {
-                        for c in -1..=1 {
+                let mut dmin = f32::MAX;
+                for a in -2..=2 {
+                    for b in -2..=2 {
+                        for c in -2..=2 {
                             if let Some(v) = hash.get(&[k[0] + a, k[1] + b, k[2] + c]) {
-                                if v.iter().any(|q| (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2) < r2) {
-                                    return true;
+                                for q in v {
+                                    dmin = dmin.min((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2));
                                 }
                             }
                         }
                     }
                 }
-                false
+                (dmin < r2, dmin < rf2)
             })
-            .collect()
+            .collect();
+        (flags.iter().map(|f| f.0).collect(), flags.iter().map(|f| f.1).collect())
     };
     let vis0 = vis;
     let vis_new: Vec<u8> = {
@@ -411,6 +413,54 @@ pub fn build(t: &Topo, cur: &[[f32; 3]], vis: &[u8], dx: f32, max_quads: usize, 
             },
         )
         .collect();
+    // partículas soltas do alvo coladas ao projétil também somem (a munição toca direto a cratera)
+    // fragmentos do próprio projétil (camisa/miolo esmigalhados) colados ao corpo dele também somem
+    let results: Vec<(Vec<Face>, Vec<u32>)> = {
+        let h = 4.0 * dx;
+        let key = |p: [f32; 3]| [(p[0] / h).floor() as i32, (p[1] / h).floor() as i32, (p[2] / h).floor() as i32];
+        let pos = |e: usize| {
+            let (r, d) = (t.refx[e], disp[e]);
+            [r[0] + d[0], r[1] + d[1], r[2] + d[2]]
+        };
+        let mut hash: FxMap<[i32; 3], Vec<[f32; 3]>> = FxMap::default();
+        for e in 0..total {
+            if t.grp[e] == 1 && att[e] {
+                let p = pos(e);
+                hash.entry(key(p)).or_default().push(p);
+            }
+        }
+        let r2 = (4.0 * dx) * (4.0 * dx);
+        results
+            .into_iter()
+            .map(|(f, l)| {
+                let keep: Vec<u32> = l
+                    .into_iter()
+                    .filter(|&e| {
+                        let e = e as usize;
+                        if near_far[e] {
+                            return false;
+                        }
+                        let p = pos(e);
+                        let k = key(p);
+                        for a in -1..=1 {
+                            for b in -1..=1 {
+                                for c in -1..=1 {
+                                    if let Some(v) = hash.get(&[k[0] + a, k[1] + b, k[2] + c]) {
+                                        if v.iter().any(|q| (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2) < r2) {
+                                            return false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        true
+                    })
+                    .map(|e| e as u32)
+                    .collect();
+                (f, keep)
+            })
+            .collect()
+    };
     let nq: usize = results.iter().map(|r| r.0.len()).sum();
     if nq > max_quads {
         return None;

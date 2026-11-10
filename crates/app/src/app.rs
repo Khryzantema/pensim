@@ -391,6 +391,12 @@ impl PenSim {
                 _ => Ws::Projectile,
             };
         }
+        if let Some(v) = std::env::var("PENSIM_DUR").ok().and_then(|v| v.parse::<f64>().ok()) {
+            me.dur_us = v;
+        }
+        if let Some(v) = std::env::var("PENSIM_NODES").ok().and_then(|v| v.parse::<f64>().ok()) {
+            me.res_nodes = v;
+        }
         if let Some(v) = std::env::var("PENSIM_DX").ok().and_then(|v| v.parse::<f64>().ok()) {
             me.cfg.dx = v / 1e3;
         }
