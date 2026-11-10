@@ -133,6 +133,8 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
         .filter_map(|&nd| {
             let xp = c.x[nd as usize];
             let my = node_elems(nd);
+            // partícula: nó sem elemento vivo (sobra de erosão)
+            let particle = my.iter().next().is_none();
             let kc = key(xp);
             let mut best: Option<(f64, usize, [f64; 4])> = None;
             for dxk in -1..=1 {
@@ -145,7 +147,10 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
                                 continue;
                             }
                             let d = dot(sub(xp, f.cen), f.nrm);
-                            if d >= 0.0 || d < -f.depth {
+                            // partícula é procurada mais fundo (até um elemento inteiro): ela pode ter
+                            // nascido dentro do outro corpo quando o elemento dela foi apagado
+                            let depth = f.depth;
+                            if d >= 0.0 || d < -depth {
                                 continue;
                             }
                             // vizinho topológico: um elemento vivo do nó contém um nó da face
@@ -188,14 +193,22 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
             let vf0 = [0, 1, 2].map(|a| (0..4).map(|k| w[k] * c.v[f.n[k] as usize][a]).sum::<f64>());
             let vn0 = dot(sub(c.v[nd as usize], vf0), f.nrm);
             let prev = c.prev_offset[nd as usize];
+            // partícula: a penetração com que ela nasceu é descontada aos poucos (5% por passo),
+            // então ela sai de dentro do outro corpo devagar, sem esmagar a borda da cratera
             let offset = if prev.is_nan() {
                 let reach = 2.0 * vn0.abs() * c.dt + 1e-3 * f.depth;
                 (pen - reach).max(0.0)
+            } else if particle {
+                (prev * 0.95).min(pen)
             } else {
                 prev.min(pen)
             };
             let eff = pen - offset;
-            let k = f.k.max(SOFT * c.mass[nd as usize] / (c.dt * c.dt));
+            let mn = c.mass[nd as usize];
+            // massa efetiva do par nó × face (a reação vai para os nós da face, que podem ser leves)
+            let mf: f64 = (0..4).map(|k| w[k] * c.mass[f.n[k] as usize]).sum::<f64>().max(1e-30);
+            let meff = mn * mf / (mn + mf);
+            let k = f.k.max(SOFT * mn / (c.dt * c.dt)).min(if particle { 0.25 * meff / (c.dt * c.dt) } else { f64::INFINITY });
             let fnm = k * eff;
             let mut force = f.nrm.map(|v| v * fnm);
             // atrito de Coulomb, limitado a não inverter a velocidade relativa no passo

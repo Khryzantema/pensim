@@ -2230,7 +2230,8 @@ impl PenSim {
             let mut plain = vec![false; n * masks.len()];
             for (mi, &m) in masks.iter().enumerate() {
                 for i in 0..n {
-                    let ry = flip(snap.ref_pos[i], m)[1];
+                    // núcleo novo: posição atual (o projétil pode girar; o corte fica parado no espaço)
+                    let ry = if snap.hex.is_some() { ext_pos[mi * n + i][1] } else { flip(snap.ref_pos[i], m)[1] };
                     if self.section && !in_section(ry) {
                         continue;
                     }
@@ -2271,7 +2272,6 @@ impl PenSim {
                         let (hl, hp, ht, sec) = (self.hide_loose, self.hide_proj, self.hide_target, self.section);
                         let parts = snap.parts.clone();
                         let refp = snap.ref_pos.clone();
-                        let masks2 = masks.clone();
                         let state = |mi: usize, e: usize| -> u8 {
                             if alive[e / 8] & (1 << (e % 8)) == 0 {
                                 return 0;
@@ -2282,7 +2282,7 @@ impl PenSim {
                                 return 0;
                             }
                             if sec {
-                                let cy = h.iter().map(|&k| flip(refp[k as usize], masks2[mi])[1]).sum::<f32>() / 8.0;
+                                let cy = h.iter().map(|&k| ext_pos[mi * n + k as usize][1]).sum::<f32>() / 8.0;
                                 if !in_section(cy) {
                                     return 2;
                                 }
@@ -2301,13 +2301,13 @@ impl PenSim {
                             m
                         };
                         let mut parts_idx: Vec<u32> = Vec::new();
-                        for (mi, &mm) in masks.iter().enumerate() {
+                        for mi in 0..masks.len() {
                             for i in 0..n {
                                 if f.damage[i] < 1.0 || hl {
                                     continue;
                                 }
                                 let is_p = snap.parts[i] < np8;
-                                if (is_p && hp) || (!is_p && ht) || (sec && !in_section(flip(snap.ref_pos[i], mm)[1])) {
+                                if (is_p && hp) || (!is_p && ht) || (sec && !in_section(ext_pos[mi * n + i][1])) {
                                     continue;
                                 }
                                 parts_idx.push((mi * n + i) as u32);
