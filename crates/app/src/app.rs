@@ -123,6 +123,11 @@ struct Preview {
     /// espaçamento usado no desenho (≥ o da simulação quando a malha real é pesada demais)
     dx: f32,
     note: Option<String>,
+    /// núcleo de elementos finitos: hexaedros da malha real (as faces saem deles)
+    hex: Option<Arc<Vec<[u32; 8]>>>,
+    nb: Option<Arc<Vec<[u32; 6]>>>,
+    /// faces em cache: (corte ligado, lado do corte) → malha
+    surf: std::cell::RefCell<Option<((bool, bool), Arc<crate::mesh::SurfMesh>)>>,
 }
 
 type Key = (Design, [f64; 9], [bool; 4]);
@@ -136,6 +141,7 @@ struct Loaded {
     surface: Arc<Vec<bool>>,
     normals: Arc<Vec<[f32; 3]>>,
     ref_pos: Arc<Vec<[f32; 3]>>,
+    hex: Option<Arc<Vec<[u32; 8]>>>,
     sym: u8,
     n: usize,
     dt: f64,
@@ -382,7 +388,7 @@ impl PenSim {
             speed: 1.0,
             play_pos: 0.0,
             started_at: std::time::Instant::now(),
-            preview: Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: None, dx: 0.0015, note: None },
+            preview: Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: None, dx: 0.0015, note: None, hex: None, nb: None, surf: Default::default() },
             preview_key: None,
         };
         // ganchos de teste visual (captura de telas): PENSIM_WS, PENSIM_SKETCH, PENSIM_DEMO
@@ -489,6 +495,9 @@ impl PenSim {
         if std::env::var("PENSIM_FACES").is_ok() {
             me.faces = true;
         }
+        if std::env::var("PENSIM_PEEK").is_ok() {
+            me.peek3d = true;
+        }
         if std::env::var("PENSIM_NOPART").is_ok() {
             me.particles = false;
         }
@@ -557,6 +566,42 @@ impl PenSim {
             note = Some(format!("Prévia simplificada · malha real ≈ {:.1} mi nós", est / 1e6));
         }
         let pdx = pcfg.dx as f32;
+        if pcfg.fem {
+            // a malha de hexaedros que vai ser simulada (modelo inteiro, sem simetria)
+            pcfg.symmetry = false;
+            match pensim_core::fem::build::build(&pcfg) {
+                Ok(st) => {
+                    let (sa, ca) = (self.cfg.obliquity_deg.to_radians().sin() as f32, self.cfg.obliquity_deg.to_radians().cos() as f32);
+                    let pos: Vec<[f32; 3]> = st.mesh.x.iter().map(|p| {
+                        let (x, z) = (p[0] as f32, p[2] as f32);
+                        [ca * x - sa * z, p[1] as f32, -(sa * x + ca * z)]
+                    }).collect();
+                    let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+                    for p in &pos {
+                        for k in 0..3 {
+                            mn[k] = mn[k].min(p[k]);
+                            mx[k] = mx[k].max(p[k]);
+                        }
+                    }
+                    let center = [0, 1, 2].map(|k| 0.5 * (mn[k] + mx[k]));
+                    let radius = (0..3).map(|k| (mx[k] - mn[k]).powi(2)).sum::<f32>().sqrt() * 0.5;
+                    let mut part = vec![u8::MAX; pos.len()];
+                    for (e, h) in st.mesh.hex.iter().enumerate() {
+                        for &k in h {
+                            part[k as usize] = part[k as usize].min(st.mesh.part[e]);
+                        }
+                    }
+                    let nb = Arc::new(crate::mesh::hex_neighbors(&st.mesh.hex));
+                    let ne = st.mesh.n_elems();
+                    let note = Some(note.unwrap_or_else(|| format!("Modelo · {} elementos", ne)));
+                    self.preview = Preview { pos, part, idx: vec![], center, radius, err: None, dx: pdx, note, hex: Some(Arc::new(st.mesh.hex)), nb: Some(nb), surf: Default::default() };
+                }
+                Err(e) => {
+                    self.preview = Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: Some(e), dx: 0.0015, note: None, hex: None, nb: None, surf: Default::default() };
+                }
+            }
+            return;
+        }
         match Model::build_full(&pcfg) {
             Ok(m) => {
                 // mesmo referencial do resultado: projétil na horizontal, alvo inclinado
@@ -575,10 +620,10 @@ impl PenSim {
                 let center = [0, 1, 2].map(|k| 0.5 * (mn[k] + mx[k]));
                 let radius = (0..3).map(|k| (mx[k] - mn[k]).powi(2)).sum::<f32>().sqrt() * 0.5;
                 let idx = (0..pos.len() as u32).collect();
-                self.preview = Preview { pos, part: m.part, idx, center, radius, err: None, dx: pdx, note };
+                self.preview = Preview { pos, part: m.part, idx, center, radius, err: None, dx: pdx, note, hex: None, nb: None, surf: Default::default() };
             }
             Err(e) => {
-                self.preview = Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: Some(e), dx: 0.0015, note: None };
+                self.preview = Preview { pos: vec![], part: vec![], idx: vec![], center: [0.0; 3], radius: 0.05, err: Some(e), dx: 0.0015, note: None, hex: None, nb: None, surf: Default::default() };
             }
         }
     }
@@ -636,7 +681,7 @@ impl PenSim {
 
     fn snapshot(&self) -> Snap {
         if let (None, Some(l)) = (&self.job, &self.loaded) {
-            return Snap { frames: l.frames.clone(), back_x: l.back_x, live: Some(l.outcome.clone()), done: true, error: None, n: l.n, dt: l.dt, steps: l.steps, wall: l.wall, sim_time: l.t_end, progress: 1.0, t_end: l.t_end, sym: l.sym, normals: l.normals.clone(), parts: l.parts.clone(), surface: l.surface.clone(), ref_pos: l.ref_pos.clone(), hex: None };
+            return Snap { frames: l.frames.clone(), back_x: l.back_x, live: Some(l.outcome.clone()), done: true, error: None, n: l.n, dt: l.dt, steps: l.steps, wall: l.wall, sim_time: l.t_end, progress: 1.0, t_end: l.t_end, sym: l.sym, normals: l.normals.clone(), parts: l.parts.clone(), surface: l.surface.clone(), ref_pos: l.ref_pos.clone(), hex: l.hex.clone() };
         }
         match &self.job {
             Some(j) => {
@@ -1742,7 +1787,7 @@ impl PenSim {
         let data = pensim_core::save::SaveData {
             title, velocity: cfg.velocity, obliquity_deg: cfg.obliquity_deg, dx: cfg.dx, scale: self.started_scale, design: cfg.design.clone(),
             n_phys: snap.n, dt: snap.dt, steps: snap.steps, wall: snap.wall, t_end: snap.t_end, back_x: snap.back_x, sym: snap.sym, outcome,
-            parts: snap.parts.to_vec(), surface: snap.surface.to_vec(), normals: snap.normals.to_vec(), ref_pos: snap.ref_pos.to_vec(), frames: snap.frames.clone(),
+            parts: snap.parts.to_vec(), surface: snap.surface.to_vec(), normals: snap.normals.to_vec(), ref_pos: snap.ref_pos.to_vec(), hex: snap.hex.as_deref().cloned().unwrap_or_default(), frames: snap.frames.clone(),
         };
         let path = saves_dir().join(format!("sim_{secs}.psim"));
         self.save_msg = match pensim_core::save::write(&path, &data) {
@@ -1785,7 +1830,7 @@ impl PenSim {
         self.save_msg = format!("Aberto: {}", d.title);
         self.loaded = Some(Loaded {
             scale: d.scale,
-            title: d.title, frames: d.frames, parts: Arc::new(d.parts), surface: Arc::new(d.surface), normals: Arc::new(d.normals), ref_pos: Arc::new(d.ref_pos),
+            title: d.title, frames: d.frames, parts: Arc::new(d.parts), surface: Arc::new(d.surface), normals: Arc::new(d.normals), ref_pos: Arc::new(d.ref_pos), hex: (!d.hex.is_empty()).then(|| Arc::new(d.hex)),
             sym: d.sym, n: d.n_phys, dt: d.dt, steps: d.steps, wall: d.wall, t_end: d.t_end, back_x: d.back_x, outcome: d.outcome,
         });
         self.ws = Ws::Results;
@@ -2300,6 +2345,37 @@ impl PenSim {
                 }
             }
             painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, format!("t = {:.0} µs", f.time * 1e6 / self.started_scale.max(1e-6)), FontId::monospace(15.0), Color32::from_gray(30));
+        } else if let (Some(hex), Some(nb)) = (p.hex.clone(), p.nb.clone()) {
+            // pré-visualização do núcleo de elementos finitos: faces da malha real
+            let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
+            let sk = (self.section, keep_pos);
+            let cached = p.surf.borrow().as_ref().filter(|(k, _)| *k == sk).map(|(_, m)| m.clone());
+            let sm = cached.unwrap_or_else(|| {
+                let sec = self.section;
+                let ppos = &p.pos;
+                let state = |_: usize, e: usize| -> u8 {
+                    if sec {
+                        let cy = hex[e].iter().map(|&k| ppos[k as usize][1]).sum::<f32>() / 8.0;
+                        if !in_section(cy) {
+                            return 2;
+                        }
+                    }
+                    1
+                };
+                let m = Arc::new(crate::mesh::from_hex(&hex, &nb, p.pos.len(), &[0], &p.pos, &state, &|_| 0, &[]));
+                *p.surf.borrow_mut() = Some((sk, m.clone()));
+                m
+            });
+            let (cr, cu, ce) = self.cam.basis();
+            let ld = {
+                let v = [ce[0] * 0.8 + cu[0] * 0.55 - cr[0] * 0.45, ce[1] * 0.8 + cu[1] * 0.55 - cr[1] * 0.45, ce[2] * 0.8 + cu[2] * 0.55 - cr[2] * 0.45];
+                let m = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                [v[0] / m, v[1] / m, v[2] / m]
+            };
+            let gray = Color32::from_rgb(150, 156, 166);
+            view3d::render_surf(&painter, &view, &sm, ld, &|e, cut| if cut { gray } else { mats[(p.part[e] as usize).min(mats.len() - 1)] }, None);
+            let label = p.note.clone().unwrap_or_default();
+            painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, label, FontId::proportional(13.0), Color32::from_gray(60));
         } else {
             let mats: Vec<Color32> = self.cfg.design.materials().iter().map(|m| mat_color(m.name)).collect();
             let idx: Vec<u32> = if self.section { p.idx.iter().cloned().filter(|&i| in_section(p.pos[i as usize][1])).collect() } else { p.idx.clone() };

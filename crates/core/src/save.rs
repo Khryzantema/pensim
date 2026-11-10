@@ -6,7 +6,7 @@ use crate::store::PackedFrame;
 use std::sync::Arc;
 
 const MAGIC: &[u8; 4] = b"PSIM";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 pub struct SaveData {
     pub title: String,
@@ -28,6 +28,8 @@ pub struct SaveData {
     pub surface: Vec<bool>,
     pub normals: Vec<[f32; 3]>,
     pub ref_pos: Vec<[f32; 3]>,
+    /// hexaedros (núcleo de elementos finitos; vazio no antigo)
+    pub hex: Vec<[u32; 8]>,
     pub frames: Vec<Arc<PackedFrame>>,
 }
 
@@ -135,11 +137,23 @@ pub fn write(path: &std::path::Path, d: &SaveData) -> std::io::Result<u64> {
     for q in d.normals.iter().chain(d.ref_pos.iter()) {
         for v in q { g.extend_from_slice(&v.to_le_bytes()); }
     }
+    // v5: hexaedros + elementos vivos por quadro
+    g.extend_from_slice(&(d.hex.len() as u64).to_le_bytes());
+    for h in &d.hex {
+        for k in h {
+            g.extend_from_slice(&k.to_le_bytes());
+        }
+    }
     let gz = zstd::bulk::compress(&g, 3).unwrap_or(g);
     w.u64(gz.len() as u64);
     w.0.extend_from_slice(&gz);
     for f in &d.frames {
         f.write_to(&mut w.0);
+        let al = f.alive.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+        let z = zstd::bulk::compress(al, 3).unwrap_or_default();
+        w.u64(al.len() as u64);
+        w.u64(z.len() as u64);
+        w.0.extend_from_slice(&z);
     }
     std::fs::write(path, &w.0)?;
     Ok(w.0.len() as u64)
@@ -237,14 +251,30 @@ pub fn read(path: &std::path::Path) -> Option<SaveData> {
     };
     let normals = vec3(&mut gr)?;
     let ref_pos = vec3(&mut gr)?;
+    let mut hex = Vec::new();
+    if ver >= 5 {
+        let nh = gr.u64()? as usize;
+        let raw = gr.take(nh * 32)?;
+        hex = raw.chunks_exact(32).map(|c| std::array::from_fn(|k| u32::from_le_bytes(c[4 * k..4 * k + 4].try_into().unwrap()))).collect();
+    }
     let mut rest: &[u8] = r.0;
     let mut frames = Vec::with_capacity(nframes);
     for _ in 0..nframes {
-        frames.push(Arc::new(PackedFrame::read_from(&mut rest)?));
+        let mut f = PackedFrame::read_from(&mut rest)?;
+        if ver >= 5 {
+            let mut rr = R(rest);
+            let (raw_len, zl) = (rr.u64()? as usize, rr.u64()? as usize);
+            let z = rr.take(zl)?;
+            rest = rr.0;
+            if raw_len > 0 {
+                f.alive = Some(Arc::new(zstd::bulk::decompress(z, raw_len).ok()?));
+            }
+        }
+        frames.push(Arc::new(f));
     }
     Some(SaveData {
         title, velocity, obliquity_deg, dx, scale,
         design: Design { projectile: Projectile { profile, material: pm, core, regions }, layers, objects },
-        n_phys, dt, steps, wall, t_end, back_x, sym, outcome, parts, surface, normals, ref_pos, frames,
+        n_phys, dt, steps, wall, t_end, back_x, sym, outcome, parts, surface, normals, ref_pos, hex, frames,
     })
 }
