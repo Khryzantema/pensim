@@ -1,7 +1,7 @@
 # PenSim — projeto do novo núcleo de simulação
 
 Documento de passagem. Quem continuar deve conseguir trabalhar só com este arquivo e o código.
-Estado: **só projeto, nada disto está implementado.**
+Estado: **fase 1 em andamento** (`crates/core/src/fem/`, testes em `crates/core/tests/fem_verify.rs`).
 
 ## 1. Decisão
 
@@ -264,3 +264,18 @@ Entra na fase 4, junto com a ligação do app ao núcleo novo.
 - Último ajuste em `mesh.rs` (esconder fragmentos do projétil colados nele) compila e passa
   nos testes, mas **não foi conferido em captura de tela**. Vai ser descartado com o `mesh.rs`.
 - AppImage: não gerado, bloqueado pelo classificador. Entrega atual é `.tar.gz`.
+
+## 11. Progresso da fase 1
+
+Passam: onda confinada (erro 0,42%), onda em barra livre (0,25%), tração elástica (0,05%),
+tração plástica perfeita (0,00%), energia em corpo livre com Johnson-Cook + Mie-Grüneisen
+(1,6%, hourglass 2,1% da interna).
+
+Falham, por causa da malha (o solver nem rodou nesses casos):
+- **Encaixe da borda gera elementos achatados.** Jacobiano mínimo 0,02 na esfera e 0,05 no
+  cilindro (critério > 0,2). Causa: células em degrau com duas faces expostas têm cantos
+  projetados quase em cima um do outro. Próximo passo: trocar o encaixe por malha
+  "butterfly"/O-grid (núcleo cúbico + 6 blocos projetados), que é o padrão para esfera e
+  cilindro, ou no mínimo projetar só nós de faces cuja normal está a menos de ~45° da normal
+  real e suavizar mais.
+- Depois disso: rodar `rigid_wall_symmetry_and_energy` (Taylor inteiro/½/¼).

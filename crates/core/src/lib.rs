@@ -8,6 +8,7 @@
 //! Não é um código validado de engenharia: é um modelo didático/qualitativo.
 pub mod ammo;
 pub mod config;
+pub mod fem;
 pub mod geometry;
 pub mod material;
 pub mod save;
