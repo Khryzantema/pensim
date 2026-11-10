@@ -19,5 +19,6 @@ fn main() {
         if p - last > 0.1 { last = p; let o = sim.outcome(); eprintln!("  {:.0}% em {:.1} s (passo {}, dt {:.2e}) v_res {:.0} {:?}", p * 100.0, t.elapsed().as_secs_f64(), sim.steps(), sim.dt(), o.v_residual, o.kind); }
     }
     let o = sim.outcome();
-    eprintln!("fim {:.1} s: {:?} v_res {:.0} m/s, energia {:.2}%, erodidos {}", t.elapsed().as_secs_f64(), o.kind, o.v_residual, o.energy_error_pct, sim.fem.n_eroded);
+    let sz: usize = sim.frames.iter().map(|f| f.size_bytes()).sum();
+    eprintln!("fim {:.1} s: {:?} v_res {:.0} m/s, energia {:.2}%, erodidos {}, {} quadros ({:.1} MB)", t.elapsed().as_secs_f64(), o.kind, o.v_residual, o.energy_error_pct, sim.fem.n_eroded, sim.frames.len(), sz as f64 / 1e6);
 }

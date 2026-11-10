@@ -26,6 +26,10 @@ pub struct FemSim {
     t_end: f64,
     frame_dt: f64,
     next_frame: f64,
+    /// quadros extras durante o impacto: intervalo mínimo e estado do último quadro gravado
+    fast_dt: f64,
+    last_rec_t: f64,
+    last_ke_p: f64,
     ke0: f64,
     m_target: f64,
 }
@@ -91,6 +95,7 @@ impl FemSim {
         };
         let t_end = cfg.t_end();
         let frame_dt = t_end / cfg.n_frames.max(2) as f64;
+        let fast_dt = frame_dt / 10.0;
         let m_target = (0..n).filter(|&i| node_part[i] >= n_proj).map(|i| fem.masses()[i]).sum();
         let mut s = FemSim {
             ke0: fem.e0,
@@ -109,6 +114,9 @@ impl FemSim {
             t_end,
             frame_dt,
             next_frame: 0.0,
+            fast_dt,
+            last_rec_t: f64::NEG_INFINITY,
+            last_ke_p: 0.0,
             m_target,
         };
         s.record();
@@ -169,6 +177,13 @@ impl FemSim {
             }
             if self.fem.time >= self.next_frame || self.done() {
                 self.record();
+            } else if self.fem.time - self.last_rec_t >= self.fast_dt {
+                // durante o impacto (o projétil perde energia rápido) grava um quadro a cada
+                // `fast_dt`: a repetição mostra o impacto em câmera lenta e o resto no ritmo normal
+                let ke = self.proj_ke();
+                if (ke - self.last_ke_p).abs() > 0.002 * self.ke0.max(1e-30) {
+                    self.record();
+                }
             }
         }
     }
@@ -177,6 +192,18 @@ impl FemSim {
     pub fn finish_now(&mut self) {
         self.t_end = self.fem.time;
         self.record();
+    }
+
+    fn proj_ke(&self) -> f64 {
+        let f = &self.fem;
+        let m = f.masses();
+        (0..f.n_nodes())
+            .filter(|&i| self.node_part[i] < self.n_proj)
+            .map(|i| {
+                let v = f.v[i];
+                0.5 * m[i] * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+            })
+            .sum()
     }
 
     fn record(&mut self) {
@@ -213,7 +240,11 @@ impl FemSim {
             e_fracture: 0.0,
             alive: Some(Arc::new(f.alive_bits())),
         };
-        self.frames.push(PackedFrame::pack(&frame, false));
+        // comprimido (posição em 16 bits, campos em 8): com os quadros extras do impacto o
+        // número de quadros cresce, e cru não caberia na memória do celular
+        self.frames.push(PackedFrame::pack(&frame, true));
+        self.last_rec_t = f.time;
+        self.last_ke_p = ke_p;
         while self.next_frame <= f.time + 1e-15 {
             self.next_frame += self.frame_dt;
         }
