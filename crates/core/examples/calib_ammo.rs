@@ -19,6 +19,8 @@ fn main() {
     c.dx = 1.5e-3;
     c.obliquity_deg = env("A", 0.0);
     c.velocity = env("V", a.velocity);
+    // SPIN em mil rpm reais; modelo em escala s: ω_modelo = ω_real / s
+    c.spin = env("SPIN", 0.0) * 1000.0 * std::f64::consts::TAU / 60.0 / s;
     let plate_mm = env("PLATE", a.plate_mm);
     c.design.layers[0].thickness = plate_mm * 1e-3 * s;
     adjust_rha(&mut c.design.layers[0].material, plate_mm * 1e-3);
@@ -63,6 +65,38 @@ fn main() {
     md.friction = 0.1;
     let t0 = std::time::Instant::now();
     let mut sim = Fem::new(md);
+    {
+        // giro inicial em torno do eixo de voo
+        let d = [c.obliquity().cos(), 0.0, -c.obliquity().sin()];
+        let (mut l, mut iax, mut cg, mut mt, mut vc) = (0.0, 0.0, [0.0; 3], 0.0, [0.0; 3]);
+        for i in 0..sim.n_nodes() {
+            if node_part[i] < np {
+                let mi = sim.node_mass(i);
+                for k in 0..3 {
+                    cg[k] += mi * sim.x[i][k];
+                    vc[k] += mi * sim.v[i][k];
+                }
+                mt += mi;
+            }
+        }
+        cg = cg.map(|x| x / mt);
+        vc = vc.map(|x| x / mt);
+        for i in 0..sim.n_nodes() {
+            if node_part[i] < np {
+                let mi = sim.node_mass(i);
+                let r = [sim.x[i][0] - cg[0], sim.x[i][1] - cg[1], sim.x[i][2] - cg[2]];
+                let vr = [sim.v[i][0] - vc[0], sim.v[i][1] - vc[1], sim.v[i][2] - vc[2]];
+                let cr = [r[1] * vr[2] - r[2] * vr[1], r[2] * vr[0] - r[0] * vr[2], r[0] * vr[1] - r[1] * vr[0]];
+                l += mi * (cr[0] * d[0] + cr[1] * d[1] + cr[2] * d[2]);
+                let rd = r[0] * d[0] + r[1] * d[1] + r[2] * d[2];
+                iax += mi * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2] - rd * rd);
+            }
+        }
+        println!("GIRO inicial ω = {:.0} rad/s (modelo), {:.0} mil rpm reais", l / iax, l / iax * s * 60.0 / std::f64::consts::TAU / 1000.0);
+        if env("ONLY_INIT", 0.0) > 0.5 {
+            return;
+        }
+    }
     sim.run_until(dur);
     let (mut p, mut m) = ([0.0; 3], 0.0);
     for i in 0..sim.n_nodes() {
@@ -75,5 +109,33 @@ fn main() {
         }
     }
     let v = p.map(|x| x / m);
+    // momento angular do projétil em torno do eixo de voo (no fim)
+    {
+        let d = [c.obliquity().cos(), 0.0, -c.obliquity().sin()];
+        let (mut cg, mut mt) = ([0.0; 3], 0.0);
+        for i in 0..sim.n_nodes() {
+            if node_part[i] < np {
+                let mi = sim.node_mass(i);
+                for k in 0..3 {
+                    cg[k] += mi * sim.x[i][k];
+                }
+                mt += mi;
+            }
+        }
+        cg = cg.map(|x| x / mt);
+        let (mut l, mut iax) = (0.0, 0.0);
+        for i in 0..sim.n_nodes() {
+            if node_part[i] < np {
+                let mi = sim.node_mass(i);
+                let r = [sim.x[i][0] - cg[0], sim.x[i][1] - cg[1], sim.x[i][2] - cg[2]];
+                let vr = [sim.v[i][0] - v[0], sim.v[i][1] - v[1], sim.v[i][2] - v[2]];
+                let c = [r[1] * vr[2] - r[2] * vr[1], r[2] * vr[0] - r[0] * vr[2], r[0] * vr[1] - r[1] * vr[0]];
+                l += mi * (c[0] * d[0] + c[1] * d[1] + c[2] * d[2]);
+                let rd = r[0] * d[0] + r[1] * d[1] + r[2] * d[2];
+                iax += mi * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2] - rd * rd);
+            }
+        }
+        println!("GIRO final ω = {:.0} rad/s (modelo), {:.0} mil rpm reais", l / iax, l / iax * s * 60.0 / std::f64::consts::TAU / 1000.0);
+    }
     println!("RESULT {} {:.3} {:.3} {:.3} {} {:.4} {:.2}", name, v[0], v[1], v[2], sim.n_eroded, 100.0 * sim.energy.balance(sim.e0) / sim.e0, t0.elapsed().as_secs_f64());
 }

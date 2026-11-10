@@ -130,7 +130,7 @@ struct Preview {
     surf: std::cell::RefCell<Option<((bool, bool), Arc<crate::mesh::SurfMesh>)>>,
 }
 
-type Key = (Design, [f64; 9], [bool; 4]);
+type Key = (Design, [f64; 10], [bool; 4]);
 
 /// Simulação aberta de um arquivo salvo.
 struct Loaded {
@@ -201,6 +201,8 @@ pub struct PenSim {
     cfg: Config,
     ammo_idx: usize,
     ammo_scale: f64,
+    /// rotação do projétil [mil rpm, real]
+    spin_krpm: f64,
     /// mostra as partículas (nós soltos) no modo faces
     particles: bool,
     /// duração simulada em µs reais (a simulação para neste tempo)
@@ -334,6 +336,7 @@ impl PenSim {
             cfg,
             ammo_idx,
             ammo_scale: 1.0,
+            spin_krpm: 0.0,
             particles: true,
             dur_us: 1000.0,
             res_nodes: 8.0,
@@ -520,7 +523,7 @@ impl PenSim {
 
     fn key(&self) -> Key {
         let c = &self.cfg;
-        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, self.dur_us, c.noise, c.jitter, c.sleep_ratio, self.res_nodes], [c.clamp_edges, c.symmetry, c.state_based, c.fem])
+        (c.design.clone(), [c.dx, c.horizon_m, c.velocity, c.obliquity_deg, self.dur_us, c.noise, c.jitter, c.sleep_ratio, self.res_nodes, self.spin_krpm], [c.clamp_edges, c.symmetry, c.state_based, c.fem])
     }
 
     /// Escala interna (invisível): faz o diâmetro do projétil ter `res_nodes` nós na malha.
@@ -535,6 +538,8 @@ impl PenSim {
         let f = self.model_scale();
         let mut c = self.cfg.clone();
         c.duration = self.dur_us.max(1.0) * 1e-6 * f;
+        // modelo em escala f: o tempo escala com f, a velocidade angular com 1/f
+        c.spin = self.spin_krpm * 1000.0 * std::f64::consts::TAU / 60.0 / f.max(1e-9);
         // RHA: dureza pela espessura real da chapa (chapas grossas são mais macias)
         let u = self.ammo_scale.max(1e-6);
         for l in c.design.layers.iter_mut() {
@@ -1272,6 +1277,23 @@ impl PenSim {
                 if (self.cfg.velocity - vb).abs() > 0.5 && ui.small_button(format!("usar a de boca ({vb:.0} m/s)")).clicked() {
                     self.cfg.velocity = vb;
                 }
+            }
+            ui.add_space(6.0);
+            ui.label("Rotação do projétil (teste)");
+            ui.add(egui::Slider::new(&mut self.spin_krpm, 0.0..=400.0).suffix(" mil rpm").fixed_decimals(0).clamping(egui::SliderClamping::Never));
+            // passo de raia típico ≈ 30 calibres: voltas/s = v / (30·D)
+            let d_real = 2.0 * self.cfg.design.projectile.max_radius() / self.ammo_scale.max(1e-9);
+            let typ = if d_real > 0.0 { self.cfg.velocity / (30.0 * d_real) * 60.0 / 1000.0 } else { 0.0 };
+            ui.horizontal_wrapped(|ui| {
+                if ui.small_button(format!("típico ({typ:.0} mil rpm)")).clicked() {
+                    self.spin_krpm = typ.round();
+                }
+                if self.spin_krpm > 0.0 && ui.small_button("sem rotação").clicked() {
+                    self.spin_krpm = 0.0;
+                }
+            });
+            if self.spin_krpm > 0.0 {
+                ui.weak("Com rotação o modelo é simulado inteiro (sem simetria): fica 2 a 4× mais lento. Só no núcleo de elementos finitos.");
             }
         });
     }

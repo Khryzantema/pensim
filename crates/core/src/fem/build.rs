@@ -31,8 +31,9 @@ pub fn build(cfg: &Config) -> Result<Setup, String> {
     }
     let dx = cfg.dx;
     let alpha = cfg.obliquity();
-    let symz = cfg.symmetry && alpha.abs() < 1e-9 && d_cfg.objects.is_empty();
-    let sym = Symmetry { y0: cfg.symmetry, z0: symz };
+    let spin = cfg.spin != 0.0;
+    let symz = cfg.symmetry && !spin && alpha.abs() < 1e-9 && d_cfg.objects.is_empty();
+    let sym = Symmetry { y0: cfg.symmetry && !spin, z0: symz };
     let n_proj = d_cfg.n_proj_parts();
     let lib_mats = d_cfg.materials();
     let mut mats: Vec<FemMat> = lib_mats[..n_proj].iter().map(from_library).collect();
@@ -141,6 +142,11 @@ pub fn build(cfg: &Config) -> Result<Setup, String> {
     }
     let d = [alpha.cos(), 0.0, -alpha.sin()];
     let ev = [alpha.sin(), 0.0, alpha.cos()];
+    // velocidade de giro em torno do eixo de voo: ω d × r = ω (u·ev − v·ey), com (u, v) locais
+    let spin_v: Vec<[f64; 3]> = p.x.iter().map(|q| {
+        let (u, v) = (q[1], q[2]);
+        [cfg.spin * u * ev[0], -cfg.spin * v, cfg.spin * u * ev[2]]
+    }).collect();
     // local (a, u = y, v = z) → mundo: −d·a + ev·v, u
     for q in &mut p.x {
         let (a, u, v) = (q[0], q[1], q[2]);
@@ -157,7 +163,16 @@ pub fn build(cfg: &Config) -> Result<Setup, String> {
     p.hex = p.hex.iter().map(|h| mesh::orient(&p.x, *h)).collect();
     all.append(&p);
     let n = all.n_nodes();
-    let v0: Vec<[f64; 3]> = (0..n).map(|i| if i >= n_target_nodes { [cfg.velocity * d[0], 0.0, cfg.velocity * d[2]] } else { [0.0; 3] }).collect();
+    let v0: Vec<[f64; 3]> = (0..n)
+        .map(|i| {
+            if i >= n_target_nodes {
+                let sv = spin_v[i - n_target_nodes];
+                [cfg.velocity * d[0] + sv[0], sv[1], cfg.velocity * d[2] + sv[2]]
+            } else {
+                [0.0; 3]
+            }
+        })
+        .collect();
     // as peças do alvo começam depois das do projétil: renumera (o alvo foi montado primeiro)
     let nt_parts = mats.len() - n_proj;
     let _ = nt_parts;

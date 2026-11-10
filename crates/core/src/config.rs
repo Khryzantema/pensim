@@ -353,6 +353,9 @@ pub struct Config {
     pub duration: f64,
     /// núcleo novo de elementos finitos (false = peridinâmica antiga)
     pub fem: bool,
+    /// rotação do projétil em torno do eixo de voo [rad/s, no tempo do modelo]; ≠ 0 desliga a
+    /// simetria (o giro não é simétrico por espelho)
+    pub spin: f64,
     pub n_frames: usize,
     /// simula só 1/2 (obliquidade ≠ 0) ou 1/4 (impacto normal) do modelo, com nós-fantasma
     pub symmetry: bool,
@@ -432,6 +435,7 @@ impl Preset {
             time_factor: 1.0,
             duration: 0.0,
             fem: true,
+            spin: 0.0,
             n_frames: 100,
             symmetry: true,
             sleep_ratio: 0.05,
