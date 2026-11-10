@@ -430,3 +430,29 @@ Máquina com 36 núcleos (18 para cada solver). OpenCourant `latest-20261011` em
 - Pegadinha: `calib/one.sh` usa `nproc` núcleos no OpenCourant (36) e deu +57 m/s no Al 10 mm
   700 m/s, contra −60 da referência (18 núcleos): o OpenCourant também varia com o número de
   núcleos nesse caso limite.
+
+## 18. Desvio A, hipótese (a): elemento/hourglass (10/11/2026)
+
+Caso: esfera 4340 Ø10 × Al 6061-T6 10 mm, 0°, 700 m/s, ND=12, DTFRAC 0,2. vx residual (m/s):
+
+| Variante | PenSim | OpenCourant |
+|---|---|---|
+| base (PenSim HG 0,1; OC ISOLID 24) | 404 | −60 |
+| PenSim com 6 / 12 / 30 núcleos | 404 / 404 / 404 | −60 |
+| PenSim HG 0,05 | 414 | — |
+| PenSim HG 0,2 | 381 | — |
+| OC ISOLID 1 (1 ponto, hourglass viscoso) | 404 | 302 |
+| OC ISOLID 2 | 404 | 291 |
+| OC ISOLID 17 | 404 | 454 |
+| OC ISOLID 14 | — | inválido (239 ciclos, volume negativo) |
+
+Leitura:
+- Mudar o hourglass do PenSim (0,05–0,2) move o resultado ±5%. Não explica 404 × −60.
+- Só trocar o elemento no OpenCourant move o resultado de −60 a 454 m/s. Com os elementos de
+  1 ponto (ISOLID 1/2), o OpenCourant dá ~300, bem mais perto do PenSim (404) que o ISOLID 24
+  da referência. Neste caso limite, **a "referência" depende do elemento**: o ISOLID 24 é o
+  mais resistente dos testados.
+- O PenSim aqui não variou com o número de núcleos (404,213 com 6, 12 e 30). A diferença para
+  a referência antiga (410,4) vem de outra coisa (CPU/compilador); a explicação da seção 17
+  ("ordem de soma por núcleos") fica como hipótese NÃO confirmada.
+- Falta confirmar nos 80 casos (OpenCourant com ISOLID=1; ver seção seguinte).
