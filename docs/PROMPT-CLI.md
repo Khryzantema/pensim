@@ -1,89 +1,74 @@
-# Prompt para continuar no Claude Code CLI
+# Prompt para calibrar no PC (Claude Code CLI)
 
-Cole o bloco abaixo no Claude Code, rodando dentro de um clone do repositório
-`Khryzantema/pensim` no ramo `claude/android-ballistic-simulation-game-kajd4w`.
+Cole o bloco abaixo no Claude Code, dentro de um clone do repositório `Khryzantema/pensim` no
+ramo `claude/android-ballistic-simulation-game-kajd4w` (Linux; o PC do dono é um Xeon
+E5-2696 v3, 18 núcleos / 36 threads, 64 GB).
 
 ---
 
 ```text
-Você vai continuar o PenSim: um simulador 3D de impacto balístico em Rust (núcleo em
-crates/core, app egui em crates/app, Android via cargo-apk e Linux). Responda e escreva
-comentários/commits em português do Brasil. O dono quer qualidade acima de velocidade
-(regra 70% qualidade / 30% velocidade, detalhada em docs/NOVO-NUCLEO.md, seção 1).
+Você vai continuar a CALIBRAÇÃO do PenSim, um simulador 3D de impacto balístico em Rust.
+Responda, comente e faça commits em português do Brasil. Regras do dono:
+- 70% qualidade / 30% velocidade (docs/NOVO-NUCLEO.md, seção 1).
+- UMA coisa de cada vez. Nas comparações, os dois solvers rodam o MESMO caso ao mesmo tempo
+  (um PenSim + um OpenCourant), nunca vários casos em paralelo.
+- Não invente números de ensaio. Não desligue teste para passar. Rode os testes antes de cada
+  commit. Commits pequenos; push no ramo acima.
 
-LEIA PRIMEIRO, inteiro: docs/NOVO-NUCLEO.md. É o projeto e o diário do núcleo novo
-(seções 11 a 14 dizem o que já foi feito e medido).
+LEIA PRIMEIRO, inteiro: docs/NOVO-NUCLEO.md — principalmente as seções 11 a 16 (o que já foi
+feito, medido e decidido). Resumo do estado:
+- Núcleo novo de elementos finitos explícitos com erosão em crates/core/src/fem/ (malha em O,
+  hexaedro de 1 ponto + hourglass, Johnson-Cook, Mie-Grüneisen, contato nó-superfície). O app usa
+  ele por padrão. Testes: cargo test --release (fem_verify, fem_impact, save_fem: todos passam).
+- Referência: OpenCourant (continuação comunitária do OpenRadioss, que foi descontinuado em
+  01/10/2026). Pacote Linux pronto em https://opencourant.org/downloads/ (release
+  latest-20261011, OpenCourant_linux64.zip). Descompactar e apontar OC=/caminho/OpenCourant.
+- crates/core/src/fem/radioss.rs exporta a MESMA malha e materiais do PenSim para o formato do
+  OpenCourant. Medida da velocidade: média por nó (massas em .mass), porque a massa por peça no
+  histórico do Radioss perde os elementos apagados. Erosão por distorção igualada:
+  /DT/BRICK/DEL e /DT/INTER/DEL a 20% do passo inicial (sem isso o OpenCourant aborta no contato).
 
-ESTADO ATUAL
-- Núcleo novo de elementos finitos explícitos com erosão em crates/core/src/fem/:
-  mesh.rs (hexaedros; malha em O para esfera e sólidos de revolução), mod.rs (elemento de
-  1 ponto + hourglass Flanagan-Belytschko, Jaumann, Johnson-Cook com retorno radial,
-  Mie-Grüneisen, viscosidade artificial, erosão por dano JC/frágil/distorção), contact.rs
-  (contato geral nó-contra-superfície com atrito e tratamento de penetração inicial),
-  material.rs (parâmetros JC/EOS; from_library converte os materiais do app — valores
-  típicos de literatura, NÃO calibrados), build.rs (Config do app → malha), run.rs (FemSim,
-  mesma interface do simulador antigo).
-- O app já usa o núcleo novo por padrão (Config::fem = true; lib.rs::Solver escolhe).
-  A peridinâmica antiga (crates/core/src/sim.rs) continua como opção "Peridinâmica (antigo)".
-- Visualização: faces direto dos hexaedros (crates/app/src/mesh.rs::from_hex), partículas =
-  nós sem elemento vivo. Arquivo salvo .psim v5 guarda hexaedros e elementos vivos.
-  Pré-visualização "Malha 3D" mostra a malha real. Pack de munições .ppack
-  (crates/app/src/pack.rs) com exportação na aba Munição.
-- Testes: cargo test --release (fem_verify.rs: onda, tração, energia, Taylor, malha;
-  fem_impact.rs: esfera × chapa; save_fem.rs). Todos passam. Exemplos úteis:
-  cargo run --release -p pensim-core --example fem_hg (diagnóstico de energia) e
-  --example fem_app (munição da biblioteca no núcleo novo; AMMO, NODES, DUR, A).
-- Capturas de tela do app: ganchos PENSIM_DEMO, PENSIM_FACES, PENSIM_SIDE, PENSIM_ISO,
-  PENSIM_NODES, PENSIM_DUR, PENSIM_AT, PENSIM_WS, PENSIM_PEEK, PENSIM_NOPART (ver app.rs).
-  O dono usa 16 nós no diâmetro e partículas ligadas: teste assim.
+FERRAMENTAS (calib/)
+- calib/run_calib.py: esfera de aço 4340 Ø10 mm × chapas Al 6061-T6 e RHA, 5 e 10 mm, a 0°, 30°,
+  45°, 60°, 5 velocidades por material (80 casos). Para cada caso: escreve o deck e roda PenSim e
+  OpenCourant juntos; resultado em calib/ref/esfera_chapa.csv (pula casos já presentes).
+  Filtros: MATS=al|rha, ANGS=0,60, VELS=700,1100, ND=12|16|24, CSV=outro.csv.
+  Núcleos: PENSIM_THREADS e OC_THREADS (padrão: metade para cada).
+- calib/one.sh: um caso só (MAT T A V ND FRIC DTFRAC ISOLID PENSIM_HG ...).
+- calib/run_ammo.py: munições da biblioteca × RHA a 0°/30°/60° (SPIN=mil rpm para rotação).
+  ATENÇÃO: hoje o OpenCourant aborta nesses casos por causa dos elementos minúsculos da ponta da
+  ogiva (raio mínimo de ¼ do passo em mesh::revolution_x). Corrigir antes (item 3).
+- Exemplos: examples/calib_case.rs, calib_ammo.rs, fem_app.rs (munição no núcleo novo),
+  fem_hg.rs (energia por peça), meshq_ammo.rs (qualidade da malha).
 
-ATUALIZAÇÃO: a fase 3 já começou — leia as seções 15 e 16 de docs/NOVO-NUCLEO.md (OpenCourant
-rodando, 80 casos comparados, desvios que sobram, rotação do projétil). O dono prefere fazer
-UMA coisa de cada vez. No Xeon dele (18 núcleos, 64 GB) os lotes podem rodar casos em paralelo.
+ONDE ESTAMOS (seção 15 do documento): 80 casos, mesmo desfecho em 63/80, erro médio de 9,6% na
+velocidade residual quando há perfuração clara (meta: 5%). Energia do PenSim < 1,1%.
+Desvios que sobram:
+ A. Perto do limite balístico a chapa do PenSim cede antes (ex.: Al 10 mm a 700 m/s: PenSim 404,
+    OpenCourant −60 m/s; RHA 5 mm a 1200 m/s; RHA 10 mm a 1800 m/s).
+ B. RHA a 60°: PenSim 500–600 m/s, OpenCourant 640–780 m/s.
 
-O QUE FALTA, NESTA ORDEM
-1. Fase 3 — validação contra o OpenRadioss (docs/NOVO-NUCLEO.md, seções 6.2 e 14).
-   a. Instalar o solver de referência. O OpenRadioss foi descontinuado pela Siemens em
-      01/10/2026 (repositório removido; por isso links antigos dão 404). A continuação
-      comunitária é o OpenCourant (https://opencourant.org, código em
-      github.com/OpenCourant/OpenCourant, AGPL v3), com pacotes prontos:
-        https://github.com/OpenCourant/OpenCourant/releases (release latest-20261011:
-        OpenCourant_linux64.zip; também imagem docker.io/opencourant/opencourant:latest-20261011)
-      Linux: descompactar e
-        export OPENCOURANT_PATH=/caminho/OpenCourant
-        export LD_LIBRARY_PATH=$OPENCOURANT_PATH/extlib/hm_reader/linux64:$OPENCOURANT_PATH/extlib/h3d/lib/linux64:$LD_LIBRARY_PATH
-        export RAD_CFG_PATH=$OPENCOURANT_PATH/hm_cfg_files
-      Executáveis em exec/ (starter e engine, precisão simples e dupla, SMP e OpenMPI, mais
-      os conversores anim_to_vtk e th_to_csv). Confira na página de downloads se há release
-      mais nova. NÃO use a cópia não oficial de extlib (xupeiwust): não é mais necessária.
-   b. Escrever um gerador de decks .rad a partir do mesmo Config/malha do PenSim (mesmos nós
-      e elementos, mesmos materiais JC + Mie-Grüneisen, contato TYPE7, erosão), para os 80
-      casos: esfera de aço 4340 Ø10 mm × chapas RHA e Al 6061-T6, espessura 0,5D e 1D,
-      chapa a 0°, 30°, 45°, 60°, 5 velocidades em torno do limite balístico.
-   c. Rodar, extrair velocidade residual, diâmetro do furo, massa do tampão, instante de
-      saída, perfurou/ricocheteou; salvar CSV em calib/ref/; comparar com o PenSim.
-      Meta: velocidade residual dentro de 5% e mesmo desfecho. Se o hourglass dos elementos
-      erodidos fizer diferença > 3%, considerar integração completa (seção 12).
-   d. Estudo de convergência 8/12/16/24 elementos no diâmetro (seção 6.4).
-2. Fase 5 — calibração contra ensaios (seção 6.3). Só três parâmetros podem ser ajustados:
-   k da regularização pela malha, atrito, D1 do dano. Os números dos ensaios TÊM de vir dos
-   artigos (Goldsmith & Finnegan 1971; Recht & Ipson 1963; Børvik et al.) — nunca de memória.
-   Depois: ogivas e biblioteca de munição (M61 e .50 AP dentro de 10% do limite real).
-3. Fase 6 — desempenho: estado em f32 (somas em f64), paralelismo melhor (o dono tem um
-   Xeon e reclamou de uso baixo de CPU), depois GPU. Meta: 260 mil elementos, 1000 µs,
-   < 2 min em 8 núcleos. Medir antes de otimizar.
-4. Pendências menores: interfaces internas do projétil (camisa/núcleo) alinhadas na malha em
-   O (hoje a peça vem pelo centróide do elemento); ponta aguda usa raio mínimo de ¼ do passo;
-   AppImage (appimagetool pode precisar de permissão).
+TAREFAS, NESTA ORDEM, UMA DE CADA VEZ
+1. Baseline no PC: rodar calib/run_calib.py com ND=12 e conferir que bate com
+   calib/ref/esfera_chapa.csv (mesmos números dentro de ~1%). Medir o tempo.
+2. Desvio A, hipóteses UMA por vez, sempre no mesmo caso curto (Al 10 mm, 0°, 700 m/s via
+   calib/one.sh), e só depois confirmar nos 80:
+   a. Elemento/hourglass: OpenCourant com ISOLID=1 (1 ponto, hourglass viscoso) em vez de 24; e
+      PenSim com PENSIM_HG=0.05/0.2. Se for isso, o PenSim precisa de hourglass melhor
+      (ex.: estabilização física tipo Belytschko-Bindeman) ou integração completa na chapa.
+   b. Erosão: no PenSim, EROSION_DT_FRAC (fem/mod.rs) 0,1 vs 0,2; no OpenCourant DTFRAC.
+   c. Dano: conferir triaxialidade/taxa/temperatura do dano Johnson-Cook do PenSim contra o
+      manual do Radioss (/FAIL/JOHNSON) — mesmas definições?
+   d. Contato: penalidade/offset de penetração inicial (fem/contact.rs).
+   Registrar cada resultado no documento (seção nova) antes de mudar a próxima coisa.
+3. Ponta da ogiva: engrossar o raio mínimo da ponta em mesh::revolution_x (ou cortar a ponta
+   num meplat de ~½ elemento) para o OpenCourant não abortar; rodar calib/run_ammo.py.
+4. Rotação (seção 16): repetir .50 BMG × 20 mm RHA a 0/30/45/60°, com e sem SPIN, ND 16, e
+   comparar com o OpenCourant (o giro já entra no deck pela velocidade inicial por nó).
+5. Núcleo AP frágil: hoje o aço "projétil AP" rompe só com ~30% de deformação (parâmetros
+   genéricos em fem/material.rs::from_library). NÃO chutar: pedir ao dono os dados ou artigos.
+6. Convergência: repetir os 80 casos com ND=16 e ND=24 (o dono usa 16 no app).
 
-REGRAS
-- Não invente números de ensaio nem de referência; se não tiver a fonte, diga.
-- Rode os testes antes de cada commit; não desligue teste para passar.
-- Commits pequenos e descritivos; push no ramo claude/android-ballistic-simulation-game-kajd4w.
-- Ao entregar build: APK com `cargo apk build -p pensim-app --release` (LTO fat via
-  CARGO_PROFILE_RELEASE_LTO=fat, CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1; precisa de
-  ANDROID_HOME, NDK 27 e a keystore de release do dono) e o binário Linux
-  `cargo build --release -p pensim-app --bin pensim`.
-- Antes de tarefas longas, diga ao dono o que vai fazer; ao terminar, resuma o que mudou, o
-  que foi medido e o que não foi testado.
+Ao terminar cada tarefa: diga ao dono, em poucas linhas, o que mudou, o que foi medido e o que
+não foi testado; atualize docs/NOVO-NUCLEO.md; commit e push.
 ```

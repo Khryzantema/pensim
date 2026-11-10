@@ -55,7 +55,7 @@ fn main() {
     let n = m.n_nodes();
     let v0: Vec<[f64; 3]> = (0..n).map(|i| if i < ns { [v, 0.0, 0.0] } else { [0.0; 3] }).collect();
     let mats = vec![lib::steel_4340(), plate_mat];
-    let name = format!("esf_{}_{:.1}mm_{:.0}g_{:.0}ms", std::env::var("MAT").unwrap_or("al".into()), t / mm, ang, v);
+    let name = format!("esf_{}_{:.1}mm_{:.0}g_{:.0}ms_nd{}", std::env::var("MAT").unwrap_or("al".into()), t / mm, ang, v, nd);
     // passo inicial do PenSim: o OpenCourant apaga elementos abaixo de 10% dele (mesma regra)
     let dt0 = {
         let mut md = FemModel::new(m.clone(), mats.clone(), v0.clone());
@@ -63,8 +63,11 @@ fn main() {
         Fem::new(md).dt
     };
     let (st, en) = radioss::write(&radioss::DeckInput { name: &name, mesh: &m, mats: &mats, v0: &v0, friction: env("FRIC", 0.1), t_end: dur, th_dt: 0.5e-6, isolid: env("ISOLID", 24.0) as i32, th_nodes: &(0..ns as u32).collect::<Vec<_>>(), dt_del: env("DTFRAC", 0.1) * dt0 });
-    std::fs::write(format!("{out}/{name}_0000.rad"), st).unwrap();
-    std::fs::write(format!("{out}/{name}_0001.rad"), en).unwrap();
+    // NODECK=1: o deck já foi escrito (o OpenCourant pode estar lendo ele agora)
+    if env("NODECK", 0.0) < 0.5 {
+        std::fs::write(format!("{out}/{name}_0000.rad"), st).unwrap();
+        std::fs::write(format!("{out}/{name}_0001.rad"), en).unwrap();
+    }
     println!("NAME {name}");
     // massas nodais (concentradas, iguais às do Radioss) para a média do lado do OpenCourant
     {

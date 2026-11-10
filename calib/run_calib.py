@@ -1,89 +1,48 @@
 #!/usr/bin/env python3
-"""Roda os casos de calibração esfera × chapa no PenSim e no OpenCourant e compara.
+"""Esfera × chapa: PenSim × OpenCourant no mesmo caso, ao mesmo tempo (mesma malha).
 
 Uso: OC=/caminho/OpenCourant python3 calib/run_calib.py [pasta_de_trabalho]
-Saída: calib/ref/esfera_chapa.csv (uma linha por caso).
+Variáveis: ND (elementos no diâmetro, padrão 12), DTFRAC (erosão por distorção no OpenCourant,
+padrão 0,2), MATS/ANGS para filtrar (ex.: MATS=rha ANGS=0,60), PENSIM_THREADS, OC_THREADS.
+Saída: calib/ref/esfera_chapa.csv (acrescenta; casos já presentes são pulados).
 """
-import csv, os, subprocess, sys, time
+import csv, os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import common
 
-OC = os.environ.get("OC", "/home/user/ext/oc/OpenCourant")
 WORK = sys.argv[1] if len(sys.argv) > 1 else "/tmp/calib"
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "calib", "ref", "esfera_chapa.csv")
+OUT = os.path.join(common.ROOT, "calib", "ref", os.environ.get("CSV", "esfera_chapa.csv"))
 ND = os.environ.get("ND", "12")
 VEL = {"al": [300, 500, 700, 900, 1100], "rha": [600, 900, 1200, 1500, 1800]}
+if os.environ.get("VELS"):
+    VEL = {k: [int(x) for x in os.environ["VELS"].split(",")] for k in VEL}
 THICK = [5.0, 10.0]  # 0,5 D e 1 D (esfera Ø10 mm)
-ANG = [0, 30, 45, 60]
+MATS = os.environ.get("MATS", "al,rha").split(",")
+ANGS = [int(a) for a in os.environ.get("ANGS", "0,30,45,60").split(",")]
 
-env = dict(os.environ)
-env.update({
-    "OPENCOURANT_PATH": OC,
-    "LD_LIBRARY_PATH": f"{OC}/extlib/hm_reader/linux64:{OC}/extlib/h3d/lib/linux64",
-    "RAD_CFG_PATH": f"{OC}/hm_cfg_files",
-    "OMP_STACKSIZE": "400m",
-})
-os.makedirs(WORK, exist_ok=True)
+exe = common.build_example("calib_case")
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
-subprocess.run(["cargo", "build", "--release", "-q", "-p", "pensim-core", "--example", "calib_case"], cwd=ROOT, check=True)
-exe = os.path.join(ROOT, "target", "release", "examples", "calib_case")
-
-
-def oc_nodal_velocity(name):
-    """Velocidade média (ponderada pela massa nodal) dos nós do projétil no fim, do histórico
-    por nó do OpenCourant. A massa da peça no histórico do Radioss perde os elementos apagados,
-    então XMOM/MASS da peça superestima a velocidade quando há erosão."""
-    subprocess.run([f"{OC}/exec/th_to_csv_linux64_gf", f"{name}T01"], cwd=WORK, env=env, capture_output=True)
-    with open(os.path.join(WORK, f"{name}T01.csv")) as f:
-        rows = list(csv.reader(f))
-    head = [h.strip() for h in rows[0]]
-    last = [float(x) for x in rows[-1]]
-    with open(os.path.join(WORK, f"{name}.mass")) as f:
-        mass = {int(a): float(b) for a, b in (l.split() for l in f if l.strip())}
-    cols = {}
-    for i, h in enumerate(head):
-        if h.startswith("projetil"):
-            cols.setdefault(int(h.split()[1]), []).append(i)
-    p, m = [0.0, 0.0, 0.0], 0.0
-    for nid, c in cols.items():
-        mi = mass[nid]
-        for k in range(3):
-            p[k] += mi * last[c[k]]
-        m += mi
-    return [x / m for x in p]
-
-
 done = set()
 if os.path.exists(OUT):
     with open(OUT) as f:
         done = {r["caso"] for r in csv.DictReader(f)}
 new = not os.path.exists(OUT)
+cases = []
+for mat in MATS:
+    for t in THICK:
+        for a in ANGS:
+            for v in VEL[mat]:
+                cases.append(dict(MAT=mat, T=str(t), A=str(a), V=str(v), ND=ND, DTFRAC=os.environ.get("DTFRAC", "0.2"), DUR=str(max(40.0, 40.0 * t / 5.0))))
 with open(OUT, "a", newline="") as fo:
     w = csv.writer(fo)
     if new:
         w.writerow(["caso", "material", "espessura_mm", "angulo_graus", "v_impacto", "nd",
                     "pensim_vx", "pensim_vy", "pensim_vz", "pensim_erodidos", "pensim_erro_energia_pct", "pensim_s",
                     "oc_vx", "oc_vy", "oc_vz", "oc_s"])
-    for mat in ["al", "rha"]:
-        for t in THICK:
-            for a in ANG:
-                for v in VEL[mat]:
-                    e2 = dict(env, MAT=mat, T=str(t), A=str(a), V=str(v), OUT=WORK, ND=ND, DTFRAC=os.environ.get("DTFRAC", "0.2"), DUR=str(max(40.0, 40.0 * t / 5.0)))
-                    r = subprocess.run([exe], env=e2, capture_output=True, text=True)
-                    name = next(l.split()[1] for l in r.stdout.splitlines() if l.startswith("NAME"))
-                    if name in done:
-                        continue
-                    res = next(l.split() for l in r.stdout.splitlines() if l.startswith("RESULT"))
-                    t0 = time.time()
-                    for stage, deck in [("starter", "_0000.rad"), ("engine", "_0001.rad")]:
-                        subprocess.run([f"{OC}/exec/{stage}_linux64_gf", "-i", name + deck, "-nt", str(os.cpu_count())], cwd=WORK, env=env, capture_output=True)
-                    try:
-                        ov = oc_nodal_velocity(name)
-                    except Exception as ex:  # caso que falhou no OpenCourant
-                        print("falhou", name, ex, flush=True)
-                        ov = (float("nan"),) * 3
-                    w.writerow([name, mat, t, a, v, ND, *res[2:8], *[f"{x:.3f}" for x in ov], f"{time.time() - t0:.1f}"])
-                    fo.flush()
-                    print(name, "PenSim", res[2], "OpenCourant", f"{ov[0]:.1f}", flush=True)
-                    for fn in os.listdir(WORK):
-                        if fn.startswith(name) and (fn[len(name):len(name) + 2] in ("A0", "A1") or fn.endswith(".rst")):
-                            os.remove(os.path.join(WORK, fn))
+
+    def save(c, name, res, v, secs):
+        w.writerow([name, c["MAT"], c["T"], c["A"], c["V"], ND, *res[2:8], *[f"{x:.3f}" for x in v], f"{secs:.1f}"])
+        fo.flush()
+        print(name, "PenSim", res[2], "OpenCourant", f"{v[0]:.1f}", flush=True)
+
+    common.pipeline(exe, WORK, cases, done, save)
