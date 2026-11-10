@@ -28,20 +28,27 @@ subprocess.run(["cargo", "build", "--release", "-q", "-p", "pensim-core", "--exa
 exe = os.path.join(ROOT, "target", "release", "examples", "calib_ammo")
 
 
-def oc_velocity(name, nproj):
+def oc_nodal_velocity(name):
+    """Velocidade média (ponderada pela massa nodal) dos nós do projétil no fim, do histórico
+    por nó do OpenCourant. A massa da peça no histórico do Radioss perde os elementos apagados,
+    então XMOM/MASS da peça superestima a velocidade quando há erosão."""
     subprocess.run([f"{OC}/exec/th_to_csv_linux64_gf", f"{name}T01"], cwd=WORK, env=env, capture_output=True)
     with open(os.path.join(WORK, f"{name}T01.csv")) as f:
         rows = list(csv.reader(f))
     head = [h.strip() for h in rows[0]]
     last = [float(x) for x in rows[-1]]
+    with open(os.path.join(WORK, f"{name}.mass")) as f:
+        mass = {int(a): float(b) for a, b in (l.split() for l in f if l.strip())}
+    cols = {}
+    for i, h in enumerate(head):
+        if h.startswith("projetil"):
+            cols.setdefault(int(h.split()[1]), []).append(i)
     p, m = [0.0, 0.0, 0.0], 0.0
-    for k in range(1, nproj + 1):
-        pre = f"peca {k} "
-        get = lambda tag: next(last[i] for i, h in enumerate(head) if h.startswith(pre) and h.endswith(tag))
-        mk = get("MASS")
-        for j, t in enumerate(["XMOM", "YMOM", "ZMOM"]):
-            p[j] += get(t)
-        m += mk
+    for nid, c in cols.items():
+        mi = mass[nid]
+        for k in range(3):
+            p[k] += mi * last[c[k]]
+        m += mi
     return [x / m for x in p]
 
 
@@ -70,7 +77,7 @@ with open(OUT, "a", newline="") as fo:
             for stage, deck in [("starter", "_0000.rad"), ("engine", "_0001.rad")]:
                 subprocess.run([f"{OC}/exec/{stage}_linux64_gf", "-i", name + deck, "-nt", str(os.cpu_count())], cwd=WORK, env=env, capture_output=True)
             try:
-                ov = oc_velocity(name, nproj)
+                ov = oc_nodal_velocity(name)
             except Exception as ex:
                 print("falhou", name, ex, flush=True)
                 ov = [float("nan")] * 3

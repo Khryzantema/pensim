@@ -21,6 +21,9 @@ pub struct DeckInput<'a> {
     /// formulação do sólido do Radioss (24 = HEPH, 1 ponto com estabilização física;
     /// 1 = Belytschko 1 ponto com hourglass viscoso; 14 = integração completa)
     pub isolid: i32,
+    /// nós com histórico de velocidade (para medir o projétil nó a nó, inclusive o que sobra
+    /// de elementos apagados: a massa da peça no histórico do Radioss perde os elementos apagados)
+    pub th_nodes: &'a [u32],
 }
 
 fn f(v: f64) -> String {
@@ -148,6 +151,12 @@ pub fn write(d: &DeckInput) -> (String, String) {
         let _ = write!(s, "{:>10}", k + 1);
     }
     s.push('\n');
+    if !d.th_nodes.is_empty() {
+        let _ = writeln!(s, "/TH/NODE/2\nprojetil\n#     var1      var2      var3      var4      var5      var6      var7      var8      var9     var10\nVX        VY        VZ\n#    NODid     Iskew                                           NODname");
+        for &n in d.th_nodes {
+            let _ = writeln!(s, "{:>10}         0", n + 1);
+        }
+    }
     let _ = writeln!(s, "/END");
     let ms = |t: f64| t * 1e3;
     let eng = format!(

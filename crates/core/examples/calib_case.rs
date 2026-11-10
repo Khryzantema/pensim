@@ -56,10 +56,22 @@ fn main() {
     let v0: Vec<[f64; 3]> = (0..n).map(|i| if i < ns { [v, 0.0, 0.0] } else { [0.0; 3] }).collect();
     let mats = vec![lib::steel_4340(), plate_mat];
     let name = format!("esf_{}_{:.1}mm_{:.0}g_{:.0}ms", std::env::var("MAT").unwrap_or("al".into()), t / mm, ang, v);
-    let (st, en) = radioss::write(&radioss::DeckInput { name: &name, mesh: &m, mats: &mats, v0: &v0, friction: 0.1, t_end: dur, th_dt: 0.5e-6, isolid: env("ISOLID", 24.0) as i32 });
+    let (st, en) = radioss::write(&radioss::DeckInput { name: &name, mesh: &m, mats: &mats, v0: &v0, friction: 0.1, t_end: dur, th_dt: 0.5e-6, isolid: env("ISOLID", 24.0) as i32, th_nodes: &(0..ns as u32).collect::<Vec<_>>() });
     std::fs::write(format!("{out}/{name}_0000.rad"), st).unwrap();
     std::fs::write(format!("{out}/{name}_0001.rad"), en).unwrap();
     println!("NAME {name}");
+    // massas nodais (concentradas, iguais às do Radioss) para a média do lado do OpenCourant
+    {
+        let mut mass = vec![0.0; m.n_nodes()];
+        for (e, h) in m.hex.iter().enumerate() {
+            let vol = mesh::hex_volume(&m.corners(h));
+            for &k in h {
+                mass[k as usize] += mats[m.part[e] as usize].rho * vol / 8.0;
+            }
+        }
+        let txt: Vec<String> = (0..ns).map(|i| format!("{} {:.9e}", i + 1, mass[i])).collect();
+        std::fs::write(format!("{out}/{name}.mass"), txt.join("\n")).unwrap();
+    }
     println!("deck {out}/{name}_0000.rad ({} nós, {} elementos)", n, m.n_elems());
     if env("RUN", 1.0) < 0.5 {
         return;

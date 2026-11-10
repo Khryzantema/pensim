@@ -28,22 +28,28 @@ subprocess.run(["cargo", "build", "--release", "-q", "-p", "pensim-core", "--exa
 exe = os.path.join(ROOT, "target", "release", "examples", "calib_case")
 
 
-def oc_velocity(name):
-    """Velocidade do centro de massa da peça 1 (esfera) no fim, do histórico do OpenCourant."""
+def oc_nodal_velocity(name):
+    """Velocidade média (ponderada pela massa nodal) dos nós do projétil no fim, do histórico
+    por nó do OpenCourant. A massa da peça no histórico do Radioss perde os elementos apagados,
+    então XMOM/MASS da peça superestima a velocidade quando há erosão."""
     subprocess.run([f"{OC}/exec/th_to_csv_linux64_gf", f"{name}T01"], cwd=WORK, env=env, capture_output=True)
     with open(os.path.join(WORK, f"{name}T01.csv")) as f:
         rows = list(csv.reader(f))
     head = [h.strip() for h in rows[0]]
     last = [float(x) for x in rows[-1]]
-
-    def col(tag):
-        for i, h in enumerate(head):
-            if h.startswith("peca 1") and h.endswith(tag):
-                return last[i]
-        raise KeyError(tag)
-
-    m = col("MASS")
-    return col("XMOM") / m, col("YMOM") / m, col("ZMOM") / m
+    with open(os.path.join(WORK, f"{name}.mass")) as f:
+        mass = {int(a): float(b) for a, b in (l.split() for l in f if l.strip())}
+    cols = {}
+    for i, h in enumerate(head):
+        if h.startswith("projetil"):
+            cols.setdefault(int(h.split()[1]), []).append(i)
+    p, m = [0.0, 0.0, 0.0], 0.0
+    for nid, c in cols.items():
+        mi = mass[nid]
+        for k in range(3):
+            p[k] += mi * last[c[k]]
+        m += mi
+    return [x / m for x in p]
 
 
 done = set()
@@ -71,7 +77,7 @@ with open(OUT, "a", newline="") as fo:
                     for stage, deck in [("starter", "_0000.rad"), ("engine", "_0001.rad")]:
                         subprocess.run([f"{OC}/exec/{stage}_linux64_gf", "-i", name + deck, "-nt", str(os.cpu_count())], cwd=WORK, env=env, capture_output=True)
                     try:
-                        ov = oc_velocity(name)
+                        ov = oc_nodal_velocity(name)
                     except Exception as ex:  # caso que falhou no OpenCourant
                         print("falhou", name, ex, flush=True)
                         ov = (float("nan"),) * 3

@@ -26,26 +26,38 @@ fn main() {
     let tt = c.design.layers[0].thickness / c.obliquity().cos();
     let dur = 1.5 * (2.0 * len + 3.0 * tt) / c.velocity;
     let st = build(&c).unwrap();
-    let out = std::env::var("OUT").unwrap_or("/tmp/calib".into());
-    std::fs::create_dir_all(&out).unwrap();
-    let short: String = a.name.split_whitespace().take(2).collect::<Vec<_>>().join("").chars().filter(|ch| ch.is_ascii_alphanumeric()).collect();
-    let name = format!("mun_{}_{:.0}mm_{:.0}g_{:.0}ms", short, plate_mm, c.obliquity_deg, c.velocity);
-    let (sd, ed) = radioss::write(&radioss::DeckInput { name: &name, mesh: &st.mesh, mats: &st.mats, v0: &st.v0, friction: 0.1, t_end: dur, th_dt: dur / 200.0, isolid: 24 });
-    std::fs::write(format!("{out}/{name}_0000.rad"), sd).unwrap();
-    std::fs::write(format!("{out}/{name}_0001.rad"), ed).unwrap();
-    println!("NAME {name}");
-    println!("NPROJ {}", st.n_proj);
-    println!("deck {out}/{name}_0000.rad ({} nós, {} elementos, {:.0} µs)", st.mesh.n_nodes(), st.mesh.n_elems(), dur * 1e6);
-    if env("RUN", 1.0) < 0.5 {
-        return;
-    }
-    let np = st.n_proj;
     let mut node_part = vec![u8::MAX; st.mesh.n_nodes()];
     for (e, h) in st.mesh.hex.iter().enumerate() {
         for &k in h {
             node_part[k as usize] = node_part[k as usize].min(st.mesh.part[e]);
         }
     }
+    let pnodes: Vec<u32> = (0..st.mesh.n_nodes() as u32).filter(|&i| node_part[i as usize] < st.n_proj).collect();
+    let out = std::env::var("OUT").unwrap_or("/tmp/calib".into());
+    std::fs::create_dir_all(&out).unwrap();
+    let short: String = a.name.split_whitespace().take(2).collect::<Vec<_>>().join("").chars().filter(|ch| ch.is_ascii_alphanumeric()).collect();
+    let name = format!("mun_{}_{:.0}mm_{:.0}g_{:.0}ms", short, plate_mm, c.obliquity_deg, c.velocity);
+    let (sd, ed) = radioss::write(&radioss::DeckInput { name: &name, mesh: &st.mesh, mats: &st.mats, v0: &st.v0, friction: 0.1, t_end: dur, th_dt: dur / 200.0, isolid: 24, th_nodes: &pnodes });
+    std::fs::write(format!("{out}/{name}_0000.rad"), sd).unwrap();
+    std::fs::write(format!("{out}/{name}_0001.rad"), ed).unwrap();
+    println!("NAME {name}");
+    println!("NPROJ {}", st.n_proj);
+    {
+        let mut mass = vec![0.0; st.mesh.n_nodes()];
+        for (e, h) in st.mesh.hex.iter().enumerate() {
+            let vol = pensim_core::fem::mesh::hex_volume(&st.mesh.corners(h));
+            for &k in h {
+                mass[k as usize] += st.mats[st.mesh.part[e] as usize].rho * vol / 8.0;
+            }
+        }
+        let txt: Vec<String> = pnodes.iter().map(|&i| format!("{} {:.9e}", i + 1, mass[i as usize])).collect();
+        std::fs::write(format!("{out}/{name}.mass"), txt.join("\n")).unwrap();
+    }
+    println!("deck {out}/{name}_0000.rad ({} nós, {} elementos, {:.0} µs)", st.mesh.n_nodes(), st.mesh.n_elems(), dur * 1e6);
+    if env("RUN", 1.0) < 0.5 {
+        return;
+    }
+    let np = st.n_proj;
     let mut md = FemModel::new(st.mesh, st.mats, st.v0);
     md.contact = true;
     md.friction = 0.1;
