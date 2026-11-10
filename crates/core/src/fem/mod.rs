@@ -11,6 +11,7 @@ pub mod contact;
 pub mod run;
 pub mod material;
 pub mod mesh;
+pub mod radioss;
 
 use material::FemMat;
 use mesh::{HexMesh, NODE_SIGNS};
