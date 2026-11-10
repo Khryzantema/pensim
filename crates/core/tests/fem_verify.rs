@@ -11,7 +11,7 @@ fn steel_elastic() -> FemMat {
 }
 
 fn model(m: mesh::HexMesh, mats: Vec<FemMat>, v0: Vec<[f64; 3]>) -> FemModel {
-    FemModel { mesh: m, mats, v0, prescribed: vec![], walls: vec![] }
+    FemModel::new(m, mats, v0)
 }
 
 /// Instante em que a componente x da velocidade do nó passa de `level` (interpolado).

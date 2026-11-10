@@ -6,18 +6,28 @@
 //! condições de simetria. Ainda sem contato entre corpos e sem erosão.
 //!
 //! Estado em `f64` nesta fase (correção primeiro); a troca para `f32` é da fase 6.
+pub mod contact;
 pub mod material;
 pub mod mesh;
 
 use material::FemMat;
 use mesh::{HexMesh, NODE_SIGNS};
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const NONE: u32 = u32::MAX;
+/// Erosão de segurança: elemento cujo passo estável cai abaixo desta fração do inicial
+const EROSION_DT_FRAC: f64 = 0.1;
 
 /// Coeficientes de viscosidade artificial (padrão dos códigos explícitos): q = ρ l (Q1 l ε̇v² − Q2 c ε̇v)
 const Q1: f64 = 1.5;
 const Q2: f64 = 0.06;
 /// Rigidez do hourglass (fração da rigidez do elemento)
 const HG_KAPPA: f64 = 0.1;
+fn hg_kappa() -> f64 {
+    static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_HG").ok().and_then(|v| v.parse().ok()).unwrap_or(HG_KAPPA))
+}
 /// Fração do limite de estabilidade
 const DT_SCALE: f64 = 0.9;
 
@@ -59,6 +69,16 @@ pub struct FemModel {
     pub v0: Vec<[f64; 3]>,
     pub prescribed: Vec<Prescribed>,
     pub walls: Vec<Wall>,
+    /// coeficiente de atrito de Coulomb no contato
+    pub friction: f64,
+    /// liga contato e erosão (desligado nos testes de verificação da fase 1)
+    pub contact: bool,
+}
+
+impl FemModel {
+    pub fn new(mesh: HexMesh, mats: Vec<FemMat>, v0: Vec<[f64; 3]>) -> Self {
+        FemModel { mesh, mats, v0, prescribed: vec![], walls: vec![], friction: 0.0, contact: false }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -77,9 +97,11 @@ struct Elem {
     eps_p: f64,
     eps_rate: f64,
     temp: f64,
-    /// dano de Johnson-Cook acumulado (usado a partir da fase 2)
-    #[allow(dead_code)]
+    /// dano de Johnson-Cook acumulado (≥ 1 apaga o elemento)
     dmg: f64,
+    alive: bool,
+    /// passo estável inicial do elemento (critério de erosão por distorção)
+    dt0: f64,
     /// forças generalizadas de hourglass (4 modos × 3)
     hg: [[f64; 3]; 4],
     e_hg: f64,
@@ -97,13 +119,15 @@ pub struct Energy {
     pub hourglass: f64,
     /// trabalho feito pelas condições de contorno sobre o corpo (paredes, velocidades prescritas)
     pub external: f64,
+    /// energia guardada/dissipada no contato (penalidade + atrito)
+    pub contact: f64,
     pub plastic: f64,
 }
 
 impl Energy {
     /// Erro de balanço: (cinética + interna + hourglass − externa) − total inicial.
     pub fn balance(&self, e0: f64) -> f64 {
-        self.kinetic + self.internal + self.hourglass - self.external - e0
+        self.kinetic + self.internal + self.hourglass + self.contact - self.external - e0
     }
 }
 
@@ -128,11 +152,26 @@ pub struct Fem {
     pub steps: u64,
     pub energy: Energy,
     pub e0: f64,
+    /// vizinho do elemento por face (NONE na borda)
+    face_nb: Vec<[u32; 6]>,
+    pub alive: Vec<bool>,
+    surf: Vec<contact::SurfFace>,
+    cnodes: Vec<u32>,
+    surf_dirty: bool,
+    fc: Vec<[f64; 3]>,
+    /// penetração inicial guardada por nó (NaN = sem contato no passo anterior)
+    c_offset: Vec<f64>,
+    friction: f64,
+    use_contact: bool,
+    eroded: AtomicUsize,
+    pub n_eroded: usize,
+    /// elementos erodidos por motivo: [dano, frágil, distorção, volume]
+    erode_why: [AtomicUsize; 4],
 }
 
 impl Fem {
     pub fn new(model: FemModel) -> Fem {
-        let FemModel { mesh, mats, v0, prescribed, walls } = model;
+        let FemModel { mesh, mats, v0, prescribed, walls, friction, contact } = model;
         let n = mesh.n_nodes();
         let ne = mesh.n_elems();
         assert_eq!(v0.len(), n);
@@ -146,7 +185,7 @@ impl Fem {
             for &k in h {
                 mass[k as usize] += em / 8.0;
             }
-            elem[e] = Elem { v0: vol, vol, mass: em, temp: m.t_room, ..Default::default() };
+            elem[e] = Elem { v0: vol, vol, mass: em, temp: m.t_room, alive: true, ..Default::default() };
         }
         // adjacência nó → (elemento, nó local)
         let mut cnt = vec![0u32; n + 1];
@@ -164,6 +203,23 @@ impl Fem {
             for (ln, &k) in h.iter().enumerate() {
                 adj[fill[k as usize] as usize] = (e * 8 + ln) as u32;
                 fill[k as usize] += 1;
+            }
+        }
+        // vizinhos por face
+        let mut face_nb = vec![[NONE; 6]; ne];
+        {
+            let mut seen: std::collections::HashMap<[u32; 4], (u32, u8)> = std::collections::HashMap::with_capacity(3 * ne);
+            for (e, h) in mesh.hex.iter().enumerate() {
+                for (f, fl) in mesh::FACES.iter().enumerate() {
+                    let mut k = fl.map(|l| h[l]);
+                    k.sort_unstable();
+                    if let Some((e2, f2)) = seen.remove(&k) {
+                        face_nb[e][f] = e2;
+                        face_nb[e2 as usize][f2 as usize] = e as u32;
+                    } else {
+                        seen.insert(k, (e as u32, f as u8));
+                    }
+                }
             }
         }
         let x = mesh.x.clone();
@@ -185,11 +241,29 @@ impl Fem {
             steps: 0,
             energy: Energy::default(),
             e0: 0.0,
+            face_nb,
+            alive: vec![true; ne],
+            surf: vec![],
+            cnodes: vec![],
+            surf_dirty: true,
+            fc: vec![[0.0; 3]; n],
+            c_offset: vec![f64::NAN; n],
+            friction,
+            use_contact: contact,
+            eroded: AtomicUsize::new(0),
+            n_eroded: 0,
+            erode_why: Default::default(),
         };
         s.apply_bc_velocity(0.0);
         // forças e passo iniciais (tensão zero; só fixa lc, c e dt)
         s.element_pass(0.0, true);
+        for e in &mut s.elem {
+            e.dt0 = e.lc / e.c.max(1e-9);
+        }
         s.assemble();
+        if s.use_contact {
+            s.contact_pass();
+        }
         s.dt = s.stable_dt();
         s.energy.kinetic = s.kinetic();
         s.e0 = s.energy.kinetic;
@@ -211,7 +285,8 @@ impl Fem {
     }
 
     fn stable_dt(&self) -> f64 {
-        let m = self.elem.par_iter().map(|e| e.lc / e.c.max(1e-9)).reduce(|| f64::INFINITY, f64::min);
+        // NaN propaga (f64::min o esconderia)
+        let m = self.elem.par_iter().filter(|e| e.alive).map(|e| e.lc / e.c.max(1e-9)).reduce(|| f64::INFINITY, |a, b| if a.is_nan() || b.is_nan() { f64::NAN } else { a.min(b) });
         DT_SCALE * m
     }
 
@@ -284,7 +359,28 @@ impl Fem {
         }
         // 3. elementos: taxa de deformação com v n+½ e geometria n+1 → tensão n+1 → forças n+1
         self.element_pass(dt, false);
+        let er = self.eroded.swap(0, Ordering::Relaxed);
+        if er > 0 {
+            self.n_eroded += er;
+            self.surf_dirty = true;
+            for (a, e) in self.alive.iter_mut().zip(&self.elem) {
+                *a = e.alive;
+            }
+        }
         self.assemble();
+        if self.use_contact {
+            // trabalho do contato no passo com a força média (n e n+1), como nos elementos
+            let fc_old = std::mem::take(&mut self.fc);
+            self.fc = vec![[0.0; 3]; fc_old.len()];
+            self.contact_pass();
+            let w: f64 = fc_old
+                .par_iter()
+                .zip(self.fc.par_iter())
+                .zip(self.v.par_iter())
+                .map(|((a, b), v)| 0.5 * ((a[0] + b[0]) * v[0] + (a[1] + b[1]) * v[1] + (a[2] + b[2]) * v[2]) * dt)
+                .sum();
+            self.energy.contact -= w;
+        }
         // energia
         let ke = self.kinetic_mid(&v_old);
         self.energy.kinetic = ke;
@@ -316,6 +412,7 @@ impl Fem {
     pub fn run_until(&mut self, t_end: f64) {
         while self.time < t_end {
             self.step();
+            assert!(self.dt.is_finite() && self.dt > 0.0 && self.energy.kinetic.is_finite(), "simulação instável no passo {} (t = {:.3e} s)", self.steps, self.time);
         }
     }
 
@@ -337,7 +434,13 @@ impl Fem {
     /// Atualiza tensão e calcula as forças nodais de cada elemento.
     fn element_pass(&mut self, dt: f64, init: bool) {
         let (x, v, hexes, parts, mats) = (&self.x, &self.v, &self.mesh.hex, &self.mesh.part, &self.mats);
+        let eroded = &self.eroded;
+        let why = &self.erode_why;
+        let erosion = self.use_contact;
         self.elem.par_iter_mut().zip(self.ef.par_iter_mut()).enumerate().for_each(|(e, (st, fe))| {
+            if !st.alive {
+                return;
+            }
             let h = &hexes[e];
             let m = &mats[parts[e] as usize];
             let xe: [[f64; 3]; 8] = std::array::from_fn(|k| x[h[k] as usize]);
@@ -408,6 +511,38 @@ impl Fem {
                 }
                 // pressão consistente com a energia nova
                 st.p = m.pressure(mu, st.e_int / st.v0);
+                // --- dano de Johnson-Cook: Δεp / εf(triaxialidade, taxa, temperatura)
+                if dep > 0.0 {
+                    let j2n = 0.5 * (st.s[0] * st.s[0] + st.s[1] * st.s[1] + st.s[2] * st.s[2]) + st.s[3] * st.s[3] + st.s[4] * st.s[4] + st.s[5] * st.s[5];
+                    let seq_n = (3.0 * j2n).sqrt().max(1.0);
+                    let triax = (-st.p / seq_n).clamp(-5.0, 5.0);
+                    if let Some(ef) = m.failure_strain(triax, st.eps_rate, st.temp) {
+                        st.dmg += dep / ef;
+                    }
+                }
+                // --- erosão: dano, frágil, distorção extrema, volume invertido
+                if erosion {
+                    let brittle = m.brittle_stress.is_some_and(|sb| max_principal(&st.s, st.p) > sb);
+                    let dt_e = lc / st.c.max(1e-9);
+                    let reason = if st.dmg >= 1.0 {
+                        Some(0)
+                    } else if brittle {
+                        Some(1)
+                    } else if dt_e < EROSION_DT_FRAC * st.dt0 {
+                        Some(2)
+                    } else if vol <= 0.0 {
+                        Some(3)
+                    } else {
+                        None
+                    };
+                    if let Some(r) = reason {
+                        why[r].fetch_add(1, Ordering::Relaxed);
+                        st.alive = false;
+                        *fe = [[0.0; 3]; 8];
+                        eroded.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                }
             } else {
                 st.c = sound_speed(m, mu, rho);
             }
@@ -427,7 +562,7 @@ impl Fem {
             // --- hourglass por rigidez (Flanagan-Belytschko)
             let gam = gamma(&xe, &b);
             let bb: f64 = b.iter().map(|r| r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sum();
-            let k_hg = HG_KAPPA * (m.bulk_tangent(mu.max(0.0)) + 4.0 / 3.0 * m.g) * bb * vol / 8.0;
+            let k_hg = hg_kappa() * (m.bulk_tangent(mu.max(0.0)) + 4.0 / 3.0 * m.g) * bb * vol / 8.0;
             if !init {
                 for al in 0..4 {
                     let mut qa = [0.0; 3];
@@ -456,7 +591,157 @@ impl Fem {
         });
     }
 
+    /// Refaz a lista de faces externas e de nós de contato (depois de erosão).
+    fn rebuild_surface(&mut self) {
+        let (alive, nb, sym, hex) = (&self.alive, &self.face_nb, &self.mesh.sym, &self.mesh.hex);
+        self.surf = (0..self.elem.len())
+            .into_par_iter()
+            .filter(|&e| alive[e])
+            .flat_map_iter(|e| {
+                (0..6u8).filter_map(move |f| {
+                    let o = nb[e][f as usize];
+                    if o != NONE && alive[o as usize] {
+                        return None;
+                    }
+                    // face num plano de simetria não é superfície de contato
+                    let common = mesh::FACES[f as usize].iter().fold(0xFFu8, |a, &l| a & sym[hex[e][l] as usize]);
+                    if common & 6 != 0 {
+                        return None;
+                    }
+                    Some(contact::SurfFace { elem: e as u32, face: f })
+                })
+            })
+            .collect();
+        let n = self.x.len();
+        let mut flag = vec![false; n];
+        for sf in &self.surf {
+            for &l in &mesh::FACES[sf.face as usize] {
+                flag[self.mesh.hex[sf.elem as usize][l] as usize] = true;
+            }
+        }
+        // partículas: nós sem nenhum elemento vivo
+        for i in 0..n {
+            if !flag[i] {
+                let live = self.adj[self.adj_ptr[i] as usize..self.adj_ptr[i + 1] as usize].iter().any(|&a| self.alive[(a / 8) as usize]);
+                if !live {
+                    flag[i] = true;
+                }
+            }
+        }
+        self.cnodes = (0..n as u32).filter(|&i| flag[i as usize]).collect();
+        self.surf_dirty = false;
+    }
+
+    /// Forças de contato do instante atual, somadas em `f` e guardadas em `fc`.
+    fn contact_pass(&mut self) {
+        if self.surf_dirty {
+            self.rebuild_surface();
+        }
+        let bulk: Vec<f64> = (0..self.elem.len()).map(|e| self.mats[self.mesh.part[e] as usize].bulk()).collect();
+        let vol: Vec<f64> = self.elem.iter().map(|e| e.vol).collect();
+        let lc: Vec<f64> = self.elem.iter().map(|e| e.lc).collect();
+        let hits = contact::forces(&contact::ContactInput {
+            x: &self.x,
+            v: &self.v,
+            mass: &self.mass,
+            hex: &self.mesh.hex,
+            alive: &self.alive,
+            bulk: &bulk,
+            vol: &vol,
+            lc: &lc,
+            surf: &self.surf,
+            nodes: &self.cnodes,
+            adj_ptr: &self.adj_ptr,
+            adj: &self.adj,
+            friction: self.friction,
+            dt: self.dt.max(1e-15),
+            prev_offset: &self.c_offset,
+        });
+        self.c_offset.par_iter_mut().for_each(|o| *o = f64::NAN);
+        for h in &hits {
+            self.c_offset[h.node as usize] = h.offset;
+        }
+        self.fc.par_iter_mut().for_each(|f| *f = [0.0; 3]);
+        for h in &hits {
+            for a in 0..3 {
+                self.fc[h.node as usize][a] += h.f[a];
+                for k in 0..4 {
+                    self.fc[h.fnodes[k] as usize][a] -= h.w[k] * h.f[a];
+                }
+            }
+        }
+        let fc = &self.fc;
+        self.f.par_iter_mut().zip(fc.par_iter()).for_each(|(f, c)| {
+            f[0] += c[0];
+            f[1] += c[1];
+            f[2] += c[2];
+        });
+    }
+
     // ----------------------------------------------------------------- consultas
+
+    /// Elementos erodidos por motivo: [dano, frágil, distorção, volume].
+    pub fn erosion_reasons(&self) -> [usize; 4] {
+        std::array::from_fn(|k| self.erode_why[k].load(Ordering::Relaxed))
+    }
+
+    /// Diagnóstico: (interna, hourglass) por peça, separando elementos vivos e erodidos.
+    /// Índice: [peça][0 = vivo, 1 = erodido] → (IE, HG).
+    pub fn energy_by_part(&self) -> Vec<[(f64, f64); 2]> {
+        let np = self.mats.len();
+        let mut out = vec![[(0.0, 0.0); 2]; np];
+        for (e, st) in self.elem.iter().enumerate() {
+            let k = if st.alive { 0 } else { 1 };
+            let o = &mut out[self.mesh.part[e] as usize][k];
+            o.0 += st.e_int;
+            o.1 += st.e_hg;
+        }
+        out
+    }
+
+    /// Velocidade do centro de massa dos nós que pertencem à peça (elementos vivos ou não).
+    pub fn part_velocity(&self, part: u8) -> [f64; 3] {
+        let mut owner = vec![false; self.x.len()];
+        for (e, h) in self.mesh.hex.iter().enumerate() {
+            if self.mesh.part[e] == part {
+                for &k in h {
+                    owner[k as usize] = true;
+                }
+            }
+        }
+        let (mut p, mut m) = ([0.0; 3], 0.0);
+        for i in 0..self.x.len() {
+            if owner[i] {
+                for a in 0..3 {
+                    p[a] += self.mass[i] * self.v[i][a];
+                }
+                m += self.mass[i];
+            }
+        }
+        p.map(|v| v / m.max(1e-30))
+    }
+
+    /// Centro de massa dos nós da peça.
+    pub fn part_center(&self, part: u8) -> [f64; 3] {
+        let mut owner = vec![false; self.x.len()];
+        for (e, h) in self.mesh.hex.iter().enumerate() {
+            if self.mesh.part[e] == part {
+                for &k in h {
+                    owner[k as usize] = true;
+                }
+            }
+        }
+        let (mut p, mut m) = ([0.0; 3], 0.0);
+        for i in 0..self.x.len() {
+            if owner[i] {
+                for a in 0..3 {
+                    p[a] += self.mass[i] * self.x[i][a];
+                }
+                m += self.mass[i];
+            }
+        }
+        p.map(|v| v / m.max(1e-30))
+    }
 
     /// Tensões médias (σxx, σyy, σzz) ponderadas pelo volume de um conjunto de elementos.
     pub fn mean_stress(&self, elems: impl Iterator<Item = usize>) -> [f64; 3] {
@@ -494,6 +779,19 @@ impl Fem {
         }
         p
     }
+}
+
+/// Maior tensão principal (tração > 0) de σ = s − p I.
+fn max_principal(s: &[f64; 6], p: f64) -> f64 {
+    // invariantes do desviador; autovalores pela forma trigonométrica
+    let j2 = 0.5 * (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]) + s[3] * s[3] + s[4] * s[4] + s[5] * s[5];
+    if j2 < 1e-30 {
+        return -p;
+    }
+    let j3 = s[0] * (s[1] * s[2] - s[4] * s[4]) - s[3] * (s[3] * s[2] - s[4] * s[5]) + s[5] * (s[3] * s[4] - s[1] * s[5]);
+    let r = (j3 / 2.0 * (3.0 / j2).powf(1.5)).clamp(-1.0, 1.0);
+    let th = r.acos() / 3.0;
+    2.0 * (j2 / 3.0).sqrt() * th.cos() - p
 }
 
 /// Velocidade do som (bulk tangente + cisalhamento).

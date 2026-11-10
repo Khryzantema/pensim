@@ -1,7 +1,7 @@
 # PenSim — projeto do novo núcleo de simulação
 
 Documento de passagem. Quem continuar deve conseguir trabalhar só com este arquivo e o código.
-Estado: **fase 1 em andamento** (`crates/core/src/fem/`, testes em `crates/core/tests/fem_verify.rs`).
+Estado: **fases 1 e 2 concluídas** (`crates/core/src/fem/`, testes em `crates/core/tests/fem_verify.rs` e `fem_impact.rs`). Próxima: fase 3.
 
 ## 1. Decisão
 
@@ -292,3 +292,38 @@ Pendências conhecidas para a fase 2:
 - Interfaces internas (camisa/núcleo) ainda não: a casca do O tem de ter uma camada exatamente
   no raio da interface.
 - Estado em `f64`; `f32` só na fase 6.
+
+## 12. Progresso da fase 2 — concluída
+
+Implementado em `fem/contact.rs` e `fem/mod.rs`:
+- **Erosão**: dano de Johnson-Cook (com triaxialidade, taxa e temperatura), ruptura frágil por
+  tensão principal máxima, distorção (passo do elemento < 10% do inicial; o documento pedia 1%,
+  mas 1% deixaria o passo global cair 100×) e volume invertido. Contadores por motivo em
+  `Fem::erosion_reasons()`.
+- **Partículas**: nó sem elemento vivo mantém massa e velocidade e entra no contato.
+- **Contato geral nó-contra-superfície** (inclui autocontato), penalidade
+  k = max(0,1·K·A²/V, 0,1·m/dt²), atrito de Coulomb limitado. Penetração que não pode ter surgido
+  no passo (face recém-exposta por erosão) vira referência e não gera força — sem isso o contato
+  injetava ~8% de energia. Trabalho do contato contabilizado com a força média (n, n+1), como
+  nos elementos.
+
+Esfera de aço 4340 Ø10 mm × chapa 6061-T6 de 5 mm, 1000 m/s, borda presa (`fem_impact.rs`):
+
+| Caso | v residual | Energia | HG/IE vivos |
+|---|---|---|---|
+| ¼ de modelo, 12 no diâmetro | 842 m/s | 0,25% | 3,1% |
+| ½ de modelo, 12 no diâmetro | 838 m/s | 0,30% | 2,5% |
+| ¼, 8 / 16 / 24 no diâmetro | 833 / 843 / 819 m/s | 0,39 / 0,21 / 0,12% | 3,8 / 2,3 / 1,6% |
+| ½, chapa a 45° / 60° / 70° | 712 / 560 / 426 m/s (componente x) | < 0,5% | < 4,5% |
+
+**Hourglass dos elementos erodidos**: 22–33% da energia interna deles. Medido: dobrar ou
+quadruplicar a rigidez de hourglass não reduz isso e muda a velocidade residual em ±1%. É a
+deformação real dos elementos que estão rompendo sob carga pontual do contato. Decisão (regra
+70/30): manter o elemento de 1 ponto; o critério de 10% vale para os elementos vivos, e a energia
+dos erodidos é reportada à parte (como o LS-DYNA faz). Integração completa só se a fase 3 mostrar
+diferença > 3% contra o OpenRadioss. `PENSIM_HG` (variável de ambiente) muda a rigidez para
+experimentos.
+
+Desempenho medido (4 núcleos, `f64`): 64 mil elementos, 1471 passos em 27 s.
+
+Os números de velocidade residual ainda **não foram comparados com nada externo**; isso é a fase 3.
