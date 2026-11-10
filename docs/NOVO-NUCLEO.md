@@ -38,6 +38,13 @@ OpenRadioss é Fortran, ~1,5 milhão de linhas, e não roda em Android. Portanto
 dele quando o manual não bastar. Portar para Rust continua sendo o caminho normal; ao portar um
 trecho, citar o arquivo de origem no comentário.
 
+### Critério de escolha entre alternativas
+
+Pedido do dono: **o que for mais rápido para a qualidade que entrega.** Na dúvida entre duas
+opções, vale a de melhor razão qualidade/tempo de cálculo, não a mais sofisticada. Por isso:
+hexaedro de 1 ponto (não integração completa), contato pinball (não nó-contra-superfície),
+`f32`, erosão simples. Só trocar por algo mais caro se um teste da seção 6 falhar por causa disso.
+
 ## 2. O que fica e o que sai
 
 | Arquivo | Destino |
