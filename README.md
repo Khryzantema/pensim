@@ -29,3 +29,8 @@ export ANDROID_HOME=... ANDROID_NDK_ROOT=...
 cargo apk build --release -p pensim-app
 ```
 Em celulares, prefira malha "média/rápida" (≈20 mil nós); malhas finas custam muito mais.
+
+## Licença
+
+Programa: **AGPL-3.0-or-later** (ver `LICENSE`). Packs de munição distribuídos à parte são
+conteúdo dos respectivos autores e têm licença própria.

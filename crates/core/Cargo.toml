@@ -2,6 +2,7 @@
 name = "pensim-core"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-or-later"
 description = "Solver de impacto balístico 2D (peridinâmica com plasticidade, amolecimento térmico e fratura)"
 
 [dependencies]

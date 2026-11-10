@@ -33,8 +33,10 @@ OpenRadioss é Fortran, ~1,5 milhão de linhas, e não roda em Android. Portanto
 1. **Reimplementar em Rust** os algoritmos, a partir do manual de teoria e dos artigos originais.
 2. **Usar o OpenRadioss como gabarito**: rodar os mesmos casos nos dois e comparar.
 
-Não copiar código dele. Copiar obriga o PenSim inteiro a ser AGPL; o repositório hoje não tem
-arquivo de licença, e essa escolha é do dono do projeto.
+**Licença: o PenSim é AGPL-3.0-or-later** (arquivo `LICENSE`), decidido pelo dono do projeto
+("faz do jeito que quiser"). É a mesma do OpenRadioss, então é permitido ler e portar trechos
+dele quando o manual não bastar. Portar para Rust continua sendo o caminho normal; ao portar um
+trecho, citar o arquivo de origem no comentário.
 
 ## 2. O que fica e o que sai
 
@@ -209,7 +211,30 @@ o que deixou a versão atual difícil de corrigir.
 - **Custo.** Estimativa não medida: um hexaedro custa menos que os ~120 vínculos por nó da
   peridinâmica, então espero ficar mais rápido que hoje. Medir na fase 2.
 
-## 9. Estado do código na hora da passagem
+## 9. Pack de munições pago
+
+Único requisito comercial do dono: vender um pack de munições desenhadas por ele. O programa é
+aberto; o pack é conteúdo dele, fora do repositório, com licença própria.
+
+Regras de projeto para manter essa separação limpa:
+- **O pack é só dados**, carregado em tempo de execução. Nunca compilado no binário, nunca com código.
+- **Formato `.ppack`**: um arquivo zstd contendo um índice e N munições. Cada munição = o texto
+  `.pdes` que o designer já grava (`Drawing::to_text`) + metadados: nome, grupo, calibre,
+  velocidade de boca, massa real, nota. Primeira linha: `PENSIM-PACK 1`, nome do pack, autor,
+  texto de licença do pack.
+- **Onde fica**: pasta `packs/` ao lado de `projeteis/` (`saved_dir()` em `app.rs`). O app lista
+  cada pack como um grupo no seletor de munição, abaixo da biblioteca gratuita.
+- **Ferramenta de empacotar** no próprio app: "Exportar meus projéteis salvos como pack".
+- **Sem trava no programa.** A AGPL não deixa restringir o código, e trava em arquivo de dados
+  é fácil de contornar. A proteção do pack são os termos de venda.
+- **Biblioteca gratuita** (`ammo.rs`) continua no repositório sob AGPL. O que o dono quiser
+  vender não pode ser commitado aqui.
+- No Android não há seletor de arquivos: o pack é copiado para a pasta de dados externa do app,
+  como já acontece com as imagens de fundo.
+
+Entra na fase 4, junto com a ligação do app ao núcleo novo.
+
+## 10. Estado do código na hora da passagem
 
 - Ramo `claude/android-ballistic-simulation-game-kajd4w`, tudo commitado.
 - A interface já tem: duração em µs (padrão 1000), chip "Partículas", botões de vista no menu
