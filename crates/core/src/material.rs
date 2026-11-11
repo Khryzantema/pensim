@@ -55,6 +55,30 @@ pub const LIBRARY: &[Material] = &[
     // Glass Textolite (G-10/FR-4, laminado de fibra de vidro e epóxi): ρ ≈ 1,85 g/cm³,
     // E ≈ 24 GPa, ruptura ~0,35 GPa, frágil, sem escoamento plástico; delamina/decompõe ~650 K
     m("Glass Textolite (G-10)", 1850.0, 24e9, 0.35e9, 0.0, 0.018, 1.6, 1100.0, 650.0, 0.0),
+    // ---- Materiais do PzGr 43 (12,8 cm) e blindagens (10/11/2026) ----
+    // ATENÇÃO: SEM ENSAIO. Os nomes seguem a descrição metalúrgica dada pelo dono (fonte não
+    // verificada); os números são ESTIMATIVAS: escoamento ≈ 3,05 MPa × BHN (a mesma relação que
+    // `adjust_rha` usa), BHN tirado de faixas típicas de memória (a confirmar), o resto herdado do
+    // material mais parecido. Ligas "original" e "fim de guerra" têm os mesmos números por falta
+    // de dado que as diferencie. Calibrar antes de confiar.
+    // blindagem de alta dureza (HHA, BHN ~500) e de face endurecida (FHA, BHN ~600). A FHA real
+    // é uma chapa de duas camadas (face dura + miolo tenaz); aqui é de camada única.
+    m("Aço blindagem HHA", 7850.0, 205e9, 1.525e9, 1.0e9, 0.08, 1.0, 477.0, 1800.0, 0.014),
+    m("Aço blindagem FHA (face dura)", 7850.0, 205e9, 1.83e9, 1.0e9, 0.05, 1.0, 477.0, 1800.0, 0.012),
+    // capa balística: chapa de aço doce estampada, sem tratamento térmico
+    m("Aço doce estampado (capa balística)", 7850.0, 205e9, 0.35e9, 0.5e9, 0.25, 1.0, 477.0, 1800.0, 0.022),
+    // capa perfurante AP: aço temperado, mais macio que o corpo (igual ao capuz APC)
+    m("Aço Cr-Ni cementado (capa AP)", 7850.0, 205e9, 1.25e9, 1.2e9, 0.10, 1.0, 477.0, 1800.0, 0.014),
+    m("Aço Cr-Mn (capa AP, fim de guerra)", 7850.0, 205e9, 1.25e9, 1.2e9, 0.10, 1.0, 477.0, 1800.0, 0.014),
+    // corpo do projétil: forjado, endurecimento diferencial (aqui uniforme, igual ao "projétil AP")
+    m("Aço Cr-Ni-Mo forjado (corpo AP)", 7850.0, 205e9, 2.00e9, 1.0e9, 0.06, 1.0, 477.0, 1800.0, 0.012),
+    m("Aço Cr-Mn-V forjado (corpo AP, fim de guerra)", 7850.0, 205e9, 2.00e9, 1.0e9, 0.06, 1.0, 477.0, 1800.0, 0.012),
+    // fita de condução de ferro sinterizado (FES): densidade e resistência ESTIMADAS (porosidade)
+    m("Ferro sinterizado (fita de condução, FES)", 6800.0, 130e9, 0.20e9, 0.3e9, 0.10, 1.0, 460.0, 1800.0, 0.01),
+    // carga explosiva: hexogênio flegmatizado (RDX + cera); mesmo modelo do "Enchimento"
+    m("Hexogen flegmatizado (carga HE)", 1650.0, 8e9, 0.06e9, 0.0, 0.05, 3.0, 1000.0, 700.0, 0.0),
+    // espoleta de base: latão (cartucho, Cu-Zn)
+    m("Latão (espoleta de base)", 8500.0, 100e9, 0.20e9, 0.4e9, 0.30, 1.0, 380.0, 1190.0, 0.025),
 ];
 
 impl Material {

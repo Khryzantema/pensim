@@ -502,7 +502,9 @@ pub fn revolution_x(radius: &dyn Fn(f64) -> f64, x0: f64, x1: f64, nd: usize, sy
     let rmax = (0..=200).map(|k| radius(x0 + (x1 - x0) * k as f64 / 200.0)).fold(0.0, f64::max);
     let dx = 2.0 * rmax / nd as f64;
     let nx = ((x1 - x0) / dx).round().max(1.0) as usize;
-    let rmin = 0.25 * dx;
+    // raio mínimo da ponta: o elemento transversal mede 2·r/nd, então r = 0,25·dx dava elementos de
+    // rmax/nd² (aborto no contato do OpenCourant). MESH_RMIN = fração de rmax (experimentos).
+    let rmin = std::env::var("MESH_RMIN").ok().and_then(|v| v.parse::<f64>().ok()).map_or(0.25 * dx, |f| f * rmax);
     let (disk, quads) = o_disk(nd);
     let nd2 = disk.len();
     let mut m = HexMesh::default();

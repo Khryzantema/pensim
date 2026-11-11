@@ -219,7 +219,7 @@ pub fn from_library(m: &crate::material::Material) -> FemMat {
         0.22
     } else if n.contains("Alum") || n.contains("Cobre") || n.contains("Latão") {
         0.34
-    } else if n.contains("Enchimento") {
+    } else if n.contains("Enchimento") || n.contains("Hexogen") {
         0.35
     } else if n.contains("tungst") {
         0.28
@@ -231,15 +231,15 @@ pub fn from_library(m: &crate::material::Material) -> FemMat {
     let steel_eos = Eos::MieGruneisen { c0: 4578.0, s: 1.33, gamma0: 1.67 };
     let steel_dmg = JcDamage { d: [0.05, 3.44, -2.12, 0.002, 0.61] };
     let jc = |a: f64, b: f64, nn: f64, c: f64, mm: f64| JcStrength { a, b, n: nn, c, m: mm, eps_dot0: 1.0 };
-    let (jcs, dmg, eos, brittle): (JcStrength, Option<JcDamage>, Eos, Option<f64>) = if n.contains("RHA") {
+    let (jcs, dmg, eos, brittle): (JcStrength, Option<JcDamage>, Eos, Option<f64>) = if n.contains("RHA") || n.contains("HHA") || n.contains("FHA") {
         (jc(m.yield_strength, 510e6, 0.26, 0.014, 1.03), Some(steel_dmg), steel_eos, None)
     } else if n.contains("Aço doce") {
         // aço 1006 (Johnson & Cook 1983)
         (jc(m.yield_strength, 275e6, 0.36, 0.022, 1.0), Some(JcDamage { d: [-2.2, 5.43, -0.47, 0.016, 0.63] }), steel_eos, None)
-    } else if n.contains("projétil AP") {
+    } else if n.contains("projétil AP") || n.contains("corpo AP") {
         // aço temperado de núcleo: duro e pouco dúctil
         (jc(m.yield_strength, 300e6, 0.2, 0.012, 1.0), Some(JcDamage { d: [0.0, 0.3, -1.5, 0.0, 0.0] }), steel_eos, None)
-    } else if n.contains("capuz") {
+    } else if n.contains("capuz") || n.contains("capa AP") {
         (jc(m.yield_strength, 600e6, 0.26, 0.014, 1.0), Some(JcDamage { d: [0.02, 1.5, -2.0, 0.0, 0.0] }), steel_eos, None)
     } else if n.contains("Aço") {
         (jc(m.yield_strength, 510e6, 0.26, 0.014, 1.03), Some(steel_dmg), steel_eos, None)
@@ -259,6 +259,9 @@ pub fn from_library(m: &crate::material::Material) -> FemMat {
         (l.jc, l.dmg, l.eos, None)
     } else if n.contains("Latão") {
         (jc(m.yield_strength, 400e6, 0.3, 0.025, 1.0), Some(JcDamage { d: [0.54, 4.89, -3.03, 0.014, 1.12] }), Eos::MieGruneisen { c0: 3726.0, s: 1.434, gamma0: 2.04 }, None)
+    } else if n.contains("Ferro sinterizado") {
+        // sinterizado: pouco dúctil (porosidade); parâmetros estimados
+        (jc(m.yield_strength, 300e6, 0.3, 0.01, 1.0), Some(JcDamage { d: [0.1, 0.5, -1.5, 0.0, 0.0] }), steel_eos, None)
     } else if n.contains("Chumbo") {
         (jc(m.yield_strength, 40e6, 0.5, 0.05, 1.0), Some(JcDamage { d: [0.5, 3.0, -1.5, 0.0, 0.0] }), Eos::MieGruneisen { c0: 2006.0, s: 1.429, gamma0: 2.74 }, None)
     } else if n.contains("Concreto") {
@@ -267,7 +270,7 @@ pub fn from_library(m: &crate::material::Material) -> FemMat {
         (jc(2.5e9, 0.0, 1.0, 0.0, 1.0), None, Eos::Linear { k: k_lin }, Some(m.yield_strength.max(0.25e9)))
     } else if n.contains("Textolite") {
         (jc(m.yield_strength, 0.0, 1.0, 0.0, 1.0), None, Eos::Linear { k: k_lin }, Some(m.yield_strength))
-    } else if n.contains("Enchimento") {
+    } else if n.contains("Enchimento") || n.contains("Hexogen") {
         (jc(m.yield_strength, 0.0, 1.0, 0.0, 1.0), Some(JcDamage { d: [0.3, 0.0, 0.0, 0.0, 0.0] }), Eos::Linear { k: k_lin }, None)
     } else {
         let d = if m.comp_factor >= 5.0 { None } else { Some(steel_dmg) };

@@ -469,3 +469,38 @@ e pouco mais; o resultado global quase não muda (+2 desfechos, erro 19,8 → 18
 1800 m/s continua 345 (PenSim) × 51 (OC1), e o RHA a 60° piora (RHA 5 mm 1500 m/s: PenSim 429 ×
 OC 768). Ou seja, o desvio B e o limite balístico do RHA não vêm do elemento. Hipótese (a) não é
 a causa principal; PenSim fica com o hourglass atual. Próxima: (b) erosão.
+
+## 19. Dados reais, PzGr 43 e novos materiais (10/11/2026)
+
+**Calibração contra o mundo real.** O dono vai desenhar munições reais e calibrar-se contra
+gráficos/tabelas de penetração (não mais contra o OpenCourant). Primeiro caso: 12,8 cm PzGr 43
+(`~/.local/share/pensim/projeteis/pzgr_ 43.pdes`; coordenadas em mm; corpo 127,5 mm sem a fita;
+massa real 28,3 kg).
+- Massa do modelo (integração do desenho com as densidades da biblioteca): 29,88 kg (+5,6%).
+  Cobre = 6,07 kg, mas 5,2 kg estão na região 3 (ogiva, x −175…−48 mm): provável material errado
+  (a lista metalúrgica só dá a fita de condução como cobre). Pendente: o dono confirmar o material.
+- Teste do dono: 940 m/s × RHA 300 mm a 0°: penetrou ~150 mm e o projétil virou fragmentos
+  pequenos. Hipóteses não testadas: (1) região 3 de cobre; (2) erosão por distorção apagando o
+  corpo (aço AP genérico rompe com ~30% de deformação, seção 5 do item 5 da calibração).
+- Dados achados na web (todos fontes secundárias, divergem entre si; **não usar como ensaio
+  sem conferir**): massa 28,3 kg e ~950 m/s; penetração a 1000 m entre 143 e 242 mm conforme
+  a fonte (misturam 0° e 30°). O mais útil: dados alemães de fev/1944, via fórum Axis History
+  (t=224716): RHA a 30°, projétil inteiro, 202 mm a 835 m/s, 248 mm a 950, 278 mm a 1090 (falta
+  abrir o post e confirmar critério). Dureza do PzGr 39 (não 43): ponta ~Rc 61, núcleo ~Rc 59
+  (fórum, relatório alemão de 1942).
+- Método do limite balístico: `calib/fit_vbl.py` ajusta Recht-Ipson por série. vbl do PenSim sai
+  40% abaixo do OpenCourant no Al e 15–20% no RHA (ISOLID 24); o OC varia com o elemento (seção 18).
+
+**Materiais novos** (fim de `LIBRARY`, índices antigos intactos; mapeamento em
+`fem/material.rs::from_library`; `examples/mat_check.rs` lista os parâmetros): HHA, FHA,
+aço doce estampado (capa balística), Cr-Ni cementado e Cr-Mn (capa AP), Cr-Ni-Mo e Cr-Mn-V
+forjados (corpo), ferro sinterizado FES, hexogênio flegmatizado, latão de espoleta.
+**Os números são estimativas sem ensaio**: escoamento ≈ 3,05 MPa × BHN (BHN de memória, a
+confirmar: HHA ~500, FHA ~600), o resto herdado do material mais parecido; ligas "original" e
+"fim de guerra" têm os mesmos números; a FHA é de camada única (a real tem face + miolo);
+ductilidade do HHA/FHA provavelmente superestimada (usam o dano do RHA).
+
+**Ferramentas:** `calib_ammo` agora escreve a erosão `/DT/BRICK/DEL` (`DTFRAC`, padrão 0,2) e
+aceita `ISOLID`; `mesh::revolution_x` aceita `MESH_RMIN` (fração de rmax, só experimento).
+Aborto do OpenCourant nas munições (.50 BMG × 20 mm, 0°) **continua sem causa**: não é o dano
+JC, nem o `/DT/BRICK/DEL`, nem o tipo de elemento, nem a espessura da ponta (testado).
