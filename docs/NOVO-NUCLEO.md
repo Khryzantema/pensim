@@ -456,3 +456,16 @@ Leitura:
   a referência antiga (410,4) vem de outra coisa (CPU/compilador); a explicação da seção 17
   ("ordem de soma por núcleos") fica como hipótese NÃO confirmada.
 - Falta confirmar nos 80 casos (OpenCourant com ISOLID=1; ver seção seguinte).
+
+Confirmação nos 80 casos (OpenCourant com ISOLID=1, `calib/ref/isolid1.csv`; mesma métrica da seção 17):
+
+| OpenCourant | mesmo desfecho | perfuração clara (n) | erro médio | ≤5% | ≤10% |
+|---|---|---|---|---|---|
+| ISOLID 24 (referência) | 68/80 | 42 | 19,8% | 16 | 19 |
+| ISOLID 1 | 70/80 | 45 | 18,0% | 13 | 20 |
+
+Conclusão de (a): **só explica uma parte**. O elemento resolve o Al 10 mm a 0° em 700 m/s (404 × 302)
+e pouco mais; o resultado global quase não muda (+2 desfechos, erro 19,8 → 18,0%). RHA 10 mm 0° a
+1800 m/s continua 345 (PenSim) × 51 (OC1), e o RHA a 60° piora (RHA 5 mm 1500 m/s: PenSim 429 ×
+OC 768). Ou seja, o desvio B e o limite balístico do RHA não vêm do elemento. Hipótese (a) não é
+a causa principal; PenSim fica com o hourglass atual. Próxima: (b) erosão.
