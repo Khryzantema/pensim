@@ -524,3 +524,17 @@ Complementa a seção 18 com o refinamento que faltava. Caso Al 6061 10 mm, 0°,
   ND 12**, não erro do PenSim. Para comparar perto do limite balístico, usar ND ≥ 24 no
   OpenCourant (ou extrapolar em ND). O RHA a 60° (desvio B) e o RHA 10 mm a 1800 m/s (seção 18)
   ainda precisam do mesmo estudo antes de concluir.
+
+Segundo caso, RHA 5 mm, 0°, 1200 m/s (mesma máquina e método):
+
+| ND | PenSim | OpenCourant ISOLID 24 | OpenCourant ISOLID 1 |
+|---|---|---|---|
+| 12 | 354 | 50 | 42 |
+| 24 | 421 | 62 | 221 |
+
+- Aqui o quadro é outro: o ISOLID 24 do OpenCourant já está estável (50 → 62) e o desvio para o
+  PenSim **continua** com ND 24. O PenSim também não está convergido (+19%), e o ISOLID 1 muda
+  muito (42 → 221).
+- Leitura: no RHA o desvio A parece real (a chapa de RHA do PenSim cede antes), não só falta de
+  convergência. Candidatos: dano/erosão do RHA no PenSim (hipóteses b e c) e a dependência de
+  malha do próprio PenSim neste caso. O alumínio (caso anterior) e o RHA se comportam diferente.
