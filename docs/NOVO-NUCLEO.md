@@ -504,3 +504,23 @@ ductilidade do HHA/FHA provavelmente superestimada (usam o dano do RHA).
 aceita `ISOLID`; `mesh::revolution_x` aceita `MESH_RMIN` (fração de rmax, só experimento).
 Aborto do OpenCourant nas munições (.50 BMG × 20 mm, 0°) **continua sem causa**: não é o dano
 JC, nem o `/DT/BRICK/DEL`, nem o tipo de elemento, nem a espessura da ponta (testado).
+
+## 20. Desvio A — convergência de malha da referência (13/11/2026, sessão na nuvem)
+
+Complementa a seção 18 com o refinamento que faltava. Caso Al 6061 10 mm, 0°, 700 m/s,
+`calib/one.sh` nesta máquina (4 núcleos), vx residual [m/s]:
+
+| ND | PenSim | OpenCourant ISOLID 24 | OpenCourant ISOLID 1 |
+|---|---|---|---|
+| 12 | 404 | −60 | 302 |
+| 16 | 418 | 155 | 334 |
+| 24 | 417 | 243 | 369 |
+
+- O PenSim já está convergido em ND 12 (±3%).
+- As duas formulações de 1 ponto do OpenCourant sobem com o refinamento e se aproximam uma da
+  outra e do PenSim (diferença ISOLID 24 × 1: 362 → 179 → 126 m/s). Com ND 24 a referência ainda
+  não convergiu, mas caminha para ~400.
+- Leitura: neste caso, a maior parte do desvio A é **falta de convergência da referência em
+  ND 12**, não erro do PenSim. Para comparar perto do limite balístico, usar ND ≥ 24 no
+  OpenCourant (ou extrapolar em ND). O RHA a 60° (desvio B) e o RHA 10 mm a 1800 m/s (seção 18)
+  ainda precisam do mesmo estudo antes de concluir.
