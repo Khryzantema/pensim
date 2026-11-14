@@ -10,6 +10,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 out=$(OUT=$W "$ROOT/target/release/examples/calib_case")
 name=$(echo "$out" | awk '/^NAME/{print $2}')
 pv=$(echo "$out" | awk '/^RESULT/{print $3}')
+er=$(echo "$out" | awk -F'= ' '/^EROSAO/{print $2}')
 if [ "${SKIP_OC:-0}" = 1 ]; then echo "$name PenSim $pv"; exit 0; fi
 cd "$W"
 "$OC/exec/starter_linux64_gf" -i "${name}_0000.rad" -nt "$(nproc)" > /dev/null 2>&1
@@ -31,4 +32,4 @@ for k, c in cols.items():
 print(f"{p / m:.1f}")
 P
 )
-echo "$name PenSim $pv OpenCourant $ov"
+echo "$name PenSim $pv (erosão $er) OpenCourant $ov"

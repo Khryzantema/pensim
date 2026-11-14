@@ -31,6 +31,23 @@ fn hg_kappa() -> f64 {
     static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *K.get_or_init(|| std::env::var("PENSIM_HG").ok().and_then(|v| v.parse().ok()).unwrap_or(HG_KAPPA))
 }
+/// Fração do passo inicial abaixo da qual o elemento é apagado (PENSIM_EROS_DT para experimentos)
+fn erosion_dt_frac() -> f64 {
+    static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_EROS_DT").ok().and_then(|v| v.parse().ok()).unwrap_or(EROSION_DT_FRAC))
+}
+fn q1() -> f64 {
+    static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_Q1").ok().and_then(|v| v.parse().ok()).unwrap_or(Q1))
+}
+fn q2() -> f64 {
+    static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_Q2").ok().and_then(|v| v.parse().ok()).unwrap_or(Q2))
+}
+fn log_erosion() -> bool {
+    static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_LOG_EROSION").is_ok())
+}
 /// Fração do limite de estabilidade
 const DT_SCALE: f64 = 0.9;
 
@@ -500,7 +517,7 @@ impl Fem {
                 st.p = m.pressure(mu, st.e_int / st.v0);
                 // --- viscosidade artificial (só em compressão)
                 st.c = sound_speed(m, mu, rho);
-                st.q = if dv < 0.0 { rho * lc * (Q1 * lc * dv * dv - Q2 * st.c * dv) } else { 0.0 };
+                st.q = if dv < 0.0 { rho * lc * (q1() * lc * dv * dv - q2() * st.c * dv) } else { 0.0 };
                 // --- energia interna: ∫ σ:D dV dt com σ médio (σ = s − (p+q) I)
                 let s_mid: [f64; 6] = std::array::from_fn(|k| 0.5 * (s_old[k] + st.s[k]));
                 let pq_mid = 0.5 * (pq_old + st.p + st.q);
@@ -531,7 +548,7 @@ impl Fem {
                         Some(0)
                     } else if brittle {
                         Some(1)
-                    } else if dt_e < EROSION_DT_FRAC * st.dt0 {
+                    } else if dt_e < erosion_dt_frac() * st.dt0 {
                         Some(2)
                     } else if vol <= 0.0 {
                         Some(3)
@@ -540,6 +557,12 @@ impl Fem {
                     };
                     if let Some(r) = reason {
                         why[r].fetch_add(1, Ordering::Relaxed);
+                        if log_erosion() {
+                            let c = (0..3).map(|a| xe.iter().map(|q| q[a]).sum::<f64>() / 8.0).collect::<Vec<_>>();
+                            let j2n = 0.5 * (st.s[0] * st.s[0] + st.s[1] * st.s[1] + st.s[2] * st.s[2]) + st.s[3] * st.s[3] + st.s[4] * st.s[4] + st.s[5] * st.s[5];
+                            let seq_n = (3.0 * j2n).sqrt().max(1.0);
+                            eprintln!("EROSAO_EL {} {} {} {:.4} {:.4} {:.4} {:.3} {:.3} {:.1} {:.3e} {:.3e}", e, parts[e], r, c[0] * 1e3, c[1] * 1e3, c[2] * 1e3, -st.p / seq_n, st.eps_p, st.temp, st.p, seq_n);
+                        }
                         st.alive = false;
                         *fe = [[0.0; 3]; 8];
                         eroded.fetch_add(1, Ordering::Relaxed);
@@ -812,6 +835,17 @@ impl Fem {
             vt += st.vol;
         }
         acc.map(|v| v / vt.max(1e-30))
+    }
+
+    /// Pressão do elemento (EOS, compressão > 0), sem a viscosidade artificial.
+    pub fn pressure(&self, e: usize) -> f64 {
+        self.elem[e].p
+    }
+    pub fn damage(&self, e: usize) -> f64 {
+        self.elem[e].dmg
+    }
+    pub fn is_alive(&self, e: usize) -> bool {
+        self.elem[e].alive
     }
 
     pub fn eps_p(&self, e: usize) -> f64 {

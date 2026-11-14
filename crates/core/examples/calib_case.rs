@@ -54,7 +54,31 @@ fn main() {
     m.hex = m.hex.iter().map(|h| mesh::orient(&m.x, *h)).collect();
     let n = m.n_nodes();
     let v0: Vec<[f64; 3]> = (0..n).map(|i| if i < ns { [v, 0.0, 0.0] } else { [0.0; 3] }).collect();
-    let mats = vec![lib::steel_4340(), plate_mat];
+    let mut mats = vec![lib::steel_4340(), plate_mat];
+    // JC_D3 / JC_D5: troca esses termos do dano nos dois materiais (diagnóstico)
+    for m in &mut mats {
+        if let Some(d) = m.dmg.as_mut() {
+            if let Ok(v) = std::env::var("JC_D3") {
+                d.d[2] = v.parse().unwrap();
+            }
+            if let Ok(v) = std::env::var("JC_D5") {
+                d.d[4] = v.parse().unwrap();
+            }
+        }
+    }
+    // NOEOS=1: equação de estado linear (K = ρc0²) nos dois, sem Mie-Grüneisen (diagnóstico)
+    if env("NOEOS", 0.0) > 0.5 {
+        for m in &mut mats {
+            let k = m.bulk();
+            m.eos = pensim_core::fem::material::Eos::Linear { k };
+        }
+    }
+    // NODMG=1: sem dano Johnson-Cook nos dois solvers (diagnóstico: separa dano de plasticidade)
+    if env("NODMG", 0.0) > 0.5 {
+        for m in &mut mats {
+            m.dmg = None;
+        }
+    }
     let name = format!("esf_{}_{:.1}mm_{:.0}g_{:.0}ms_nd{}", std::env::var("MAT").unwrap_or("al".into()), t / mm, ang, v, nd);
     // passo inicial do PenSim: o OpenCourant apaga elementos abaixo de 10% dele (mesma regra)
     let dt0 = {
@@ -90,8 +114,46 @@ fn main() {
     md.friction = env("FRIC", 0.1);
     let t0 = std::time::Instant::now();
     let mut sim = Fem::new(md);
-    sim.run_until(dur);
+    if env("PROBE", 0.0) > 0.5 {
+        // a cada 4 µs: 1% mais tracionado da pressão por peça e fração com triaxialidade > 1
+        let mut t = 0.0;
+        while t < dur - 1e-12 {
+            t += env("PROBE_DT", 4.0) * 1e-6;
+            sim.run_until(t.min(dur));
+            for part in 0..2u8 {
+                let mut ps: Vec<f64> = (0..sim.n_elems()).filter(|&e| sim.mesh.part[e] == part && sim.is_alive(e)).map(|e| sim.pressure(e)).collect();
+                ps.sort_by(|a, b| a.total_cmp(b));
+                let k = (ps.len() / 100).max(1);
+                let p1 = ps[..k].iter().sum::<f64>() / k as f64;
+                let p99 = ps[ps.len() - k..].iter().sum::<f64>() / k as f64;
+                let tri = (0..sim.n_elems()).filter(|&e| sim.mesh.part[e] == part && sim.is_alive(e) && -sim.pressure(e) > sim.von_mises(e)).count();
+                let dm: Vec<f64> = (0..sim.n_elems()).filter(|&e| sim.mesh.part[e] == part).map(|e| if sim.is_alive(e) { sim.damage(e).min(1.0) } else { 1.0 }).collect();
+                let n5 = dm.iter().filter(|&&d| d >= 0.5).count();
+                let n1 = dm.iter().filter(|&&d| d >= 0.999).count();
+                let n2 = dm.iter().filter(|&&d| d >= 0.2).count();
+                println!("PROBE t={:.0}us peca {} p1%={:.2} p99%={:.2} GPa  triax>1: {}  dano>=0.2: {} >=0.5: {} rompidos: {}", t * 1e6, part, p1 / 1e9, p99 / 1e9, tri, n2, n5, n1);
+            }
+        }
+    } else {
+        sim.run_until(dur);
+    }
     let vp = sim.part_velocity(0);
+    println!("EROSAO [dano, fragil, distorcao, volume] = {:?}", sim.erosion_reasons());
+    {
+        let mut per = [0usize; 2];
+        for (e, &a) in sim.alive.iter().enumerate() {
+            if !a {
+                per[sim.mesh.part[e].min(1) as usize] += 1;
+            }
+        }
+        println!("APAGADOS esfera {} chapa {}", per[0], per[1]);
+        // deformação plástica máxima e média dos elementos da chapa sob a esfera (vivos ou não)
+        let ne = sim.n_elems();
+        let mut eps: Vec<f64> = (0..ne).filter(|&e| sim.mesh.part[e] == 1).map(|e| sim.eps_p(e)).collect();
+        eps.sort_by(|a, b| b.total_cmp(a));
+        let top: f64 = eps.iter().take(300).sum::<f64>() / 300.0;
+        println!("EPS_P chapa: max {:.3}, média dos 300 maiores {:.3}", eps[0], top);
+    }
     println!("RESULT {} {:.3} {:.3} {:.3} {} {:.4} {:.2}", name, vp[0], vp[1], vp[2], sim.n_eroded, 100.0 * sim.energy.balance(sim.e0) / sim.e0, t0.elapsed().as_secs_f64());
     println!("PenSim: v_cg esfera = ({:.1}, {:.1}, {:.1}) m/s, |v| = {:.1}, erodidos {}, energia {:.2}%, {:.1} s", vp[0], vp[1], vp[2], (vp[0] * vp[0] + vp[1] * vp[1] + vp[2] * vp[2]).sqrt(), sim.n_eroded, 100.0 * sim.energy.balance(sim.e0) / sim.e0, t0.elapsed().as_secs_f64());
 }

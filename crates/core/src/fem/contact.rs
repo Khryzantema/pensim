@@ -13,6 +13,15 @@ pub const PENALTY: f64 = 0.1;
 /// Rigidez mínima pela massa do nó e o passo (tipo SOFT=1 do LS-DYNA): k ≥ SOFT·m/dt²
 pub const SOFT: f64 = 0.1;
 
+fn cdamp() -> f64 {
+    static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_CDAMP").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0))
+}
+fn soft() -> f64 {
+    static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_SOFT").ok().and_then(|v| v.parse().ok()).unwrap_or(SOFT))
+}
+
 /// Face externa: elemento dono e índice local da face.
 #[derive(Clone, Copy, Debug)]
 pub struct SurfFace {
@@ -208,8 +217,15 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
             // massa efetiva do par nó × face (a reação vai para os nós da face, que podem ser leves)
             let mf: f64 = (0..4).map(|k| w[k] * c.mass[f.n[k] as usize]).sum::<f64>().max(1e-30);
             let meff = mn * mf / (mn + mf);
-            let k = f.k.max(SOFT * mn / (c.dt * c.dt)).min(if particle { 0.25 * meff / (c.dt * c.dt) } else { f64::INFINITY });
-            let fnm = k * eff;
+            let k = f.k.max(soft() * mn / (c.dt * c.dt)).min(if particle { 0.25 * meff / (c.dt * c.dt) } else { f64::INFINITY });
+            let mut fnm = k * eff;
+            // amortecimento viscoso do contato (fração ζ do crítico do par nó × face)
+            let zeta = cdamp();
+            if zeta > 0.0 && eff > 0.0 {
+                let mf: f64 = (0..4).map(|kk| w[kk] * c.mass[f.n[kk] as usize]).sum::<f64>().max(1e-30);
+                let meff = mn * mf / (mn + mf);
+                fnm = (fnm - 2.0 * zeta * (k * meff).sqrt() * vn0).max(0.0);
+            }
             let mut force = f.nrm.map(|v| v * fnm);
             // atrito de Coulomb, limitado a não inverter a velocidade relativa no passo
             if c.friction > 0.0 {
