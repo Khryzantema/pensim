@@ -599,3 +599,31 @@ Também nesta etapa (app): contador de penetração = máximo no tempo da parte 
 (sem fragmentos soltos), medido da face da frente do alvo; crash ao iniciar outra simulação
 (caches de desenho chaveados pelo número da simulação guardavam dados da anterior) corrigido e
 conferido; fragmentos atrás das faces escondidos com um buffer de profundidade de baixa resolução.
+
+## 23. Velocidade do contato e teste do limiar de erosão por distorção
+
+Velocidade (M61, 16 nós, 30 µs; PENSIM_FEMPROF): o contato era 54% do tempo. A grade de busca
+usava a MAIOR face como célula (cada nó testava centenas de faces) e era um HashMap em série.
+Agora: célula da face mediana, cada face nas células que a caixa real dela toca, uma célula por
+nó, pares ordenados em paralelo; propriedades só das faces de superfície; energia e passo
+estável na mesma varredura dos elementos. 142 → 85 s, resultado idêntico (293 m/s, 1366
+erodidos). Tentado e desfeito: reaproveitar a grade entre passos (a erosão muda a superfície
+quase todo passo; ficou mais lento). Escalonamento de massa seletivo (PENSIM_MS) fica opcional:
+com 12 nós não acelera (o passo no impacto é limitado pelos elementos esmagados) e mudou a
+velocidade residual em 3–13%.
+
+Al 5 mm 45° 1100 m/s (PenSim 723 × OpenCourant 816): não é o amortecimento (ζ = 0: 708), nem as
+partículas (fora do contato: 728), nem o elemento do OpenCourant (ISOLID 1: 818). O atrito pesa o
+dobro no PenSim (sem atrito: +52 contra +23 m/s). Sem dano nos dois, o PenSim resistia muito
+mais (377 × 702): o critério de distorção do PenSim (passo do elemento < 10% do inicial dele)
+apaga depois do /DT/BRICK/DEL do deck. Com 20%: sem dano 684 × 702 (45°) e 396 × 376 (0°).
+
+80 casos com 20% (calib/ref/eros02.csv) contra o atual (efpos.csv):
+
+| | mesmo desfecho | erro médio | mediana | ≤ 5% | ≤ 10% | Al (viés) | RHA (viés) |
+|---|---|---|---|---|---|---|---|
+| 10% (atual) | 73/80 | 6,4% | 4,5% | 25/47 | 37/47 | 6,8% (−1,8%) | 5,9% (+4,2%) |
+| 20% | 71/80 | 6,9% | 3,5% | 29/47 | 36/47 | 6,0% (+3,8%) | 8,2% (+4,7%) |
+
+Misto: melhora o Al em ângulo (Al 10 mm 45° 1100: −26% → +2,5%) e piora RHA perto do limite.
+Padrão continua 10%; o atrito é o próximo suspeito.
