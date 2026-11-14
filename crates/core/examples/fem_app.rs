@@ -18,6 +18,7 @@ fn main() {
         let p = sim.progress();
         if p - last > 0.1 { last = p; let o = sim.outcome(); eprintln!("  {:.0}% em {:.1} s (passo {}, dt {:.2e}) v_res {:.0} {:?}", p * 100.0, t.elapsed().as_secs_f64(), sim.steps(), sim.dt(), o.v_residual, o.kind); }
     }
+    if std::env::var("PENSIM_FEMPROF").is_ok() { let f = |i: usize| pensim_core::fem::PROF_T[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9; eprintln!("PERFIL elementos {:.1} s, contato {:.1} s (superfície {:.1}, busca {:.1} [grade {:.1}], soma {:.1}), total {:.1} s", f(0), f(1), f(2), f(3), f(5), f(4), t.elapsed().as_secs_f64()); }
     let o = sim.outcome();
     let sz: usize = sim.frames.iter().map(|f| f.size_bytes()).sum();
     eprintln!("fim {:.1} s: {:?} v_res {:.0} m/s, energia {:.2}%, erodidos {}, {} quadros ({:.1} MB)", t.elapsed().as_secs_f64(), o.kind, o.v_residual, o.energy_error_pct, sim.fem.n_eroded, sim.frames.len(), sz as f64 / 1e6);

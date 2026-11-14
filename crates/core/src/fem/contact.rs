@@ -6,7 +6,6 @@
 //! Rigidez: k = s·K·A²/V da face (forma padrão dos códigos explícitos).
 use super::mesh::FACES;
 use rayon::prelude::*;
-use std::collections::HashMap;
 
 /// Fração da rigidez do elemento usada na penalidade.
 pub const PENALTY: f64 = 0.1;
@@ -48,7 +47,7 @@ pub struct ContactInput<'a> {
     pub mass: &'a [f64],
     pub hex: &'a [[u32; 8]],
     pub alive: &'a [bool],
-    /// K do material da face (por elemento) e volume atual
+    /// por face de `surf` (mesma ordem): K do material do elemento dono, volume e lc atuais
     pub bulk: &'a [f64],
     pub vol: &'a [f64],
     pub lc: &'a [f64],
@@ -102,7 +101,8 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
     let faces: Vec<F> = c
         .surf
         .par_iter()
-        .map(|sf| {
+        .enumerate()
+        .map(|(fi, sf)| {
             let h = &c.hex[sf.elem as usize];
             let n = FACES[sf.face as usize].map(|l| h[l]);
             let p = n.map(|k| c.x[k as usize]);
@@ -116,19 +116,47 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
             if dot(sub(cen, ec), nrm) < 0.0 {
                 nrm = nrm.map(|v| -v);
             }
-            let e = sf.elem as usize;
-            let k = PENALTY * c.bulk[e] * area * area / c.vol[e].max(1e-30);
+            let k = PENALTY * c.bulk[fi] * area * area / c.vol[fi].max(1e-30);
             let r = p.iter().map(|q| dot(sub(*q, cen), sub(*q, cen)).sqrt()).fold(0.0, f64::max);
-            F { n, p, cen, nrm, k, depth: 0.5 * c.lc[e], r }
+            F { n, p, cen, nrm, k, depth: 0.5 * c.lc[fi], r }
         })
         .collect();
+    let tg = super::prof().then(std::time::Instant::now);
     // grade espacial pelas faces
-    let cell = faces.iter().map(|f| 2.0 * f.r.max(f.depth)).fold(0.0, f64::max).max(1e-9);
+    // célula do tamanho da face MEDIANA; cada face entra em todas as células que a caixa dela
+    // (centro ± (r + profundidade)) toca, e o nó consulta só a própria célula. Antes a célula era
+    // a da MAIOR face e o nó varria 27 células: com algumas faces grandes, cada nó testava
+    // centenas de faces (a busca era ~45% do tempo total). O conjunto encontrado é o mesmo: um
+    // nó que conta para a face está a menos de r + profundidade do centro dela.
+    let mut sz: Vec<f64> = faces.iter().map(|f| f.r.max(f.depth)).collect();
+    let cell = if sz.is_empty() {
+        1e-9
+    } else {
+        let mid = sz.len() / 2;
+        sz.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+        (2.0 * sz[mid]).max(1e-9)
+    };
     let key = |p: [f64; 3]| p.map(|v| (v / cell).floor() as i64);
-    let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::with_capacity(faces.len());
-    for (i, f) in faces.iter().enumerate() {
-        grid.entry(key(f.cen)).or_default().push(i as u32);
-    }
+    // célula → número de 64 bits (21 bits por eixo); grade = pares (célula, face) ordenados
+    let pack = |k: [i64; 3]| -> u64 { k.iter().fold(0u64, |a, &v| (a << 21) | ((v + (1 << 20)) as u64 & 0x1F_FFFF)) };
+    let mut pairs: Vec<(u64, u32)> = faces
+        .par_iter()
+        .enumerate()
+        .flat_map_iter(|(i, f)| {
+            // caixa dos vértices ± profundidade (contém o prisma face × [−depth·n, 0])
+            let lo = key(std::array::from_fn(|a| f.p.iter().map(|q| q[a]).fold(f64::MAX, f64::min) - f.depth));
+            let hi = key(std::array::from_fn(|a| f.p.iter().map(|q| q[a]).fold(f64::MIN, f64::max) + f.depth));
+            (lo[0]..=hi[0]).flat_map(move |a| (lo[1]..=hi[1]).flat_map(move |b| (lo[2]..=hi[2]).map(move |d| (pack([a, b, d]), i as u32))))
+        })
+        .collect();
+    pairs.par_sort_unstable();
+    let cell_faces = |k: [i64; 3]| -> &[(u64, u32)] {
+        let p = pack(k);
+        let a = pairs.partition_point(|x| x.0 < p);
+        let b = a + pairs[a..].partition_point(|x| x.0 == p);
+        &pairs[a..b]
+    };
+    super::prof_add(5, tg);
     // elementos vivos de um nó
     let node_elems = |k: u32| -> smallvec_like::Small {
         let mut s = smallvec_like::Small::new();
@@ -149,11 +177,11 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
             let particle = my.iter().next().is_none();
             let kc = key(xp);
             let mut best: Option<(f64, usize, [f64; 4])> = None;
-            for dxk in -1..=1 {
-                for dyk in -1..=1 {
-                    for dzk in -1..=1 {
-                        let Some(list) = grid.get(&[kc[0] + dxk, kc[1] + dyk, kc[2] + dzk]) else { continue };
-                        for &fi in list {
+            for dxk in 0..=0 {
+                for dyk in 0..=0 {
+                    for dzk in 0..=0 {
+                        let list = cell_faces([kc[0] + dxk, kc[1] + dyk, kc[2] + dzk]);
+                        for &(_, fi) in list {
                             let f = &faces[fi as usize];
                             if f.n.contains(&nd) {
                                 continue;

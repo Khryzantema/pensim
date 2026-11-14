@@ -53,6 +53,17 @@ fn log_ms() -> bool {
     static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *K.get_or_init(|| std::env::var("PENSIM_LOG_MS").is_ok())
 }
+/// PENSIM_FEMPROF: tempo acumulado [ns] em elementos e contato (perfil grosseiro)
+pub static PROF_T: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+pub(crate) fn prof_add(i: usize, t: Option<std::time::Instant>) {
+    if let Some(t) = t {
+        PROF_T[i].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+}
+pub(crate) fn prof() -> bool {
+    static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_FEMPROF").is_ok())
+}
 fn log_erosion() -> bool {
     static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *K.get_or_init(|| std::env::var("PENSIM_LOG_EROSION").is_ok())
@@ -428,7 +439,11 @@ impl Fem {
             });
         }
         // 3. elementos: taxa de deformação com v n+½ e geometria n+1 → tensão n+1 → forças n+1
+        let t_el = prof().then(std::time::Instant::now);
         self.element_pass(dt, false);
+        if let Some(t) = t_el {
+            PROF_T[0].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
         let er = self.eroded.swap(0, Ordering::Relaxed);
         if er > 0 {
             self.n_eroded += er;
@@ -442,7 +457,11 @@ impl Fem {
             // trabalho do contato no passo com a força média (n e n+1), como nos elementos
             let fc_old = std::mem::take(&mut self.fc);
             self.fc = vec![[0.0; 3]; fc_old.len()];
+            let t_c = prof().then(std::time::Instant::now);
             self.contact_pass();
+            if let Some(t) = t_c {
+                PROF_T[1].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
             let w: f64 = fc_old
                 .par_iter()
                 .zip(self.fc.par_iter())
@@ -710,12 +729,17 @@ impl Fem {
 
     /// Forças de contato do instante atual, somadas em `f` e guardadas em `fc`.
     fn contact_pass(&mut self) {
+        let t0 = prof().then(std::time::Instant::now);
         if self.surf_dirty {
             self.rebuild_surface();
         }
-        let bulk: Vec<f64> = (0..self.elem.len()).map(|e| self.mats[self.mesh.part[e] as usize].bulk()).collect();
-        let vol: Vec<f64> = self.elem.iter().map(|e| e.vol).collect();
-        let lc: Vec<f64> = self.elem.iter().map(|e| e.lc).collect();
+        prof_add(2, t0);
+        // só as faces de superfície (antes: os 3 vetores do tamanho da malha, em série, a cada passo)
+        let (mats, part, el) = (&self.mats, &self.mesh.part, &self.elem);
+        let bulk: Vec<f64> = self.surf.par_iter().map(|sf| mats[part[sf.elem as usize] as usize].bulk()).collect();
+        let vol: Vec<f64> = self.surf.par_iter().map(|sf| el[sf.elem as usize].vol).collect();
+        let lc: Vec<f64> = self.surf.par_iter().map(|sf| el[sf.elem as usize].lc).collect();
+        let t1 = prof().then(std::time::Instant::now);
         let hits = contact::forces(&contact::ContactInput {
             x: &self.x,
             v: &self.v,
@@ -733,6 +757,8 @@ impl Fem {
             dt: self.dt.max(1e-15),
             prev_offset: &self.c_offset,
         });
+        prof_add(3, t1);
+        let t2 = prof().then(std::time::Instant::now);
         self.c_offset.par_iter_mut().for_each(|o| *o = f64::NAN);
         for h in &hits {
             self.c_offset[h.node as usize] = h.offset;
@@ -752,6 +778,7 @@ impl Fem {
             f[1] += c[1];
             f[2] += c[2];
         });
+        prof_add(4, t2);
     }
 
     // ----------------------------------------------------------------- consultas
