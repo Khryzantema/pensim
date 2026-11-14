@@ -14,6 +14,8 @@ pub const SOFT: f64 = 0.1;
 /// Amortecimento viscoso no contato (fração do crítico). 0,3 calibrado nos 80 casos esfera×chapa
 /// contra o OpenCourant (docs/NOVO-NUCLEO.md, seção 21); PENSIM_CDAMP muda.
 pub const CDAMP: f64 = 0.3;
+/// Velocidade máxima [m/s] com que uma partícula nascida dentro do outro corpo é empurrada para fora.
+pub const PART_EXIT_V: f64 = 5.0;
 
 fn cdamp() -> f64 {
     static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
@@ -145,7 +147,11 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
         .flat_map_iter(|(i, f)| {
             // caixa dos vértices ± profundidade (contém o prisma face × [−depth·n, 0])
             let lo = key(std::array::from_fn(|a| f.p.iter().map(|q| q[a]).fold(f64::MAX, f64::min) - f.depth));
-            let hi = key(std::array::from_fn(|a| f.p.iter().map(|q| q[a]).fold(f64::MIN, f64::max) + f.depth));
+            let mut hi = key(std::array::from_fn(|a| f.p.iter().map(|q| q[a]).fold(f64::MIN, f64::max) + f.depth));
+            // face absurdamente esticada (nó disparado): não deixa ela ocupar milhões de células
+            for a in 0..3 {
+                hi[a] = hi[a].min(lo[a] + 64);
+            }
             (lo[0]..=hi[0]).flat_map(move |a| (lo[1]..=hi[1]).flat_map(move |b| (lo[2]..=hi[2]).map(move |d| (pack([a, b, d]), i as u32))))
         })
         .collect();
@@ -233,13 +239,15 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
             let vf0 = [0, 1, 2].map(|a| (0..4).map(|k| w[k] * c.v[f.n[k] as usize][a]).sum::<f64>());
             let vn0 = dot(sub(c.v[nd as usize], vf0), f.nrm);
             let prev = c.prev_offset[nd as usize];
-            // partícula: a penetração com que ela nasceu é descontada aos poucos (5% por passo),
-            // então ela sai de dentro do outro corpo devagar, sem esmagar a borda da cratera
+            // partícula: a penetração com que ela nasceu é descontada aos poucos, a no máximo
+            // PART_EXIT_V por passo: ela sai de dentro do outro corpo devagar. (Antes: 5% da
+            // penetração por passo — com dt de ns e a rigidez do contato isso dava milhares de m/s
+            // a um nó de massa minúscula, que depois arremessava o projétil.)
             let offset = if prev.is_nan() {
                 let reach = 2.0 * vn0.abs() * c.dt + 1e-3 * f.depth;
                 (pen - reach).max(0.0)
             } else if particle {
-                (prev * 0.95).min(pen)
+                (prev - PART_EXIT_V * c.dt).max(0.0).min(pen)
             } else {
                 prev.min(pen)
             };
@@ -248,7 +256,10 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
             // massa efetiva do par nó × face (a reação vai para os nós da face, que podem ser leves)
             let mf: f64 = (0..4).map(|k| w[k] * c.mass[f.n[k] as usize]).sum::<f64>().max(1e-30);
             let meff = mn * mf / (mn + mf);
-            let k = f.k.max(soft() * mn / (c.dt * c.dt)).min(if particle { 0.25 * meff / (c.dt * c.dt) } else { f64::INFINITY });
+            // limite de estabilidade da mola nó × face no integrador explícito (k·dt²/m < 4): a
+            // rigidez vem da face (pode ser de um elemento grande e rígido do alvo) mas atua num nó
+            // que pode ser minúsculo (ponta da ogiva) — sem o limite, o contato explodia
+            let k = f.k.max(soft() * mn / (c.dt * c.dt)).min(if particle { 0.25 } else { 0.5 } * meff / (c.dt * c.dt));
             let mut fnm = k * eff;
             // amortecimento viscoso do contato (fração ζ do crítico do par nó × face)
             let zeta = cdamp();
@@ -256,6 +267,13 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
                 let mf: f64 = (0..4).map(|kk| w[kk] * c.mass[f.n[kk] as usize]).sum::<f64>().max(1e-30);
                 let meff = mn * mf / (mn + mf);
                 fnm = (fnm - 2.0 * zeta * (k * meff).sqrt() * vn0).max(0.0);
+            }
+            // partícula (nó solto, muitas vezes de massa minúscula): a força no passo só pode parar a
+            // aproximação e afastar a no máximo PART_EXIT_V. Só o limite de rigidez deixava ela
+            // ganhar 0,25·penetração/dt num passo (milhares de m/s ao nascer enterrada no outro
+            // corpo), e esse nó depois arremessava o projétil inteiro.
+            if particle {
+                fnm = fnm.min((meff * (PART_EXIT_V - vn0) / c.dt).max(0.0));
             }
             let mut force = f.nrm.map(|v| v * fnm);
             // atrito de Coulomb, limitado a não inverter a velocidade relativa no passo
