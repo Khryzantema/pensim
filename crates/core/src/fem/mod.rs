@@ -44,6 +44,15 @@ fn q2() -> f64 {
     static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *K.get_or_init(|| std::env::var("PENSIM_Q2").ok().and_then(|v| v.parse().ok()).unwrap_or(Q2))
 }
+/// Escalonamento de massa seletivo: alvo = fração da mediana dos passos (0 = desligado).
+fn ms_frac() -> f64 {
+    static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0))
+}
+fn log_ms() -> bool {
+    static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_LOG_MS").is_ok())
+}
 fn log_erosion() -> bool {
     static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *K.get_or_init(|| std::env::var("PENSIM_LOG_EROSION").is_ok())
@@ -129,6 +138,9 @@ struct Elem {
     lc: f64,
     /// velocidade do som atual
     c: f64,
+    /// √(fator de massa) do escalonamento seletivo (1 = sem massa extra): o passo do elemento
+    /// fica lc/c·sms
+    sms: f64,
 }
 
 /// Energias globais [J].
@@ -278,8 +290,10 @@ impl Fem {
         // forças e passo iniciais (tensão zero; só fixa lc, c e dt)
         s.element_pass(0.0, true);
         for e in &mut s.elem {
+            e.sms = 1.0;
             e.dt0 = e.lc / e.c.max(1e-9);
         }
+        s.mass_scaling();
         s.assemble();
         if s.use_contact {
             s.contact_pass();
@@ -304,9 +318,45 @@ impl Fem {
         self.v.par_iter().zip(self.mass.par_iter()).map(|(v, m)| 0.5 * m * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2])).sum()
     }
 
+    /// Escalonamento de massa seletivo (como /DT/BRICK/CST do Radioss e DT2MS do LS-DYNA): os
+    /// elementos minúsculos (ponta da ogiva, onde a malha em O encolhe a seção inteira) ganham
+    /// massa até o passo deles chegar a `ms_frac()` × mediana dos passos. Só eles: a massa extra
+    /// fica nos nós deles e é contada em toda a energia e quantidade de movimento.
+    fn mass_scaling(&mut self) {
+        let frac = ms_frac();
+        if frac <= 0.0 {
+            return;
+        }
+        let mut d: Vec<f64> = self.elem.iter().map(|e| e.dt0).collect();
+        d.sort_by(|a, b| a.total_cmp(b));
+        let target = frac * d[d.len() / 2];
+        let parts = self.mats.len();
+        let (mut m0, mut add) = (vec![0.0; parts], vec![0.0; parts]);
+        let mut n = 0;
+        for (e, st) in self.elem.iter_mut().enumerate() {
+            let p = self.mesh.part[e] as usize;
+            m0[p] += st.mass;
+            if st.dt0 < target {
+                let f = (target / st.dt0).powi(2);
+                let extra = (f - 1.0) * st.mass;
+                for &k in &self.mesh.hex[e] {
+                    self.mass[k as usize] += extra / 8.0;
+                }
+                add[p] += extra;
+                st.sms = f.sqrt();
+                st.dt0 = target;
+                n += 1;
+            }
+        }
+        if log_ms() {
+            let pct: Vec<String> = (0..parts).map(|p| format!("{:.3}%", 100.0 * add[p] / m0[p].max(1e-30))).collect();
+            eprintln!("MASSA_EXTRA {} elementos, alvo {:.3e} s, por peça {:?}", n, target, pct);
+        }
+    }
+
     fn stable_dt(&self) -> f64 {
         // NaN propaga (f64::min o esconderia)
-        let m = self.elem.par_iter().filter(|e| e.alive).map(|e| e.lc / e.c.max(1e-9)).reduce(|| f64::INFINITY, |a, b| if a.is_nan() || b.is_nan() { f64::NAN } else { a.min(b) });
+        let m = self.elem.par_iter().filter(|e| e.alive).map(|e| e.sms * e.lc / e.c.max(1e-9)).reduce(|| f64::INFINITY, |a, b| if a.is_nan() || b.is_nan() { f64::NAN } else { a.min(b) });
         DT_SCALE * m
     }
 
@@ -543,7 +593,7 @@ impl Fem {
                 // --- erosão: dano, frágil, distorção extrema, volume invertido
                 if erosion {
                     let brittle = m.brittle_stress.is_some_and(|sb| max_principal(&st.s, st.p) > sb);
-                    let dt_e = lc / st.c.max(1e-9);
+                    let dt_e = st.sms * lc / st.c.max(1e-9);
                     let reason = if st.dmg >= 1.0 {
                         Some(0)
                     } else if brittle {
