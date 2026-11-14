@@ -335,7 +335,7 @@ pub fn render_surf(painter: &egui::Painter, v: &View, m: &crate::mesh::SurfMesh,
             let (p, d) = v.project(l.pos[i as usize]);
             if let Some((z, gw, gh, cell, o, r)) = &zgrid {
                 let (gi, gj) = (((p.x - o.x) / cell).floor(), ((p.y - o.y) / cell).floor());
-                if gi >= 0.0 && gj >= 0.0 && (gi as usize) < *gw && (gj as usize) < *gh && z[gj as usize * gw + gi as usize] > d + r {
+                if gi >= 0.0 && gj >= 0.0 && (gi as usize) < *gw && (gj as usize) < *gh && z[gj as usize * gw + gi as usize] > d + 0.1 * r {
                     continue; // escondido atrás de uma face
                 }
             }
