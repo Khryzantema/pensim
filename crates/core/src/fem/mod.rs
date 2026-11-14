@@ -36,6 +36,12 @@ fn erosion_dt_frac() -> f64 {
     static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *K.get_or_init(|| std::env::var("PENSIM_EROS_DT").ok().and_then(|v| v.parse().ok()).unwrap_or(EROSION_DT_FRAC))
 }
+/// PENSIM_EROS_ABS=f: erosão por distorção com limiar ABSOLUTO f × menor passo inicial da malha
+/// (como /DT/BRICK/DEL do Radioss e TSMIN do LS-DYNA), no lugar do relativo ao próprio elemento.
+fn erosion_abs() -> Option<f64> {
+    static K: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_EROS_ABS").ok().and_then(|v| v.parse().ok()))
+}
 fn q1() -> f64 {
     static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *K.get_or_init(|| std::env::var("PENSIM_Q1").ok().and_then(|v| v.parse().ok()).unwrap_or(Q1))
@@ -199,6 +205,8 @@ pub struct Fem {
     face_nb: Vec<[u32; 6]>,
     pub alive: Vec<bool>,
     surf: Vec<contact::SurfFace>,
+    /// limiar absoluto do passo do elemento para erosão por distorção (None = relativo)
+    eros_abs: Option<f64>,
     cnodes: Vec<u32>,
     surf_dirty: bool,
     fc: Vec<[f64; 3]>,
@@ -287,6 +295,7 @@ impl Fem {
             face_nb,
             alive: vec![true; ne],
             surf: vec![],
+            eros_abs: None,
             cnodes: vec![],
             surf_dirty: true,
             fc: vec![[0.0; 3]; n],
@@ -305,6 +314,9 @@ impl Fem {
             e.dt0 = e.lc / e.c.max(1e-9);
         }
         s.mass_scaling();
+        if let Some(f) = erosion_abs() {
+            s.eros_abs = Some(f * s.elem.iter().map(|e| e.dt0).fold(f64::INFINITY, f64::min));
+        }
         s.assemble();
         if s.use_contact {
             s.contact_pass();
@@ -545,6 +557,7 @@ impl Fem {
         let eroded = &self.eroded;
         let why = &self.erode_why;
         let erosion = self.use_contact;
+        let abs_thr = self.eros_abs;
         self.elem.par_iter_mut().zip(self.ef.par_iter_mut()).enumerate().map(|(e, (st, fe))| -> (f64, f64, f64) {
             if !st.alive {
                 return (st.e_int, st.e_hg, f64::INFINITY);
@@ -636,7 +649,7 @@ impl Fem {
                         Some(0)
                     } else if brittle {
                         Some(1)
-                    } else if dt_e < erosion_dt_frac() * st.dt0 {
+                    } else if dt_e < abs_thr.unwrap_or(erosion_dt_frac() * st.dt0) {
                         Some(2)
                     } else if vol <= 0.0 {
                         Some(3)
@@ -735,8 +748,13 @@ impl Fem {
                 flag[self.mesh.hex[sf.elem as usize][l] as usize] = true;
             }
         }
-        // partículas: nós sem nenhum elemento vivo
+        // partículas: nós sem nenhum elemento vivo (PENSIM_NOPARTC: fora do contato, como o
+        // Idel = 1 do OpenRadioss — experimento)
+        let part_contact = std::env::var("PENSIM_NOPARTC").is_err();
         for i in 0..n {
+            if !part_contact {
+                break;
+            }
             if !flag[i] {
                 let live = self.adj[self.adj_ptr[i] as usize..self.adj_ptr[i + 1] as usize].iter().any(|&a| self.alive[(a / 8) as usize]);
                 if !live {
