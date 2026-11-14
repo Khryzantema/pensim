@@ -566,3 +566,36 @@ Observação: o erro médio de 9,6% da seção 15 usava outro critério de "perf
 acima recalcula a referência com o mesmo critério para comparar maçã com maçã.
 
 Testes: fem_verify, fem_impact, save_fem e physics passam (physics só precisou do campo `hex` novo).
+
+## 22. Dano Johnson-Cook: sem acúmulo quando εf ≤ 0 (como o OpenRadioss)
+
+Caso de diagnóstico: Al 5 mm, 0°, 700 m/s. A velocidade da esfera nos dois solvers é igual até
+6 µs; depois o OpenCourant continua freando até ~14 µs, e o PenSim solta a esfera antes (548
+contra 509 m/s, +7,8%; em ND 24, 575 contra 535: não é malha). Testes nesse caso:
+- flagVP do /MAT/PLAS_JOHNS (taxa plástica × total): 508,8 → 510,8. Não é isso; o deck agora
+  escreve flagVP = 1 (taxa plástica, igual ao PenSim; `OC_VP` muda).
+- D5 = 0 nos dois: 556 × 526. Não é isso.
+- D3 = 0 nos dois: 535 × 546. É a dependência da triaxialidade.
+
+Causa (engine/source/materials/fail/johnson_cook/fail_johnson.F): o Radioss faz
+`EPSF = max(EPSF, EPSF_MIN)` com EPSF_MIN = 0 e só soma `DPLA/EPSF` se EPSF > 0. Com D1 < 0
+(Al 6061: D1 = −0,77) a tração alta dá εf ≤ 0 e o elemento NÃO acumula dano. O PenSim limitava
+εf a 0,001 e rompia o elemento na hora. Agora `failure_strain` devolve None quando εf ≤ 0.
+Resultado no caso: 523 × 511 (+2,4%).
+
+80 casos (calib/ref/efpos.csv; mesma métrica da seção 21):
+
+| | mesmo desfecho | erro médio | mediana | ≤ 5% | ≤ 10% |
+|---|---|---|---|---|---|
+| sem amortecimento | 63/80 | 20,4% | 14,9% | 17/46 | 21/46 |
+| ζ = 0,3 | 75/80 | 11,7% | 5,7% | 20/48 | 33/48 |
+| ζ = 0,3 + εf > 0 | 73/80 | **6,4%** | **4,5%** | 25/47 | 37/47 |
+
+O que sobra: Al com ângulo e velocidade alta agora sai MAIS LENTO no PenSim (Al 10 mm 45°
+1100 m/s −26%, Al 5 mm 60° 1100 −17%, Al 5 mm 45° 1100 −11%); RHA 5 mm 60° 1800 +22%; e os
+casos de Al 10 mm perto do limite, em que o OpenCourant não converge com a malha (seção 20).
+
+Também nesta etapa (app): contador de penetração = máximo no tempo da parte inteira do projétil
+(sem fragmentos soltos), medido da face da frente do alvo; crash ao iniciar outra simulação
+(caches de desenho chaveados pelo número da simulação guardavam dados da anterior) corrigido e
+conferido; fragmentos atrás das faces escondidos com um buffer de profundidade de baixa resolução.
