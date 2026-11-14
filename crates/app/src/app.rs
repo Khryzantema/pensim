@@ -2218,7 +2218,7 @@ impl PenSim {
             // job_id guardaria dados velhos sob o número novo (malha nova × vizinhos da velha = crash)
             let key = (Arc::as_ptr(&snap.frames[self.view_idx]) as usize as u64, self.view_idx);
             let fr: Arc<Frame> = match &self.decoded {
-                Some((j, i, fr)) if (*j, *i) == key => fr.clone(),
+                Some((j, i, fr)) if (*j, *i) == key && fr.pos.len() == snap.ref_pos.len() => fr.clone(),
                 _ => {
                     let fr = snap.frames[self.view_idx].unpack();
                     self.decoded = Some((key.0, key.1, fr.clone()));
@@ -2276,7 +2276,8 @@ impl PenSim {
                 let key: MeshKey = (key.0, self.view_idx, self.section, keep_pos, cut.to_bits(), self.hide_loose, self.hide_proj, self.hide_target, dx.to_bits(), self.started_obl.to_bits());
                 match &self.mesh_cache {
                     Some((k, m)) if *k == key => m.clone(),
-                    _ if snap.hex.is_some() && f.alive.is_some() => {
+                    // (os dados do quadro têm de ser da mesma malha: um elemento por bit de `alive`)
+                    _ if snap.hex.as_ref().zip(f.alive.as_ref()).is_some_and(|(h, a)| a.len() * 8 >= h.len() && h.iter().all(|q| q.iter().all(|&k| (k as usize) < n))) => {
                         // núcleo de elementos finitos: faces externas dos elementos vivos
                         let hex = snap.hex.clone().unwrap();
                         let alive = f.alive.clone().unwrap();
