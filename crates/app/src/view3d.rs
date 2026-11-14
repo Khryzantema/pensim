@@ -284,9 +284,61 @@ pub fn render_surf(painter: &egui::Painter, v: &View, m: &crate::mesh::SurfMesh,
         order.push((dep * 0.25, qi as u32));
     }
     let mut lproj: Vec<(Pos2, u32)> = Vec::new();
+    // Profundidade das faces numa grade de baixa resolução: a ordem por profundidade (pintor) usa
+    // o centro de cada face, e um fragmento ATRÁS de uma face grande mas mais perto que o centro
+    // dela seria pintado por cima ("atravessando" o objeto). Só desenha o fragmento se nenhuma
+    // face estiver na frente dele. Maior d = mais perto da câmera.
+    let zgrid = loose.as_ref().filter(|l| !l.idx.is_empty()).map(|l| {
+        let cell = ((l.node_size * v.scale()) as f32).clamp(2.0, 6.0);
+        let (gw, gh) = (((clip.width() / cell).ceil() as usize).max(1), ((clip.height() / cell).ceil() as usize).max(1));
+        let mut z = vec![f32::NEG_INFINITY; gw * gh];
+        let o = clip.min;
+        let tri = |z: &mut Vec<f32>, a: (Pos2, f32), b: (Pos2, f32), c: (Pos2, f32)| {
+            let (x0, x1) = (a.0.x.min(b.0.x).min(c.0.x), a.0.x.max(b.0.x).max(c.0.x));
+            let (y0, y1) = (a.0.y.min(b.0.y).min(c.0.y), a.0.y.max(b.0.y).max(c.0.y));
+            let den = (b.0.y - c.0.y) * (a.0.x - c.0.x) + (c.0.x - b.0.x) * (a.0.y - c.0.y);
+            if den.abs() < 1e-6 {
+                return;
+            }
+            let i0 = (((x0 - o.x) / cell).floor().max(0.0)) as usize;
+            let i1 = (((x1 - o.x) / cell).ceil() as usize).min(gw);
+            let j0 = (((y0 - o.y) / cell).floor().max(0.0)) as usize;
+            let j1 = (((y1 - o.y) / cell).ceil() as usize).min(gh);
+            for j in j0..j1 {
+                let py = o.y + (j as f32 + 0.5) * cell;
+                for i in i0..i1 {
+                    let px = o.x + (i as f32 + 0.5) * cell;
+                    let w0 = ((b.0.y - c.0.y) * (px - c.0.x) + (c.0.x - b.0.x) * (py - c.0.y)) / den;
+                    let w1 = ((c.0.y - a.0.y) * (px - c.0.x) + (a.0.x - c.0.x) * (py - c.0.y)) / den;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                        continue;
+                    }
+                    let d = w0 * a.1 + w1 * b.1 + w2 * c.1;
+                    let k = j * gw + i;
+                    if d > z[k] {
+                        z[k] = d;
+                    }
+                }
+            }
+        };
+        for &(_, qi) in &order {
+            let q = &m.quads[qi as usize].v;
+            let p = q.map(|vi| proj[vi as usize]);
+            tri(&mut z, p[0], p[1], p[2]);
+            tri(&mut z, p[0], p[2], p[3]);
+        }
+        (z, gw, gh, cell, o, l.node_size as f32)
+    });
     if let Some(l) = &loose {
         for &i in l.idx {
             let (p, d) = v.project(l.pos[i as usize]);
+            if let Some((z, gw, gh, cell, o, r)) = &zgrid {
+                let (gi, gj) = (((p.x - o.x) / cell).floor(), ((p.y - o.y) / cell).floor());
+                if gi >= 0.0 && gj >= 0.0 && (gi as usize) < *gw && (gj as usize) < *gh && z[gj as usize * gw + gi as usize] > d + r {
+                    continue; // escondido atrás de uma face
+                }
+            }
             if clip.contains(p) {
                 order.push((d, nq + lproj.len() as u32));
                 lproj.push((p, i));
