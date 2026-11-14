@@ -23,6 +23,13 @@ use std::sync::Arc;
 const RES_PRESETS: [(&str, f64); 7] = [("Rascunho", 5.0), ("Rápida", 6.0), ("Média", 8.0), ("Fina", 12.0), ("Muito fina", 16.0), ("Extrema", 24.0), ("Ultra", 32.0)];
 /// taxa de reprodução (quadros/s) em velocidade 1×
 const PLAY_FPS: f32 = 25.0;
+
+/// Índice do último quadro gravado até a fração `frac` (0–1) do tempo total.
+fn frame_at(frames: &[Arc<PackedFrame>], frac: f32) -> usize {
+    let Some(last) = frames.last() else { return 0 };
+    let t = frac.clamp(0.0, 1.0) as f64 * last.time;
+    frames.partition_point(|f| f.time <= t * (1.0 + 1e-9)).saturating_sub(1)
+}
 const ACCENT: Color32 = Color32::from_rgb(0, 112, 192);
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -776,22 +783,26 @@ impl PenSim {
                 self.play_pos = 0.0;
                 if let Some(f) = std::env::var("PENSIM_AT").ok().and_then(|v| v.parse::<f32>().ok()) {
                     self.playing = false;
-                    self.play_pos = f * (nf - 1) as f32;
-                    self.view_idx = self.play_pos as usize;
+                    self.play_pos = f;
+                    self.view_idx = frame_at(&snap.frames, f);
                 }
             }
             if self.playing {
+                // o replay anda pelo TEMPO da simulação, em ritmo constante: 1× = os quadros pedidos
+                // (cfg.n_frames) a 25 por segundo. Os quadros extras do impacto não deixam mais o
+                // impacto lento e o resto rápido; o quadro mostrado é o último gravado até o instante.
                 let dt = ctx.input(|i| i.stable_dt).min(0.1);
-                self.play_pos += dt * PLAY_FPS * self.speed;
-                if self.play_pos >= (nf - 1) as f32 {
+                let n_nom = self.started_cfg.as_ref().map_or(self.cfg.n_frames, |c| c.n_frames).max(2) as f32;
+                self.play_pos += dt * PLAY_FPS * self.speed / n_nom;
+                if self.play_pos >= 1.0 {
                     if self.loop_play {
                         self.play_pos = 0.0;
                     } else {
-                        self.play_pos = (nf - 1) as f32;
+                        self.play_pos = 1.0;
                         self.playing = false;
                     }
                 }
-                self.view_idx = self.play_pos as usize;
+                self.view_idx = frame_at(&snap.frames, self.play_pos);
                 ctx.request_repaint();
             }
         }
@@ -1828,7 +1839,7 @@ impl PenSim {
                 if self.playing {
                     self.playing = false;
                 } else {
-                    if self.play_pos >= (nf - 1) as f32 {
+                    if self.play_pos >= 1.0 {
                         self.play_pos = 0.0;
                     }
                     self.playing = true;
@@ -1849,7 +1860,8 @@ impl PenSim {
             ui.spacing_mut().slider_width = w;
             if ui.add(egui::Slider::new(&mut i, 0..=nf - 1).show_value(false)).changed() {
                 self.view_idx = i;
-                self.play_pos = i as f32;
+                let t_last = s.frames[nf - 1].time.max(1e-30);
+                self.play_pos = (s.frames[i].time / t_last) as f32;
                 self.playing = false;
             }
         });
