@@ -104,8 +104,8 @@ fn main() {
                     for dz in -1..=1 {
                         if let Some(l) = grid.get(&[kc[0] + dx, kc[1] + dy, kc[2] + dz]) {
                             for &e in l {
-                                let other = (sim.mesh.part[e as usize] < np) != proj[k];
-                                if !other {
+                                // qualquer elemento vivo que não tem o nó (mesma peça ou outra)
+                                if sim.mesh.hex[e as usize].contains(&(k as u32)) {
                                     continue;
                                 }
                                 let cr = sim.mesh.hex[e as usize].map(|q| sim.x[q as usize]);
@@ -131,6 +131,6 @@ fn main() {
                 maxd = maxd.max(d);
             }
         }
-        println!("t={:5.1} µs  fragmentos {:5}  dentro do alvo (do projétil) {:4}  dentro do projétil (do alvo) {:4}  prof. máx {:.2} elem", dur * i as f64 / steps as f64 * 1e6, parts, bad_p, bad_t, maxd);
+        println!("t={:5.1} µs  fragmentos {:5}  do projétil dentro de algo {:4}  do alvo dentro de algo {:4}  prof. máx {:.2} elem", dur * i as f64 / steps as f64 * 1e6, parts, bad_p, bad_t, maxd);
     }
 }
