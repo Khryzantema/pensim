@@ -2213,7 +2213,10 @@ impl PenSim {
             }
         } else if results {
             // só o quadro exibido é descomprimido (e fica em cache enquanto não muda)
-            let key = (self.job_id, self.view_idx);
+            // chave pelo próprio quadro (endereço do Arc), não pelo número da simulação: ao apertar
+            // Simular, o resto desta tela ainda é desenhado com a simulação ANTIGA, e uma chave por
+            // job_id guardaria dados velhos sob o número novo (malha nova × vizinhos da velha = crash)
+            let key = (Arc::as_ptr(&snap.frames[self.view_idx]) as usize as u64, self.view_idx);
             let fr: Arc<Frame> = match &self.decoded {
                 Some((j, i, fr)) if (*j, *i) == key => fr.clone(),
                 _ => {
@@ -2270,7 +2273,7 @@ impl PenSim {
             }
             // malha de faces que segue os nós (opcional; cache por quadro)
             let faces_mesh: Option<Arc<crate::mesh::SurfMesh>> = if self.faces {
-                let key: MeshKey = (self.job_id, self.view_idx, self.section, keep_pos, cut.to_bits(), self.hide_loose, self.hide_proj, self.hide_target, dx.to_bits(), self.started_obl.to_bits());
+                let key: MeshKey = (key.0, self.view_idx, self.section, keep_pos, cut.to_bits(), self.hide_loose, self.hide_proj, self.hide_target, dx.to_bits(), self.started_obl.to_bits());
                 match &self.mesh_cache {
                     Some((k, m)) if *k == key => m.clone(),
                     _ if snap.hex.is_some() && f.alive.is_some() => {
@@ -2278,10 +2281,10 @@ impl PenSim {
                         let hex = snap.hex.clone().unwrap();
                         let alive = f.alive.clone().unwrap();
                         let nb = match &self.hexnb_cache {
-                            Some((j, v)) if *j == self.job_id => v.clone(),
+                            Some((j, v)) if *j == Arc::as_ptr(&hex) as usize as u64 && v.len() == hex.len() => v.clone(),
                             _ => {
                                 let v = Arc::new(crate::mesh::hex_neighbors(&hex));
-                                self.hexnb_cache = Some((self.job_id, v.clone()));
+                                self.hexnb_cache = Some((Arc::as_ptr(&hex) as usize as u64, v.clone()));
                                 v
                             }
                         };
@@ -2338,7 +2341,7 @@ impl PenSim {
                         let np8 = self.cfg.design.n_proj_parts() as u8;
                         let (sa, ca) = (self.started_obl.to_radians().sin() as f32, self.started_obl.to_radians().cos() as f32);
                         // topologia fixa por simulação (cache)
-                        let tkey = (self.job_id, n, masks.len(), dx.to_bits(), self.started_obl.to_bits());
+                        let tkey = (Arc::as_ptr(&snap.ref_pos) as *const u8 as usize as u64, n, masks.len(), dx.to_bits(), self.started_obl.to_bits());
                         let topo = match &self.topo_cache {
                             Some((k, t)) if *k == tkey => t.clone(),
                             _ => {
