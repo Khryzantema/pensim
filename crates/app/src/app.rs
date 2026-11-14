@@ -547,7 +547,7 @@ impl PenSim {
     /// Vale a similaridade geométrica; tempos e energias são convertidos de volta nos resultados.
     fn model_scale(&self) -> f64 {
         let d = self.cfg.design.projectile.max_radius() * 2.0;
-        if d <= 1e-9 { 1.0 } else { (self.res_nodes * self.cfg.dx / d).clamp(0.004, 6.0) }
+        if d <= 1e-9 { 1.0 } else { (self.res_nodes * self.cfg.dx / d).clamp(0.004, 64.0) }
     }
 
     /// Configuração que de fato é simulada/pré-visualizada: o projeto real × escala interna.
@@ -1655,7 +1655,9 @@ impl PenSim {
                 }
             }
         });
-        ui.add(egui::Slider::new(&mut self.res_nodes, 3.0..=48.0).logarithmic(true).text("nós").fixed_decimals(0));
+        // arrastar vai até 48; digitando aceita até 256 (o aviso de memória continua valendo)
+        ui.add(egui::Slider::new(&mut self.res_nodes, 3.0..=48.0).logarithmic(true).text("nós").fixed_decimals(0).clamping(egui::SliderClamping::Never));
+        self.res_nodes = self.res_nodes.clamp(3.0, 256.0).round();
         let n = self.estimate_nodes();
         let sc = self.scaled_cfg();
         let mem = sc.estimate_memory_mb();
