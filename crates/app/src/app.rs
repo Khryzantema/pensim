@@ -2331,7 +2331,11 @@ impl PenSim {
                                     continue;
                                 }
                                 let is_p = snap.parts[i] < np8;
-                                if (is_p && hp) || (!is_p && ht) || (sec && !in_section(ext_pos[mi * n + i][1])) {
+                                // fragmento solto: corte estrito (a folga de ¼ de elemento é para os nós sobre o plano de
+                                // simetria; um fragmento logo à frente do plano aparecia sobre a face cortada)
+                                let ry = ext_pos[mi * n + i][1];
+                                let strict_in = if keep_pos { ry >= -1e-4 * dx } else { ry <= 1e-4 * dx };
+                                if (is_p && hp) || (!is_p && ht) || (sec && !strict_in) {
                                     continue;
                                 }
                                 parts_idx.push((mi * n + i) as u32);

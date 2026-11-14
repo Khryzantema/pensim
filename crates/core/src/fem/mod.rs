@@ -901,18 +901,6 @@ impl Fem {
         for h in &hits {
             self.c_offset[h.node as usize] = h.offset;
         }
-        // partículas enterradas: incorporadas aos nós da face (choque inelástico; a energia
-        // cinética perdida vai para a conta do contato). Daí em diante o nó acompanha a face.
-        let mut absorbed_any = false;
-        for h in hits.iter().filter(|h| h.absorb) {
-            let n8 = [h.fnodes[0], h.fnodes[1], h.fnodes[2], h.fnodes[3], h.fnodes[0], h.fnodes[0], h.fnodes[0], h.fnodes[0]];
-            let w8 = [h.w[0], h.w[1], h.w[2], h.w[3], 0.0, 0.0, 0.0, 0.0];
-            absorbed_any |= self.absorb_node(h.node as usize, n8, w8);
-        }
-        if absorbed_any {
-            self.surf_dirty = true;
-        }
-        let hits: Vec<contact::Hit> = hits.into_iter().filter(|h| !h.absorb).collect();
         self.fc.par_iter_mut().for_each(|f| *f = [0.0; 3]);
         for h in &hits {
             for a in 0..3 {
