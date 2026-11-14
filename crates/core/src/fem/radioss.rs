@@ -50,7 +50,9 @@ pub fn write(d: &DeckInput) -> (String, String) {
         let a = if j.a > 1e20 { 1e20 } else { j.a };
         let _ = writeln!(s, "/MAT/PLAS_JOHNS/{id}\n{}", mt.name);
         let _ = writeln!(s, "#              RHO_I\n{}{}", f(mt.rho * 1e-9), f(0.0));
-        let _ = writeln!(s, "#                  E                  Nu     Iflag\n{}{}         0", f(e * 1e-9), f(nu));
+        // flagVP = 1: taxa de deformação plástica no Johnson-Cook, como no PenSim (OC_VP muda)
+        let vp: i32 = std::env::var("OC_VP").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        let _ = writeln!(s, "#                  E                  Nu     Iflag    flagVP\n{}{}         0{:>10}", f(e * 1e-9), f(nu), vp);
         let _ = writeln!(s, "#                  a                   b                   n           EPS_p_max            SIG_max0\n{}{}{}{}{}", f(a * 1e-9), f(j.b * 1e-9), f(j.n), f(0.0), f(0.0));
         let _ = writeln!(s, "#                  c           EPS_DOT_0       ICC   Fsmooth               F_cut               Chard\n{}{}         0         0{}{}", f(j.c), f(j.eps_dot0 * 1e-3), f(0.0), f(0.0));
         // (sem filtro de taxa: o PenSim também usa a taxa do passo sem filtrar)

@@ -32,6 +32,10 @@ pub struct FemSim {
     last_ke_p: f64,
     ke0: f64,
     m_target: f64,
+    /// face da frente do alvo e o ponto mais fundo já alcançado pela parte inteira do projétil
+    /// (sem fragmentos soltos), ao longo de toda a simulação
+    front_x: f64,
+    max_tip: f64,
 }
 
 impl FemSim {
@@ -97,6 +101,7 @@ impl FemSim {
         let frame_dt = t_end / cfg.n_frames.max(2) as f64;
         let fast_dt = frame_dt / 10.0;
         let m_target = (0..n).filter(|&i| node_part[i] >= n_proj).map(|i| fem.masses()[i]).sum();
+        let front_x = (0..n).filter(|&i| node_part[i] >= n_proj).map(|i| fem.x[i][0]).fold(f64::MAX, f64::min);
         let mut s = FemSim {
             ke0: fem.e0,
             fem,
@@ -118,6 +123,8 @@ impl FemSim {
             last_rec_t: f64::NEG_INFINITY,
             last_ke_p: 0.0,
             m_target,
+            front_x,
+            max_tip: f64::MIN,
         };
         s.record();
         Ok(s)
@@ -213,6 +220,10 @@ impl FemSim {
         let m = f.masses();
         let (mut ke_p, mut ke_t) = (0.0, 0.0);
         for i in 0..f.n_nodes() {
+            // penetração: só nós do projétil ainda presos a um elemento (dano < 1)
+            if self.node_part[i] < self.n_proj && dmg[i] < 1.0 {
+                self.max_tip = self.max_tip.max(f.x[i][0]);
+            }
             let v = f.v[i];
             let k = 0.5 * m[i] * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
             if self.node_part[i] < self.n_proj {
@@ -309,7 +320,7 @@ impl FemSim {
         Outcome {
             kind,
             v_residual: v_res,
-            penetration: tip.max(0.0),
+            penetration: (self.max_tip.max(tip.min(self.front_x)) - self.front_x).clamp(0.0, self.back_x - self.front_x),
             energy_absorbed_pct: 100.0 * (1.0 - ke_p / ke0),
             target_ejected_pct: 100.0 * ejected / self.m_target.max(1e-30),
             proj_behind_pct: 100.0 * behind,

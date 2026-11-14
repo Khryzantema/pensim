@@ -791,6 +791,23 @@ impl PenSim {
             self.res_tab = ResTab::Files;
             self.sheet_tab = 1;
         }
+        // gancho de teste: PENSIM_NEXT=<munição>[:<nós>] roda uma 2ª simulação diferente ao fim da 1ª
+        {
+            static NEXT_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if let Ok(v) = std::env::var("PENSIM_NEXT") {
+                if snap.done && self.job.is_some() && !NEXT_DONE.swap(true, Ordering::SeqCst) {
+                    let mut it = v.split(':');
+                    if let Some(k) = it.next().and_then(|x| x.parse::<usize>().ok()) {
+                        self.load_ammo(k.min(AMMO.len() - 1), 1.0);
+                    }
+                    if let Some(nd) = it.next().and_then(|x| x.parse::<f64>().ok()) {
+                        self.res_nodes = nd;
+                    }
+                    eprintln!("PENSIM_NEXT: segunda simulação");
+                    self.start(&ctx);
+                }
+            }
+        }
         self.sync_drawings();
         // a malha 3D da prévia só é montada quando aparece (montar a cada mudança do desenho travava a edição)
         let need3d = matches!(self.ws, Ws::Sim | Ws::Resolution | Ws::Results) || self.peek3d;

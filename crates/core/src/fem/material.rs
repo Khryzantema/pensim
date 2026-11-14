@@ -143,7 +143,10 @@ impl FemMat {
         let r = eps_rate / self.jc.eps_dot0;
         let rate = if r > 1.0 { 1.0 + d[3] * r.ln() } else { 1.0 };
         let ts = ((temp - self.t_room) / (self.t_melt - self.t_room)).clamp(0.0, 1.0);
-        Some(((d[0] + d[1] * (d[2] * triax).exp()) * rate * (1.0 + d[4] * ts)).max(1e-3))
+        let ef = (d[0] + d[1] * (d[2] * triax).exp()) * rate * (1.0 + d[4] * ts);
+        // εf ≤ 0 (tração extrema com D1 < 0): sem acúmulo de dano, como no /FAIL/JOHNSON do
+        // OpenRadioss (EPSF = max(EPSF, EPSF_MIN = 0); só soma se EPSF > 0).
+        (ef > 0.0).then_some(ef.max(1e-3))
     }
 }
 

@@ -120,6 +120,7 @@ fn main() {
         while t < dur - 1e-12 {
             t += env("PROBE_DT", 4.0) * 1e-6;
             sim.run_until(t.min(dur));
+            if env("PROBE", 0.0) > 1.5 { println!("VEL {:.2} {:.2}", t * 1e6, sim.part_velocity(0)[0]); continue; }
             for part in 0..2u8 {
                 let mut ps: Vec<f64> = (0..sim.n_elems()).filter(|&e| sim.mesh.part[e] == part && sim.is_alive(e)).map(|e| sim.pressure(e)).collect();
                 ps.sort_by(|a, b| a.total_cmp(b));
