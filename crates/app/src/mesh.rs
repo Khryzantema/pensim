@@ -50,6 +50,9 @@ pub struct SurfMesh {
     /// nó que dá a cor de cada vértice, e se ele está numa face de corte
     pub vcell: Vec<u32>,
     pub vcut: Vec<bool>,
+    /// vértice de parede de cavidade/cratera aberta pela erosão (face cujo vizinho foi apagado):
+    /// desenhada mais escura, para o buraco parecer buraco
+    pub vcav: Vec<bool>,
     /// até 4 nós que compartilham o vértice (a cor é a média deles: sem aspecto pixelado)
     pub vcells: Vec<[u32; 4]>,
     pub quads: Vec<Quad>,
@@ -699,7 +702,8 @@ pub fn from_hex(
     let ne = hex.len();
     let mi_of = |m: u8| masks.iter().position(|&x| x == m);
     // faces por cópia (em paralelo)
-    let faces: Vec<([u32; 4], bool, [f32; 3])> = (0..masks.len() * ne)
+    // (nós, face de corte, parede de cavidade, centro do elemento)
+    let faces: Vec<([u32; 4], bool, bool, [f32; 3])> = (0..masks.len() * ne)
         .into_par_iter()
         .with_min_len(4096)
         .flat_map_iter(|ce| {
@@ -735,7 +739,8 @@ pub fn from_hex(
                 if other == 1 {
                     continue;
                 }
-                out.push((fnodes.map(|k| base + k), other == 2, cen));
+                // state 3 = vizinho apagado pela erosão
+                out.push((fnodes.map(|k| base + k), other == 2, other == 3, cen));
             }
             out
         })
@@ -743,7 +748,7 @@ pub fn from_hex(
     let mut sm = SurfMesh::default();
     let mut vid = vec![NONE; n * masks.len()];
     let mut nrm: Vec<[f32; 3]> = Vec::new();
-    for (q, cut, cen) in &faces {
+    for (q, cut, cav, cen) in &faces {
         let mut vi = [0u32; 4];
         for (j, &g) in q.iter().enumerate() {
             if vid[g as usize] == NONE {
@@ -751,12 +756,16 @@ pub fn from_hex(
                 sm.verts.push(pos[g as usize]);
                 sm.vcell.push(g);
                 sm.vcut.push(*cut);
+                sm.vcav.push(false);
                 sm.vcells.push([g, NONE, NONE, NONE]);
                 nrm.push([0.0; 3]);
             }
             vi[j] = vid[g as usize];
             if *cut {
                 sm.vcut[vi[j] as usize] = true;
+            }
+            if *cav {
+                sm.vcav[vi[j] as usize] = true;
             }
         }
         // normal da face, para fora do elemento

@@ -377,6 +377,8 @@ pub fn render_surf(painter: &egui::Painter, v: &View, m: &crate::mesh::SurfMesh,
                 }
             }
             let c0 = if cn > 0.0 { Color32::from_rgb((ar / cn) as u8, (ag / cn) as u8, (ab / cn) as u8) } else { color(m.vcell[i] as usize, m.vcut[i]) };
+            // parede de cavidade/cratera aberta pela erosão: mais escura (interior de rachadura)
+            let t = if m.vcav.get(i).copied().unwrap_or(false) && !m.vcut[i] { t * 0.55 } else { t };
             let f = |ch: u8| ((ch as f32 * t).clamp(0.0, 255.0)) as u8;
             egui::epaint::Vertex { pos: proj[i].0, uv, color: Color32::from_rgb(f(c0.r()), f(c0.g()), f(c0.b())) }
         })

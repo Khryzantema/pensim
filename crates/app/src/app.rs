@@ -2295,7 +2295,7 @@ impl PenSim {
                         let refp = snap.ref_pos.clone();
                         let state = |mi: usize, e: usize| -> u8 {
                             if alive[e / 8] & (1 << (e % 8)) == 0 {
-                                return 0;
+                                return 3; // apagado pela erosão: a face vizinha vira parede de cavidade
                             }
                             let h = &hex[e];
                             let is_p = parts[h[0] as usize] < np8;
