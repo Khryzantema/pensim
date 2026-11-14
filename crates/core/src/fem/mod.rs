@@ -849,7 +849,12 @@ impl Fem {
                 if n == 0.0 {
                     [0.0, 0.0, 0.0, t_any as f32, 1.0]
                 } else {
-                    acc.map(|v| (v / n) as f32)
+                    let mut r = acc.map(|v| (v / n) as f32);
+                    // nó ainda preso: dano < 1 mesmo depois de gravado em 8 bits nos quadros (o app
+                    // trata dano = 1 como fragmento solto; 0,998 virava 1 e o nó aparecia como
+                    // fragmento dentro da chapa, na faixa de cisalhamento)
+                    r[4] = r[4].min(0.98);
+                    r
                 }
             })
             .collect();

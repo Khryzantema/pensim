@@ -2226,6 +2226,9 @@ impl PenSim {
                 }
             };
             let f = &*fr;
+            // fragmento solto: no núcleo novo, dano do nó = 1 (nó sem elemento vivo; os presos ficam
+            // ≤ 0,98); no antigo (peridinâmica), ≥ 0,9 das ligações rompidas
+            let loose_thr = if snap.hex.is_some() { 0.995f32 } else { 0.9 };
             // quadro e geometria de referência podem ser de simulações diferentes por um instante
             // (simulação nova começando): usa só o trecho em que os dois existem
             let n = f.pos.len().min(snap.ref_pos.len()).min(snap.parts.len()).min(snap.surface.len()).min(f.damage.len());
@@ -2255,7 +2258,7 @@ impl PenSim {
                     if self.section && !in_section(ry) {
                         continue;
                     }
-                    if self.hide_loose && f.damage[i] >= 0.9 {
+                    if self.hide_loose && f.damage[i] >= loose_thr {
                         continue;
                     }
                     let is_p = snap.parts[i] < self.cfg.design.n_proj_parts() as u8;
@@ -2324,7 +2327,7 @@ impl PenSim {
                         let mut parts_idx: Vec<u32> = Vec::new();
                         for mi in 0..masks.len() {
                             for i in 0..n {
-                                if f.damage[i] < 1.0 || hl {
+                                if f.damage[i] < 0.995 || hl {
                                     continue;
                                 }
                                 let is_p = snap.parts[i] < np8;
@@ -2356,7 +2359,7 @@ impl PenSim {
                         for (mi, &mm) in masks.iter().enumerate() {
                             for i in 0..n {
                                 let is_p = snap.parts[i] < np8;
-                                vis[mi * n + i] = if (hl && f.damage[i] >= 0.9) || (is_p && hp) || (!is_p && ht) {
+                                vis[mi * n + i] = if (hl && f.damage[i] >= loose_thr) || (is_p && hp) || (!is_p && ht) {
                                     0
                                 } else if sec && !in_section(flip(snap.ref_pos[i], mm)[1]) {
                                     2
