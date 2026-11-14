@@ -206,7 +206,7 @@ pub struct Fem {
     pub alive: Vec<bool>,
     surf: Vec<contact::SurfFace>,
     /// nó (partícula) incorporado ao material: face e pesos que ele acompanha
-    ride: Vec<Option<([u32; 4], [f64; 4])>>,
+    ride: Vec<Option<([u32; 8], [f64; 8])>>,
     /// limiar absoluto do passo do elemento para erosão por distorção (None = relativo)
     eros_abs: Option<f64>,
     cnodes: Vec<u32>,
@@ -477,8 +477,8 @@ impl Fem {
             let (x, v) = (&mut self.x, &mut self.v);
             for (i, r) in self.ride.iter().enumerate() {
                 if let Some((fnodes, w)) = r {
-                    x[i] = [0, 1, 2].map(|a| (0..4).map(|k| w[k] * x[fnodes[k] as usize][a]).sum::<f64>());
-                    v[i] = [0, 1, 2].map(|a| (0..4).map(|k| w[k] * v[fnodes[k] as usize][a]).sum::<f64>());
+                    x[i] = [0, 1, 2].map(|a| (0..8).map(|k| w[k] * x[fnodes[k] as usize][a]).sum::<f64>());
+                    v[i] = [0, 1, 2].map(|a| (0..8).map(|k| w[k] * v[fnodes[k] as usize][a]).sum::<f64>());
                 }
             }
         }
@@ -524,6 +524,9 @@ impl Fem {
         self.energy.hourglass = hg;
         self.time = t_new;
         self.steps += 1;
+        if self.use_contact && self.steps % 20 == 0 && self.n_eroded > 0 {
+            self.absorb_buried();
+        }
         self.dt = DT_SCALE * dt_min;
         prof_add(10, tc);
     }
@@ -782,6 +785,86 @@ impl Fem {
         self.surf_dirty = false;
     }
 
+    /// Incorpora o nó solto `p` aos nós `n` (pesos `w`, soma 1): choque inelástico que conserva
+    /// massa e quantidade de movimento; a energia cinética perdida vai para a conta do contato.
+    /// Daí em diante o nó acompanha esses nós (e não é mais desenhado como fragmento).
+    fn absorb_node(&mut self, p: usize, n: [u32; 8], w: [f64; 8]) -> bool {
+        if self.ride[p].is_some() || self.mass[p] <= 0.0 {
+            return false;
+        }
+        let (mp, vp) = (self.mass[p], self.v[p]);
+        let ke = |m: f64, v: [f64; 3]| 0.5 * m * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        let mut before = ke(mp, vp);
+        let mut after = 0.0;
+        for k in 0..8 {
+            let q = n[k] as usize;
+            let dm = w[k] * mp;
+            if dm <= 0.0 {
+                continue;
+            }
+            before += ke(self.mass[q], self.v[q]);
+            let mq = self.mass[q] + dm;
+            self.v[q] = [0, 1, 2].map(|a| (self.mass[q] * self.v[q][a] + dm * vp[a]) / mq);
+            self.mass[q] = mq;
+            after += ke(mq, self.v[q]);
+        }
+        self.energy.contact += before - after;
+        self.mass[p] = 0.0;
+        self.ride[p] = Some((n, w));
+        true
+    }
+
+    /// Fragmentos (nós sem elemento vivo) que estão DENTRO de um elemento vivo — o contato não os
+    /// pega quando passam de meio elemento de profundidade ou deslizam pelo plano de simetria —
+    /// são incorporados a esse elemento (pesos iguais nos 8 nós).
+    fn absorb_buried(&mut self) {
+        let n = self.x.len();
+        let (ptr, adj, el) = (&self.adj_ptr, &self.adj, &self.elem);
+        let loose: Vec<usize> = (0..n)
+            .into_par_iter()
+            .filter(|&i| self.ride[i].is_none() && self.mass[i] > 0.0 && !adj[ptr[i] as usize..ptr[i + 1] as usize].iter().any(|&a| el[(a / 8) as usize].alive))
+            .collect();
+        if loose.is_empty() {
+            return;
+        }
+        let hex = &self.mesh.hex;
+        let x = &self.x;
+        let cell = el.iter().filter(|e| e.alive).map(|e| e.lc).fold(0.0, f64::max).max(1e-9) * 1.5;
+        let key = |p: [f64; 3]| p.map(|v| (v / cell).floor() as i64);
+        let mut grid: std::collections::HashMap<[i64; 3], Vec<u32>> = std::collections::HashMap::new();
+        for (e, st) in el.iter().enumerate() {
+            if st.alive {
+                let c = [0, 1, 2].map(|a| hex[e].iter().map(|&k| x[k as usize][a]).sum::<f64>() / 8.0);
+                grid.entry(key(c)).or_default().push(e as u32);
+            }
+        }
+        let found: Vec<(usize, u32)> = loose
+            .par_iter()
+            .filter_map(|&i| {
+                let p = x[i];
+                let kc = key(p);
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            let Some(l) = grid.get(&[kc[0] + dx, kc[1] + dy, kc[2] + dz]) else { continue };
+                            for &e in l {
+                                let c = hex[e as usize].map(|k| x[k as usize]);
+                                if point_in_hex(p, &c, -1e-3 * el[e as usize].lc) {
+                                    return Some((i, e));
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+        for (i, e) in found {
+            self.absorb_node(i, self.mesh.hex[e as usize], [0.125; 8]);
+        }
+        self.surf_dirty = true;
+    }
+
     /// Forças de contato do instante atual, somadas em `f` e guardadas em `fc`.
     fn contact_pass(&mut self) {
         let t0 = prof().then(std::time::Instant::now);
@@ -822,31 +905,9 @@ impl Fem {
         // cinética perdida vai para a conta do contato). Daí em diante o nó acompanha a face.
         let mut absorbed_any = false;
         for h in hits.iter().filter(|h| h.absorb) {
-            let p = h.node as usize;
-            if self.ride[p].is_some() {
-                continue;
-            }
-            let mp = self.mass[p];
-            let vp = self.v[p];
-            let ke = |m: f64, v: [f64; 3]| 0.5 * m * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-            let mut before = ke(mp, vp);
-            let mut after = 0.0;
-            for k in 0..4 {
-                let q = h.fnodes[k] as usize;
-                let dm = h.w[k] * mp;
-                if dm <= 0.0 {
-                    continue;
-                }
-                before += ke(self.mass[q], self.v[q]);
-                let mq = self.mass[q] + dm;
-                self.v[q] = [0, 1, 2].map(|a| (self.mass[q] * self.v[q][a] + dm * vp[a]) / mq);
-                self.mass[q] = mq;
-                after += ke(mq, self.v[q]);
-            }
-            self.energy.contact += before - after;
-            self.mass[p] = 0.0;
-            self.ride[p] = Some((h.fnodes, h.w));
-            absorbed_any = true;
+            let n8 = [h.fnodes[0], h.fnodes[1], h.fnodes[2], h.fnodes[3], h.fnodes[0], h.fnodes[0], h.fnodes[0], h.fnodes[0]];
+            let w8 = [h.w[0], h.w[1], h.w[2], h.w[3], 0.0, 0.0, 0.0, 0.0];
+            absorbed_any |= self.absorb_node(h.node as usize, n8, w8);
         }
         if absorbed_any {
             self.surf_dirty = true;
@@ -1215,4 +1276,29 @@ mod tests {
         assert!((j2(r) - j2(s)).abs() / j2(s) < 1e-5);
         assert!((r[0] + r[1] + r[2]).abs() < 1e-9);
     }
+}
+
+/// O ponto está dentro do hexaedro (pelos planos das faces)? `tol` > 0 exige folga para dentro;
+/// < 0 aceita a borda (um nó sobre a face do plano de simetria está dentro do material espelhado).
+fn point_in_hex(p: [f64; 3], c: &[[f64; 3]; 8], tol: f64) -> bool {
+    let ec = [0, 1, 2].map(|a| c.iter().map(|q| q[a]).sum::<f64>() / 8.0);
+    for fl in mesh::FACES {
+        let q = fl.map(|l| c[l]);
+        let cen = [0, 1, 2].map(|a| 0.25 * (q[0][a] + q[1][a] + q[2][a] + q[3][a]));
+        let u = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
+        let v = [q[3][0] - q[1][0], q[3][1] - q[1][1], q[3][2] - q[1][2]];
+        let mut nn = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt();
+        if l == 0.0 {
+            return false;
+        }
+        nn = nn.map(|x| x / l);
+        if (0..3).map(|a| (cen[a] - ec[a]) * nn[a]).sum::<f64>() < 0.0 {
+            nn = nn.map(|x| -x);
+        }
+        if (0..3).map(|a| (p[a] - cen[a]) * nn[a]).sum::<f64>() > -tol {
+            return false;
+        }
+    }
+    true
 }
