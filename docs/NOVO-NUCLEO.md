@@ -538,3 +538,31 @@ Segundo caso, RHA 5 mm, 0°, 1200 m/s (mesma máquina e método):
 - Leitura: no RHA o desvio A parece real (a chapa de RHA do PenSim cede antes), não só falta de
   convergência. Candidatos: dano/erosão do RHA no PenSim (hipóteses b e c) e a dependência de
   malha do próprio PenSim neste caso. O alumínio (caso anterior) e o RHA se comportam diferente.
+
+## 21. Amortecimento viscoso no contato (ζ = 0,3) — padrão
+
+Causa do desvio A (seção 20): o contato por penalidade "tocava" (ringing) — pico de compressão na
+esfera de 20,4 GPa contra 13,7 no OpenCourant e tração de −7,7 contra −2,3 GPa. A tração alta
+eleva a triaxialidade, e o dano Johnson-Cook (termo D3) acumulava 2–3× mais rápido que no
+OpenCourant. Sem dano, ou com D3 = 0 nos dois, os solvers já concordavam.
+
+Correção: força normal do contato com amortecimento viscoso
+`fn = max(0, k·pen − 2ζ·√(k·m_ef)·v_n)`, com m_ef a massa reduzida nó × face. ζ = 0,3 é o padrão
+(`fem::contact::CDAMP`; `PENSIM_CDAMP` muda para experimentos).
+
+Validação nos 80 casos esfera×chapa (ND 12, calib/ref/cdamp03.csv), mesma métrica nos dois
+(perfura = vx > 5% de v; perfuração clara = ambos > 10% de v):
+
+| | mesmo desfecho | erro médio (perf. clara) | ≤ 5% | ≤ 10% |
+|---|---|---|---|---|
+| sem amortecimento (esfera_chapa.csv) | 63/80 | 20,4% (46 casos) | 17 | 21 |
+| ζ = 0,3 | **75/80** | **11,7%** (48 casos) | 20 | 33 |
+
+Os 5 que ainda divergem são todos Al 10 mm perto do limite (0°/30°/45° a 700 m/s, 60° a
+900/1100 m/s), justamente onde o OpenCourant não convergiu com a malha (seção 20: ISOLID24 −60 →
+243 m/s de ND 12 para 24). Esses não servem de referência em ND 12.
+
+Observação: o erro médio de 9,6% da seção 15 usava outro critério de "perfuração clara"; a tabela
+acima recalcula a referência com o mesmo critério para comparar maçã com maçã.
+
+Testes: fem_verify, fem_impact, save_fem e physics passam (physics só precisou do campo `hex` novo).

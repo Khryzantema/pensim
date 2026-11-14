@@ -12,10 +12,13 @@ use std::collections::HashMap;
 pub const PENALTY: f64 = 0.1;
 /// Rigidez mínima pela massa do nó e o passo (tipo SOFT=1 do LS-DYNA): k ≥ SOFT·m/dt²
 pub const SOFT: f64 = 0.1;
+/// Amortecimento viscoso no contato (fração do crítico). 0,3 calibrado nos 80 casos esfera×chapa
+/// contra o OpenCourant (docs/NOVO-NUCLEO.md, seção 21); PENSIM_CDAMP muda.
+pub const CDAMP: f64 = 0.3;
 
 fn cdamp() -> f64 {
     static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-    *K.get_or_init(|| std::env::var("PENSIM_CDAMP").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0))
+    *K.get_or_init(|| std::env::var("PENSIM_CDAMP").ok().and_then(|v| v.parse().ok()).unwrap_or(CDAMP))
 }
 fn soft() -> f64 {
     static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
