@@ -54,13 +54,13 @@ fn log_ms() -> bool {
     *K.get_or_init(|| std::env::var("PENSIM_LOG_MS").is_ok())
 }
 /// PENSIM_FEMPROF: tempo acumulado [ns] em elementos e contato (perfil grosseiro)
-pub static PROF_T: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
-pub(crate) fn prof_add(i: usize, t: Option<std::time::Instant>) {
+pub static PROF_T: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::atomic::AtomicU64::new(0) }; 12];
+pub fn prof_add(i: usize, t: Option<std::time::Instant>) {
     if let Some(t) = t {
         PROF_T[i].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 }
-pub(crate) fn prof() -> bool {
+pub fn prof() -> bool {
     static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *K.get_or_init(|| std::env::var("PENSIM_FEMPROF").is_ok())
 }
@@ -391,9 +391,16 @@ impl Fem {
 
     /// Um passo de tempo (diferenças centrais).
     pub fn step(&mut self) {
+        let ts = prof().then(std::time::Instant::now);
+        self.step_inner();
+        prof_add(7, ts);
+    }
+
+    fn step_inner(&mut self) {
         let dt = self.dt;
         let t_half = self.time + 0.5 * dt;
         let t_new = self.time + dt;
+        let ta = prof().then(std::time::Instant::now);
         // energia cinética no instante n (média dos meio-passos)
         let v_old = self.v.clone();
         // 1. velocidades n+½ (forças de n)
@@ -420,15 +427,24 @@ impl Fem {
                 }
             }
         }
-        for i in 0..self.x.len() {
-            for a in 0..3 {
-                let dv = self.v[i][a] - v_free[i][a];
-                if dv != 0.0 {
-                    // impulso m·dv aplicado com velocidade média (v_old + v_new)/2
-                    w_ext += self.mass[i] * dv * 0.5 * (v_old[i][a] + self.v[i][a]);
+        w_ext += self
+            .v
+            .par_iter()
+            .zip(v_free.par_iter())
+            .zip(v_old.par_iter())
+            .zip(self.mass.par_iter())
+            .map(|(((vn, vf), vo), m)| {
+                let mut w = 0.0;
+                for a in 0..3 {
+                    let dv = vn[a] - vf[a];
+                    if dv != 0.0 {
+                        // impulso m·dv aplicado com velocidade média (v_old + v_new)/2
+                        w += m * dv * 0.5 * (vo[a] + vn[a]);
+                    }
                 }
-            }
-        }
+                w
+            })
+            .sum::<f64>();
         // 2. posições n+1
         {
             let v = &self.v;
@@ -438,21 +454,22 @@ impl Fem {
                 }
             });
         }
+        prof_add(8, ta);
         // 3. elementos: taxa de deformação com v n+½ e geometria n+1 → tensão n+1 → forças n+1
         let t_el = prof().then(std::time::Instant::now);
-        self.element_pass(dt, false);
+        let (ie, hg, dt_min) = self.element_pass(dt, false);
         if let Some(t) = t_el {
             PROF_T[0].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
+        let tb = prof().then(std::time::Instant::now);
         let er = self.eroded.swap(0, Ordering::Relaxed);
         if er > 0 {
             self.n_eroded += er;
             self.surf_dirty = true;
-            for (a, e) in self.alive.iter_mut().zip(&self.elem) {
-                *a = e.alive;
-            }
+            self.alive.par_iter_mut().zip(self.elem.par_iter()).for_each(|(a, e)| *a = e.alive);
         }
         self.assemble();
+        prof_add(9, tb);
         if self.use_contact {
             // trabalho do contato no passo com a força média (n e n+1), como nos elementos
             let fc_old = std::mem::take(&mut self.fc);
@@ -470,17 +487,17 @@ impl Fem {
                 .sum();
             self.energy.contact -= w;
         }
+        let tc = prof().then(std::time::Instant::now);
         // energia
         let ke = self.kinetic_mid(&v_old);
         self.energy.kinetic = ke;
         self.energy.external += w_ext;
-        let (ie, hg, pl) = self.elem.par_iter().map(|e| (e.e_int, e.e_hg, 0.0)).reduce(|| (0.0, 0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
         self.energy.internal = ie;
         self.energy.hourglass = hg;
-        let _ = pl;
         self.time = t_new;
         self.steps += 1;
-        self.dt = self.stable_dt();
+        self.dt = DT_SCALE * dt_min;
+        prof_add(10, tc);
     }
 
     fn kinetic_mid(&self, v_old: &[[f64; 3]]) -> f64 {
@@ -521,14 +538,16 @@ impl Fem {
     }
 
     /// Atualiza tensão e calcula as forças nodais de cada elemento.
-    fn element_pass(&mut self, dt: f64, init: bool) {
+    /// Devolve (Σ energia interna, Σ energia de hourglass, menor passo estável dos vivos), na
+    /// mesma varredura (antes eram mais duas passadas pelos elementos a cada passo).
+    fn element_pass(&mut self, dt: f64, init: bool) -> (f64, f64, f64) {
         let (x, v, hexes, parts, mats) = (&self.x, &self.v, &self.mesh.hex, &self.mesh.part, &self.mats);
         let eroded = &self.eroded;
         let why = &self.erode_why;
         let erosion = self.use_contact;
-        self.elem.par_iter_mut().zip(self.ef.par_iter_mut()).enumerate().for_each(|(e, (st, fe))| {
+        self.elem.par_iter_mut().zip(self.ef.par_iter_mut()).enumerate().map(|(e, (st, fe))| -> (f64, f64, f64) {
             if !st.alive {
-                return;
+                return (st.e_int, st.e_hg, f64::INFINITY);
             }
             let h = &hexes[e];
             let m = &mats[parts[e] as usize];
@@ -635,7 +654,7 @@ impl Fem {
                         st.alive = false;
                         *fe = [[0.0; 3]; 8];
                         eroded.fetch_add(1, Ordering::Relaxed);
-                        return;
+                        return (st.e_int, st.e_hg, f64::INFINITY);
                     }
                 }
             } else {
@@ -683,7 +702,9 @@ impl Fem {
                     }
                 }
             }
-        });
+            (st.e_int, st.e_hg, st.sms * st.lc / st.c.max(1e-9))
+        })
+        .reduce(|| (0.0, 0.0, f64::INFINITY), |a, b| (a.0 + b.0, a.1 + b.1, if a.2.is_nan() || b.2.is_nan() { f64::NAN } else { a.2.min(b.2) }))
     }
 
     /// Refaz a lista de faces externas e de nós de contato (depois de erosão).

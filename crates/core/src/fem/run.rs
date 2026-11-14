@@ -214,6 +214,12 @@ impl FemSim {
     }
 
     fn record(&mut self) {
+        let tr = super::prof().then(std::time::Instant::now);
+        self.record_inner();
+        super::prof_add(6, tr);
+    }
+
+    fn record_inner(&mut self) {
         let f = &self.fem;
         let [vm, pr, ep, temp, dmg] = f.node_fields();
         let speed: Vec<f32> = f.v.iter().map(|v| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() as f32).collect();
