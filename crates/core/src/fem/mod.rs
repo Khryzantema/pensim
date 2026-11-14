@@ -60,6 +60,8 @@ fn log_ms() -> bool {
     *K.get_or_init(|| std::env::var("PENSIM_LOG_MS").is_ok())
 }
 /// PENSIM_FEMPROF: tempo acumulado [ns] em elementos e contato (perfil grosseiro)
+/// Amortecimento proporcional à rigidez padrão (0 = desligado).
+pub const SDAMP: f64 = 0.0;
 pub static PROF_T: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::atomic::AtomicU64::new(0) }; 12];
 pub fn prof_add(i: usize, t: Option<std::time::Instant>) {
     if let Some(t) = t {
@@ -69,6 +71,16 @@ pub fn prof_add(i: usize, t: Option<std::time::Instant>) {
 pub fn prof() -> bool {
     static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *K.get_or_init(|| std::env::var("PENSIM_FEMPROF").is_ok())
+}
+/// PENSIM_SDAMP: amortecimento proporcional à rigidez, fração do crítico na maior frequência.
+fn sdamp() -> f64 {
+    static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *K.get_or_init(|| std::env::var("PENSIM_SDAMP").ok().and_then(|v| v.parse().ok()).unwrap_or(SDAMP))
+}
+/// redução do passo estável pelo amortecimento: √(1+ξ²) − ξ
+fn sdamp_dt_factor() -> f64 {
+    let xi = sdamp();
+    (1.0 + xi * xi).sqrt() - xi
 }
 fn log_erosion() -> bool {
     static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -696,7 +708,28 @@ impl Fem {
             st.lc = lc;
             // --- forças internas: f_i = −V σ·B_i
             let ptot = st.p + st.q;
-            let sig = [st.s[0] - ptot, st.s[1] - ptot, st.s[2] - ptot, st.s[3], st.s[4], st.s[5]];
+            let mut sig = [st.s[0] - ptot, st.s[1] - ptot, st.s[2] - ptot, st.s[3], st.s[4], st.s[5]];
+            // amortecimento proporcional à rigidez (fração ξ do crítico na maior frequência do
+            // elemento, ω ≈ 2c/lc): tira a vibração de alta frequência sem mexer no movimento
+            // global; a energia dissipada vira calor (energia interna)
+            let xi = sdamp();
+            if xi > 0.0 && !init {
+                let beta = xi * lc / st.c.max(1e-9);
+                let lam = m.bulk() - 2.0 / 3.0 * m.g;
+                let tr = d[0] + d[1] + d[2];
+                let sv = [
+                    beta * (lam * tr + 2.0 * m.g * d[0]),
+                    beta * (lam * tr + 2.0 * m.g * d[1]),
+                    beta * (lam * tr + 2.0 * m.g * d[2]),
+                    beta * 2.0 * m.g * d[3],
+                    beta * 2.0 * m.g * d[4],
+                    beta * 2.0 * m.g * d[5],
+                ];
+                for k in 0..6 {
+                    sig[k] += sv[k];
+                }
+                st.e_int += (sv[0] * d[0] + sv[1] * d[1] + sv[2] * d[2] + 2.0 * (sv[3] * d[3] + sv[4] * d[4] + sv[5] * d[5])) * vol * dt;
+            }
             for k in 0..8 {
                 let bk = b[k];
                 fe[k] = [
@@ -734,7 +767,7 @@ impl Fem {
                     }
                 }
             }
-            (st.e_int, st.e_hg, st.sms * st.lc / st.c.max(1e-9))
+            (st.e_int, st.e_hg, st.sms * st.lc / st.c.max(1e-9) * sdamp_dt_factor())
         })
         .reduce(|| (0.0, 0.0, f64::INFINITY), |a, b| (a.0 + b.0, a.1 + b.1, if a.2.is_nan() || b.2.is_nan() { f64::NAN } else { a.2.min(b.2) }))
     }

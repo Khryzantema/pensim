@@ -1,5 +1,5 @@
 mod app;
-mod draw;
+pub mod draw;
 mod mesh;
 mod pack;
 #[cfg(target_os = "android")]

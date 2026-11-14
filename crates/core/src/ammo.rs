@@ -241,7 +241,10 @@ fn apcbc_de(d: f64, l: f64, he_g: f64) -> Built {
     shell(Shell { d, l, ws_len: 1.45, ws_mat: MILD, cap: Some((1.0, 0.22, 1.45, 1.95)), nose_tip: 1.2, nose_len: 1.0, nose_flat: 0.0, he_g, he_r: 0.12, bt: (0.35, 0.44), body: AP })
 }
 fn s_pzgr39_42() -> Built {
-    apcbc_de(75.0, 290.0, 28.0)
+    // capuz e nariz do corpo ~6 cm (0,8 calibre) mais para trás que na receita geral, sob um
+    // para-brisa mais longo (correção do dono, comparando com o corte da munição real)
+    let k = 0.8;
+    shell(Shell { d: 75.0, l: 290.0, ws_len: 1.45 + k, ws_mat: MILD, cap: Some((1.0 + k, 0.22, 1.45 + k, 1.95 + k)), nose_tip: 1.2 + k, nose_len: 1.0, nose_flat: 0.0, he_g: 28.0, he_r: 0.12, bt: (0.35, 0.44), body: AP })
 }
 fn s_pzgr39_43() -> Built {
     apcbc_de(88.0, 308.0, 59.0)

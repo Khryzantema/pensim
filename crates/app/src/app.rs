@@ -451,6 +451,16 @@ impl PenSim {
                 me.load_ammo(k, 1.0);
             }
         }
+        // gancho de teste: PENSIM_PDES=arquivo abre um projétil desenhado (como "Meus projéteis salvos")
+        if let Some(d) = std::env::var("PENSIM_PDES").ok().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| Drawing::from_text(&t)) {
+            if d.velocity > 0.0 {
+                me.cfg.velocity = d.velocity;
+            }
+            me.pdraw = Some(d);
+            me.ped = DrawEditor::new(Paint::Mat(LIBRARY[11].clone()), 0.5);
+            me.ammo_scale = 1.0;
+            me.sync_drawings();
+        }
         if std::env::var("PENSIM_DRAW").is_ok() {
             // desenho de exemplo (captura de tela): bala com camisa e núcleo
             let mut d = Drawing::new("Projétil desenhado", 0.0);

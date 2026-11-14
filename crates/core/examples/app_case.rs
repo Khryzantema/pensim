@@ -10,6 +10,8 @@ fn main() {
     let d = c.design.projectile.max_radius() * 2.0;
     let f = (env("NODES", 12.0) * c.dx / d).clamp(0.004, 6.0);
     c.duration = env("DUR", 150.0) * 1e-6 * f;
+    c.obliquity_deg = env("A", 0.0);
+    let np = c.design.n_proj_parts() as u8;
     for l in c.design.layers.iter_mut() {
         adjust_rha(&mut l.material, l.thickness);
     }
@@ -34,7 +36,17 @@ fn main() {
             let live = sim.fem.mesh.hex.iter().enumerate().filter(|(e, h)| h.contains(&(im as u32)) && sim.fem.is_alive(*e)).count();
             let tot = sim.fem.mesh.hex.iter().filter(|h| h.contains(&(im as u32))).count();
             let nz = (0..sim.fem.n_nodes()).filter(|&i| sim.fem.node_mass(i) <= 0.0).count();
-            eprintln!("      nó {im}: {live}/{tot} elementos vivos; incorporados até agora: {nz}");
+            let _ = (live, tot, nz);
+            let mut tp = vec![false; sim.fem.n_nodes()];
+            for (e, h) in sim.fem.mesh.hex.iter().enumerate() {
+                if sim.fem.mesh.part[e] >= np {
+                    for &k in h {
+                        tp[k as usize] = true;
+                    }
+                }
+            }
+            let ke_t: f64 = (0..sim.fem.n_nodes()).filter(|&i| tp[i]).map(|i| { let v = sim.fem.v[i]; 0.5 * sim.fem.node_mass(i) * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) }).sum();
+            eprintln!("      KE do alvo {:.1} J", ke_t);
             eprintln!("t={:6.1} µs  vmax {:10.0} nó {:6} massa {:.2e}  erodidos {}  energia {:.2}%  passo {:.2e}  ({:.0} s)", tm, vm, im, sim.fem.node_mass(im), sim.fem.n_eroded, o.energy_error_pct, sim.dt(), t.elapsed().as_secs_f64());
         }
     }
