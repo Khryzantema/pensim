@@ -205,6 +205,8 @@ pub struct Fem {
     face_nb: Vec<[u32; 6]>,
     pub alive: Vec<bool>,
     surf: Vec<contact::SurfFace>,
+    /// nó (partícula) incorporado ao material: face e pesos que ele acompanha
+    ride: Vec<Option<([u32; 4], [f64; 4])>>,
     /// limiar absoluto do passo do elemento para erosão por distorção (None = relativo)
     eros_abs: Option<f64>,
     cnodes: Vec<u32>,
@@ -295,6 +297,7 @@ impl Fem {
             face_nb,
             alive: vec![true; ne],
             surf: vec![],
+            ride: vec![None; n],
             eros_abs: None,
             cnodes: vec![],
             surf_dirty: true,
@@ -419,6 +422,9 @@ impl Fem {
         {
             let (f, m) = (&self.f, &self.mass);
             self.v.par_iter_mut().enumerate().for_each(|(i, v)| {
+                if m[i] <= 0.0 {
+                    return; // nó incorporado (acompanha a face, ver `ride`)
+                }
                 let inv = 1.0 / m[i];
                 for a in 0..3 {
                     v[a] += f[i][a] * inv * dt;
@@ -465,6 +471,16 @@ impl Fem {
                     x[a] += v[a] * dt;
                 }
             });
+        }
+        // nós incorporados acompanham a face em que entraram
+        if self.ride.iter().any(|r| r.is_some()) {
+            let (x, v) = (&mut self.x, &mut self.v);
+            for (i, r) in self.ride.iter().enumerate() {
+                if let Some((fnodes, w)) = r {
+                    x[i] = [0, 1, 2].map(|a| (0..4).map(|k| w[k] * x[fnodes[k] as usize][a]).sum::<f64>());
+                    v[i] = [0, 1, 2].map(|a| (0..4).map(|k| w[k] * v[fnodes[k] as usize][a]).sum::<f64>());
+                }
+            }
         }
         prof_add(8, ta);
         // 3. elementos: taxa de deformação com v n+½ e geometria n+1 → tensão n+1 → forças n+1
@@ -755,7 +771,7 @@ impl Fem {
             if !part_contact {
                 break;
             }
-            if !flag[i] {
+            if !flag[i] && self.ride[i].is_none() {
                 let live = self.adj[self.adj_ptr[i] as usize..self.adj_ptr[i + 1] as usize].iter().any(|&a| self.alive[(a / 8) as usize]);
                 if !live {
                     flag[i] = true;
@@ -802,6 +818,40 @@ impl Fem {
         for h in &hits {
             self.c_offset[h.node as usize] = h.offset;
         }
+        // partículas enterradas: incorporadas aos nós da face (choque inelástico; a energia
+        // cinética perdida vai para a conta do contato). Daí em diante o nó acompanha a face.
+        let mut absorbed_any = false;
+        for h in hits.iter().filter(|h| h.absorb) {
+            let p = h.node as usize;
+            if self.ride[p].is_some() {
+                continue;
+            }
+            let mp = self.mass[p];
+            let vp = self.v[p];
+            let ke = |m: f64, v: [f64; 3]| 0.5 * m * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            let mut before = ke(mp, vp);
+            let mut after = 0.0;
+            for k in 0..4 {
+                let q = h.fnodes[k] as usize;
+                let dm = h.w[k] * mp;
+                if dm <= 0.0 {
+                    continue;
+                }
+                before += ke(self.mass[q], self.v[q]);
+                let mq = self.mass[q] + dm;
+                self.v[q] = [0, 1, 2].map(|a| (self.mass[q] * self.v[q][a] + dm * vp[a]) / mq);
+                self.mass[q] = mq;
+                after += ke(mq, self.v[q]);
+            }
+            self.energy.contact += before - after;
+            self.mass[p] = 0.0;
+            self.ride[p] = Some((h.fnodes, h.w));
+            absorbed_any = true;
+        }
+        if absorbed_any {
+            self.surf_dirty = true;
+        }
+        let hits: Vec<contact::Hit> = hits.into_iter().filter(|h| !h.absorb).collect();
         self.fc.par_iter_mut().for_each(|f| *f = [0.0; 3]);
         for h in &hits {
             for a in 0..3 {
@@ -825,7 +875,7 @@ impl Fem {
     /// Campos por nó (média dos elementos vivos em volta): von Mises, pressão, def. plástica,
     /// temperatura, dano. Nó sem elemento vivo (partícula) fica com dano 1.
     pub fn node_fields(&self) -> [Vec<f32>; 5] {
-        let (ptr, adj, el) = (&self.adj_ptr, &self.adj, &self.elem);
+        let (ptr, adj, el, ride) = (&self.adj_ptr, &self.adj, &self.elem, &self.ride);
         let r: Vec<[f32; 5]> = (0..self.x.len())
             .into_par_iter()
             .map(|i| {
@@ -847,7 +897,8 @@ impl Fem {
                     n += 1.0;
                 }
                 if n == 0.0 {
-                    [0.0, 0.0, 0.0, t_any as f32, 1.0]
+                    // fragmento solto = dano 1; incorporado ao material = 0,5 (não é desenhado solto)
+                    [0.0, 0.0, 0.0, t_any as f32, if ride[i].is_some() { 0.5 } else { 1.0 }]
                 } else {
                     let mut r = acc.map(|v| (v / n) as f32);
                     // nó ainda preso: dano < 1 mesmo depois de gravado em 8 bits nos quadros (o app

@@ -41,6 +41,8 @@ pub struct Hit {
     pub f: [f64; 3],
     /// penetração tratada como inicial (não gera força); mantida no passo seguinte
     pub offset: f64,
+    /// partícula enterrada no material: incorporar à face (massa e quantidade de movimento)
+    pub absorb: bool,
 }
 
 pub struct ContactInput<'a> {
@@ -233,6 +235,11 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
             }
             let (pen, fi, w) = best?;
             let f = &faces[fi];
+            // partícula enterrada mais de ¼ de elemento (depth = ½ lc): não sai mais sozinha sem
+            // um empurrão violento — vira parte do material em que entrou
+            if particle && pen > 0.5 * f.depth {
+                return Some(Hit { node: nd, fnodes: f.n, w, f: [0.0; 3], offset: f64::NAN, absorb: true });
+            }
             // penetração que não pode ter surgido neste passo (face recém-exposta pela erosão,
             // nó que já estava dentro) vira referência: só o que passar dela gera força, e a
             // referência só diminui. Assim o contato não injeta energia.
@@ -291,7 +298,7 @@ pub fn forces(c: &ContactInput) -> Vec<Hit> {
                     }
                 }
             }
-            Some(Hit { node: nd, fnodes: f.n, w, f: force, offset })
+            Some(Hit { node: nd, fnodes: f.n, w, f: force, offset, absorb: false })
         })
         .collect()
 }

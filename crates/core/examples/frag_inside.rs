@@ -92,8 +92,8 @@ fn main() {
         }
         let (mut parts, mut bad_p, mut bad_t, mut maxd) = (0, 0, 0, 0.0f64);
         for k in 0..n {
-            if adj[k].iter().any(|&e| sim.is_alive(e as usize)) {
-                continue;
+            if adj[k].iter().any(|&e| sim.is_alive(e as usize)) || sim.node_mass(k) <= 0.0 {
+                continue; // preso a elemento vivo, ou já incorporado ao material
             }
             parts += 1;
             let p = sim.x[k];
